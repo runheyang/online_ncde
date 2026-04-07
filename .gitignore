@@ -1,0 +1,53 @@
+# 训练产生的大目录
+/checkpoints/
+/outputs/
+/models/
+/third_party/
+/data/
+/logs/
+/wandb/
+/docs/
+
+# 本地配置
+.vscode/
+.cursor/
+.claude/
+CLAUDE.md
+AGENTS.md
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+configs/online_ncde/hard_oversample_train_stats.json
+
+# configs 下的索引 / sidecar / cache 类 pkl 文件统一不纳入版本控制
+configs/**/*.pkl
+
+# -----------------------------------------------------------------------
+# Python 编译产物 & 打包产物
+# -----------------------------------------------------------------------
+
+# CUDA / C++ 扩展编译出的共享库
+*.so
+*.pyd
+*.dll
+
+# Setuptools 构建目录 & 元数据
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# pytest / coverage 缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy / type checker 缓存
+.mypy_cache/
+.pytype/
+
+Auto-claude-code-research-in-sleep
+

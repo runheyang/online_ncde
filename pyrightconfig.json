@@ -1,0 +1,15 @@
+{
+  "extraPaths": [
+    "src",
+    "utils"
+  ],
+  "exclude": [
+    "data/**",
+    "**/checkpoints/**",
+    "**/outputs/**",
+    "**/*.pth",
+    "**/*.pt",
+    "**/*.ckpt"
+  ]
+}
+

@@ -1,0 +1,78 @@
+# Canonical config for fast=alocc2d_mini, slow=alocc3d.
+
+data:
+  logits_format: alocc_dense_topk
+  info_path: configs/online_ncde/canonical_infos_train.pkl
+  val_info_path: configs/online_ncde/canonical_infos_val.pkl
+  hard_stats_path: ""
+  fast_logits_root: data/alocc2d_mini
+  slow_logit_root: data/alocc3d_gt_depth
+  # ALOCC dense top-k 专用参数
+  alocc_fill_value: -5.0
+  alocc_clamp_min: -5.0
+  alocc_topk_k: 3
+  alocc_max_centering: false
+  # 通用参数（模型、dataset、loss 均使用）
+  gt_root: data/nuscenes/gts
+  num_classes: 18
+  free_index: 17
+  pc_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
+  voxel_size: [0.4, 0.4, 0.4]
+  grid_size: [200, 200, 16]
+  gt_mask_key: mask_camera
+  slow_noise_std: 0.0
+  timestamp_scale: 1.0e-6
+  fast_occ_thresh: 0.25
+
+model:
+  feat_dim: 32
+  hidden_dim: 32
+  encoder_in_channels: 18
+  use_fast_residual: true
+  decoder_init_scale: 1.0e-6
+  func_g_inner_dim: 24
+  func_g_body_dilations: [1, 2, 3]
+  func_g_gn_groups: 8
+
+loss:
+  gamma: 2.0
+  lambda_focal: 1.0
+  lambda_lovasz: 1.0
+  class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
+
+train:
+  batch_size: 1
+  num_workers: 16
+  epochs: 20
+  lr: 1.0e-4
+  warmup_epochs: 1
+  warmup_start_lr: 1.0e-5
+  weight_decay: 1.0e-2
+  clip_norm: 5.0
+  log_interval: 10
+  output_dir: outputs/online_ncde/fast_alocc2dmini__slow_alocc3d/train_100x100x16
+  device: cuda
+  use_multistep_supervision: true
+  supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
+  supervision_weights: [0.15, 0.20, 0.25, 0.40]
+  supervision_weight_normalize: true
+
+dataloader:
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+
+eval:
+  batch_size: 1
+  num_workers: 16
+  device: cuda
+  output_dir: outputs/online_ncde/fast_alocc2dmini__slow_alocc3d/eval_100x100x16
+  free_conf_thresh: null
+  log_interval: 20
+  log_multistep_losses: true
+  amp_fp16: false
+
+wandb:
+  entity: runheyang
+  project: neural-ode
+  name: ""

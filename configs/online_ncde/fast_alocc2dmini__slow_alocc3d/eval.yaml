@@ -1,0 +1,2 @@
+# Eval config for fast=alocc2d_mini, slow=alocc3d.
+_base_: configs/online_ncde/fast_alocc2dmini__slow_alocc3d/train.yaml
