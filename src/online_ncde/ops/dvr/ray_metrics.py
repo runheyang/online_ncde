@@ -6,7 +6,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.cpp_extension import load
-from tqdm import tqdm
+import progressbar
 from prettytable import PrettyTable
 
 
@@ -190,7 +190,7 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list):
     lidar_rays = torch.from_numpy(lidar_rays)
 
     pcd_pred_list, pcd_gt_list = [], []
-    for sem_pred, sem_gt, lidar_origins in tqdm(zip(sem_pred_list, sem_gt_list, lidar_origin_list), ncols=50):
+    for sem_pred, sem_gt, lidar_origins in progressbar.progressbar(zip(sem_pred_list, sem_gt_list, lidar_origin_list), max_value=len(sem_pred_list)):
         sem_pred = np.reshape(sem_pred, [200, 200, 16])
         sem_gt = np.reshape(sem_gt, [200, 200, 16])
 

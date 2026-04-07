@@ -36,9 +36,9 @@ sys.path.append(str(ROOT / "src"))
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:
-    tqdm = None
+    progressbar = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,7 +144,7 @@ def main() -> None:
     missing_gt = 0
     evaluated = 0
 
-    iterator = tqdm(valid_infos, desc="Evaluating") if tqdm else valid_infos
+    iterator = progressbar.progressbar(valid_infos, prefix="Evaluating ") if progressbar else valid_infos
     for info in iterator:
         scene_name = info["scene_name"]
 

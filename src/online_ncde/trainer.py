@@ -13,9 +13,9 @@ from online_ncde.metrics import MetricMiouOcc3D, apply_free_threshold
 from online_ncde.utils.checkpoints import save_checkpoint as _save_checkpoint
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 def online_ncde_collate(batch):
@@ -403,7 +403,7 @@ class Trainer:
         total_sup_count: Dict[str, int] = {}
 
         total_steps = len(loader)
-        pbar = tqdm(total=total_steps, desc=f"[train][epoch={epoch}]") if tqdm is not None else None
+        pbar = progressbar.ProgressBar(max_value=total_steps, prefix=f"[train][epoch={epoch}] ").start() if progressbar is not None else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             sup_loss_batch: Dict[str, float] = {}
@@ -447,13 +447,12 @@ class Trainer:
             total_delta += diag.get("delta_scene_abs_mean", 0.0)
 
             if pbar is not None:
-                pbar.set_postfix(loss=f"{(total_loss / step):.4f}")
-                pbar.update(1)
+                pbar.update(step)
             elif step % self.log_interval == 0 or step == total_steps:
                 print(f"[train] epoch={epoch} step={step}/{total_steps} loss={total_loss / step:.4f}")
 
         if pbar is not None:
-            pbar.close()
+            pbar.finish()
 
         denom = max(total_steps, 1)
         metrics = {
@@ -494,7 +493,7 @@ class Trainer:
         )
 
         total_steps = len(loader)
-        pbar = tqdm(total=total_steps, desc="[eval]") if tqdm is not None else None
+        pbar = progressbar.ProgressBar(max_value=total_steps, prefix="[eval] ").start() if progressbar is not None else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             sup_loss_batch: Dict[str, float] = {}
@@ -562,12 +561,12 @@ class Trainer:
                     })
 
             if pbar is not None:
-                pbar.update(1)
+                pbar.update(step)
             elif step % self.log_interval == 0 or step == total_steps:
                 print(f"[eval] step={step}/{total_steps}")
 
         if pbar is not None:
-            pbar.close()
+            pbar.finish()
 
         denom = max(total_steps, 1)
         miou = metric.count_miou(verbose=False)

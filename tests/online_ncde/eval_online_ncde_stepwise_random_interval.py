@@ -52,9 +52,9 @@ from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E40
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +406,7 @@ def main() -> None:
     # --- eval loop ---
     total_steps = len(loader)
     desc = f"[eval stepwise {mode_str}]"
-    iterator = tqdm(loader, total=total_steps, desc=desc) if tqdm is not None else loader
+    iterator = progressbar.progressbar(loader, max_value=total_steps, prefix=desc + " ") if progressbar is not None else loader
     log_interval = int(eval_cfg.get("log_interval", 20))
 
     with torch.inference_mode():
@@ -516,7 +516,7 @@ def main() -> None:
                         keyframe_time_sum += t_ms
                         keyframe_time_count += 1
 
-            if tqdm is None and (batch_idx % log_interval == 0 or batch_idx == total_steps):
+            if progressbar is None and (batch_idx % log_interval == 0 or batch_idx == total_steps):
                 print(f"{desc} batch={batch_idx}/{total_steps}")
 
     # --- report timing ---

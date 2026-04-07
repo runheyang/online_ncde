@@ -20,9 +20,9 @@ from pyquaternion import Quaternion
 from nuscenes import NuScenes  # type: ignore[import-not-found]
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -405,8 +405,8 @@ def main() -> None:
     sup_all_count = 0
 
     iterator = (
-        tqdm(scene_items, desc="[gen canonical infos]")
-        if tqdm is not None
+        progressbar.progressbar(scene_items, prefix="[gen canonical infos] ")
+        if progressbar is not None
         else scene_items
     )
     for scene_token, scene_group in iterator:

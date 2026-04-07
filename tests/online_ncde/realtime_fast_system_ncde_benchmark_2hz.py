@@ -33,9 +33,9 @@ from realtime_ncde_runtime import RealtimeNcdeRuntime  # noqa: E402
 from realtime_opus_step_runtime import OpusRealtimeStepRunner  # noqa: E402
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 @dataclass
@@ -344,16 +344,17 @@ def _run_single_mode_2hz(
         prefetch_factor=prefetch_factor,
         persistent_workers=persistent_workers,
     )
-    progress = tqdm(total=len(prepared_infos), desc=desc) if tqdm is not None else None
+    progress = progressbar.ProgressBar(max_value=len(prepared_infos), prefix=desc + " ").start() if progressbar is not None else None
 
     current_sample_idx: int | None = None
     current_info: dict[str, Any] | None = None
     current_token = ""
     current_sample_failed = False
     final_dense_logits: torch.Tensor | None = None
+    _progress_count = 0  # 已完成样本数（progressbar2 需要绝对值）
 
     def finalize_current_sample() -> None:
-        nonlocal current_sample_idx, current_info, current_token, current_sample_failed, final_dense_logits
+        nonlocal current_sample_idx, current_info, current_token, current_sample_failed, final_dense_logits, _progress_count
         if current_sample_idx is None:
             return
         if collect_results and (not current_sample_failed) and final_dense_logits is not None:
@@ -364,7 +365,8 @@ def _run_single_mode_2hz(
             )
             stats.num_eval_results = len(results_by_token)
         if progress is not None:
-            progress.update(1)
+            _progress_count += 1
+            progress.update(_progress_count)
         current_sample_idx = None
         current_info = None
         current_token = ""
@@ -497,7 +499,7 @@ def _run_single_mode_2hz(
 
     finalize_current_sample()
     if progress is not None:
-        progress.close()
+        progress.finish()
 
     metrics = {}
     if collect_results and results_by_token:

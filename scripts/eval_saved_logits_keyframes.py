@@ -25,9 +25,9 @@ from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -757,7 +757,7 @@ def main() -> None:
         io_workers=io_workers,
         prefetch=prefetch,
     )
-    iterator = tqdm(result_iter, total=len(infos), desc="[eval saved keyframes]") if tqdm is not None else result_iter
+    iterator = progressbar.progressbar(result_iter, max_value=len(infos), prefix="[eval saved keyframes] ") if progressbar is not None else result_iter
     for result in iterator:
         missing_pred_path += int(result.get("missing_pred_path", 0))
         missing_scene_or_token += int(result.get("missing_scene_or_token", 0))

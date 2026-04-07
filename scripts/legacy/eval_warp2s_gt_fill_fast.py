@@ -23,9 +23,9 @@ from online_ncde.data.ego_warp_list import backward_warp_dense_trilinear  # noqa
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -300,8 +300,8 @@ def main() -> None:
         prefetch=prefetch,
     )
     iterator = (
-        tqdm(sample_iter, total=len(infos), desc="[eval warp2s_gt_fill_fast]")
-        if tqdm is not None
+        progressbar.progressbar(sample_iter, max_value=len(infos), prefix="[eval warp2s_gt_fill_fast] ")
+        if progressbar is not None
         else sample_iter
     )
 

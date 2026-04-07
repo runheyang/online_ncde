@@ -18,9 +18,9 @@ from nuscenes import NuScenes  # type: ignore[import-not-found]
 from online_ncde.config import resolve_path  # noqa: E402
 
 try:
-    from tqdm import tqdm
+    import progressbar
 except Exception:  # pragma: no cover
-    tqdm = None
+    progressbar = None
 
 
 SUPERVISION_LABELS = ["t-1.5", "t-1.0", "t-0.5", "t"]
@@ -125,7 +125,7 @@ def main() -> None:
     valid_with_all4 = 0
     valid_with_any = 0
 
-    iterator = tqdm(enumerate(infos), total=len(infos), desc="[gen sup4 sidecar]") if tqdm is not None else enumerate(infos)
+    iterator = progressbar.progressbar(enumerate(infos), max_value=len(infos), prefix="[gen sup4 sidecar] ") if progressbar is not None else enumerate(infos)
     for idx, info in iterator:
         token = str(info.get("token", ""))
         scene_name = str(info.get("scene_name", ""))
