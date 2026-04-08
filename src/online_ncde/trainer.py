@@ -112,8 +112,10 @@ class Trainer:
         rollout_mode: str = "full",
         primary_supervision_label: str = "t-1.0",
         stepwise_max_step_index: int | None = None,
+        is_main: bool = True,
     ) -> None:
         self.model = model
+        self.is_main = is_main
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.device = device
@@ -249,12 +251,13 @@ class Trainer:
         }, per_step_loss, per_step_count
 
     def _forward_stepwise(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        return self.model.forward_stepwise_train(
+        return self.model(
             fast_logits=sample["fast_logits"],
             slow_logits=sample["slow_logits"],
             frame_ego2global=sample["frame_ego2global"],
             frame_timestamps=sample.get("frame_timestamps", None),
             frame_dt=sample.get("frame_dt", None),
+            mode="stepwise_train",
             max_step_index=self.stepwise_max_step_index,
         )
 
@@ -403,7 +406,7 @@ class Trainer:
         total_sup_count: Dict[str, int] = {}
 
         total_steps = len(loader)
-        pbar = progressbar.ProgressBar(max_value=total_steps, prefix=f"[train][epoch={epoch}] ").start() if progressbar is not None else None
+        pbar = progressbar.ProgressBar(max_value=total_steps, prefix=f"[train][epoch={epoch}] ").start() if (progressbar is not None and self.is_main) else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             sup_loss_batch: Dict[str, float] = {}
@@ -448,7 +451,7 @@ class Trainer:
 
             if pbar is not None:
                 pbar.update(step)
-            elif step % self.log_interval == 0 or step == total_steps:
+            elif self.is_main and (step % self.log_interval == 0 or step == total_steps):
                 print(f"[train] epoch={epoch} step={step}/{total_steps} loss={total_loss / step:.4f}")
 
         if pbar is not None:
@@ -493,7 +496,7 @@ class Trainer:
         )
 
         total_steps = len(loader)
-        pbar = progressbar.ProgressBar(max_value=total_steps, prefix="[eval] ").start() if progressbar is not None else None
+        pbar = progressbar.ProgressBar(max_value=total_steps, prefix="[eval] ").start() if (progressbar is not None and self.is_main) else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             sup_loss_batch: Dict[str, float] = {}
@@ -562,7 +565,7 @@ class Trainer:
 
             if pbar is not None:
                 pbar.update(step)
-            elif step % self.log_interval == 0 or step == total_steps:
+            elif self.is_main and (step % self.log_interval == 0 or step == total_steps):
                 print(f"[eval] step={step}/{total_steps}")
 
         if pbar is not None:
@@ -590,5 +593,6 @@ class Trainer:
         return metrics
 
     def save_checkpoint(self, path: str, epoch: int | None = None) -> None:
-        """保存模型参数及 optimizer 状态。"""
-        _save_checkpoint(path, model=self.model, optimizer=self.optimizer, epoch=epoch)
+        """保存模型参数及 optimizer 状态（自动解包 DDP）。"""
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
+        _save_checkpoint(path, model=raw_model, optimizer=self.optimizer, epoch=epoch)
