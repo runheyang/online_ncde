@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""训练 Online NCDE 200x200x16 全分辨率变体。"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import numbers
+import os
+import random
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import math
+
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "src"))
+sys.path.append(str(ROOT / "utils"))
+
+from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
+from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
+from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
+from online_ncde.losses import build_loss  # noqa: E402
+from online_ncde_200x200x16 import OnlineNcdeAligner200  # noqa: E402
+from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
+from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
+from online_ncde.utils.reproducibility import set_seed  # noqa: E402
+
+try:
+    import wandb
+except Exception:  # pragma: no cover
+    wandb = None
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=str(ROOT / "configs/online_ncde_200x200x16/fast_opusv1t__slow_opusv2l/train.yaml"),
+        help="配置文件路径",
+    )
+    parser.add_argument("--resume", default="", help="恢复训练权重")
+    parser.add_argument("--train-limit", type=int, default=0, help="训练样本上限（0=全量）")
+    parser.add_argument("--eval-every", type=int, default=1, help="每隔多少 epoch 评估一次")
+    parser.add_argument(
+        "--val-scene-count",
+        type=int,
+        default=40,
+        help="验证集使用的 scene 数量（按 seed=0 打乱后取前 N）",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="随机种子")
+    parser.add_argument("--wandb", action="store_true", help="启用 wandb")
+    parser.add_argument("--cosine-annealing", action="store_true", help="启用余弦退火学习率调度")
+    parser.add_argument("--min-lr", type=float, default=1.0e-5, help="余弦退火最低学习率")
+    return parser.parse_args()
+
+
+def build_subset(dataset, limit: int):
+    if limit <= 0:
+        return dataset
+    return Subset(dataset, list(range(min(limit, len(dataset)))))
+
+
+def build_scheduler(optimizer, train_cfg: dict, args):
+    """构建学习率调度器（线性 warmup + 可选余弦退火）。"""
+    total_epochs = int(train_cfg["epochs"])
+    warmup_epochs = int(train_cfg.get("warmup_epochs", 1))
+    base_lr = float(train_cfg["lr"])
+    use_cosine = args.cosine_annealing
+
+    if warmup_epochs == 0 and not use_cosine:
+        return None
+
+    warmup_start_lr = float(train_cfg.get("warmup_start_lr", 1e-5))
+    start_factor = warmup_start_lr / base_lr
+    min_factor = args.min_lr / base_lr
+
+    def lr_lambda(epoch: int) -> float:
+        if epoch < warmup_epochs:
+            return start_factor + (1.0 - start_factor) * epoch / max(warmup_epochs, 1)
+        if not use_cosine:
+            return 1.0
+        progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
+        return min_factor + (1.0 - min_factor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def build_dataset(
+    info_path: str,
+    data_cfg: dict,
+    root_path: str,
+    fast_logits_root: str,
+    slow_logit_root: str,
+    supervision_sidecar_path: str | None = None,
+    logits_loader=None,
+) -> Occ3DOnlineNcdeDataset:
+    """根据 data_cfg 构造 Occ3DOnlineNcdeDataset。"""
+    return Occ3DOnlineNcdeDataset(
+        info_path=info_path,
+        root_path=root_path,
+        fast_logits_root=fast_logits_root,
+        slow_logit_root=slow_logit_root,
+        gt_root=data_cfg["gt_root"],
+        num_classes=data_cfg["num_classes"],
+        free_index=data_cfg["free_index"],
+        grid_size=tuple(data_cfg["grid_size"]),
+        gt_mask_key=data_cfg["gt_mask_key"],
+        slow_noise_std=data_cfg.get("slow_noise_std", 0.0),
+        topk_other_fill_value=data_cfg.get("topk_other_fill_value", -5.0),
+        topk_free_fill_value=data_cfg.get("topk_free_fill_value", 5.0),
+        supervision_sidecar_path=supervision_sidecar_path,
+        fast_logits_variant=data_cfg.get("fast_logits_variant", "topk"),
+        slow_logit_variant=data_cfg.get("slow_logit_variant", "topk"),
+        full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
+        full_topk_k=data_cfg.get("full_topk_k", 3),
+        logits_loader=logits_loader,
+    )
+
+
+def to_float(value):
+    """将标量安全转换为 Python float。"""
+    if isinstance(value, numbers.Real):
+        return float(value)
+    return None
+
+
+def _cleanup_gpu_cache():
+    """强制回收 Python 垃圾并释放 CUDA 缓存。
+    调用前须确保 DataLoader 引用已被 del 掉。
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def setup_ddp_early() -> tuple[int, bool]:
+    """早期阶段：仅获取 local_rank 并设置 CUDA 设备，不初始化进程组。
+    返回 (local_rank, use_ddp)。
+    """
+    if "LOCAL_RANK" not in os.environ:
+        return 0, False
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank, True
+
+
+def setup_ddp_init(local_rank: int) -> tuple[int, int, int]:
+    """初始化 DDP 进程组。须在模型创建并 warmup 之后调用。
+
+    默认使用 gloo 后端：Blackwell GPU + NCCL 2.26 存在兼容性问题
+    （Conv3d 初始化产生的异步 CUDA error 被 NCCL watchdog 误判为致命错误），
+    gloo 通过共享内存同步梯度，同节点双卡性能损失很小。
+    如需切换后端可设置 DDP_BACKEND=nccl 环境变量。
+    """
+    if "LOCAL_RANK" not in os.environ:
+        return 0, local_rank, 1
+    backend = os.environ.get("DDP_BACKEND", "gloo")
+    dist.init_process_group(backend=backend)
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    return rank, local_rank, world_size
+
+
+def cleanup_ddp() -> None:
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def main() -> None:
+    args = parse_args()
+    local_rank, use_ddp = setup_ddp_early()
+
+    cfg = load_config_with_base(args.config)
+    set_seed(args.seed + local_rank)
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
+    root_path = cfg["root_path"]
+    data_cfg = cfg["data"]
+    model_cfg = cfg["model"]
+    loss_cfg = cfg["loss"]
+    train_cfg = cfg["train"]
+    eval_cfg = cfg.get("eval", {})
+    loader_cfg = cfg.get("dataloader", {})
+    wandb_cfg = cfg.get("wandb", {})
+    fast_logits_root = data_cfg.get("fast_logits_root", data_cfg.get("logits_root", ""))
+    slow_logit_root = data_cfg.get("slow_logit_root", "")
+    if not fast_logits_root or not slow_logit_root:
+        raise KeyError("data.fast_logits_root 和 data.slow_logit_root 为必填项。")
+    train_sidecar_path = data_cfg.get("train_supervision_sidecar_path", "")
+    val_sidecar_path = data_cfg.get("val_supervision_sidecar_path", "")
+    logits_loader = build_logits_loader(data_cfg, root_path)
+
+    train_dataset = build_dataset(
+        info_path=data_cfg["info_path"],
+        data_cfg=data_cfg,
+        root_path=root_path,
+        fast_logits_root=fast_logits_root,
+        slow_logit_root=slow_logit_root,
+        supervision_sidecar_path=train_sidecar_path if train_sidecar_path else None,
+        logits_loader=logits_loader,
+    )
+    train_dataset = build_subset(train_dataset, args.train_limit)
+
+    num_workers = int(train_cfg["num_workers"])
+
+    # --- 构建 val dataset 和 dataloader 参数 ---
+    val_dataset = None
+    val_loader_kwargs = None
+    val_info_path = data_cfg.get("val_info_path", "")
+    if val_info_path:
+        val_dataset = build_dataset(
+            info_path=val_info_path,
+            data_cfg=data_cfg,
+            root_path=root_path,
+            fast_logits_root=fast_logits_root,
+            slow_logit_root=slow_logit_root,
+            supervision_sidecar_path=val_sidecar_path if val_sidecar_path else None,
+            logits_loader=logits_loader,
+        )
+        scene_names = [info.get("scene_name", "") for info in val_dataset.infos]
+        unique_scenes = sorted({name for name in scene_names if name})
+        if not unique_scenes:
+            raise ValueError("未找到有效 scene_name，无法按 scene 划分验证集")
+        rng = random.Random(0)
+        rng.shuffle(unique_scenes)
+        val_scene_count = min(args.val_scene_count, len(unique_scenes))
+        val_scene_set = set(unique_scenes[:val_scene_count])
+        val_indices = [i for i, name in enumerate(scene_names) if name in val_scene_set]
+        if not val_indices:
+            raise ValueError("验证集 scene 为空，请检查 val_scene_count 或数据")
+        val_dataset = Subset(val_dataset, val_indices)
+
+        val_workers = int(eval_cfg.get("num_workers", num_workers))
+        val_loader_kwargs = dict(
+            batch_size=int(eval_cfg.get("batch_size", 1)),
+            num_workers=val_workers,
+            shuffle=False,
+            collate_fn=online_ncde_collate,
+            pin_memory=loader_cfg.get("pin_memory", False),
+        )
+        if val_workers > 0:
+            val_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
+            val_loader_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+
+    # DDP 模式下按 local_rank 分配 GPU，否则用配置值
+    device = torch.device(f"cuda:{local_rank}" if use_ddp else (train_cfg["device"] if torch.cuda.is_available() else "cpu"))
+    # 使用 200x200x16 全分辨率模型
+    model = OnlineNcdeAligner200(
+        num_classes=data_cfg["num_classes"],
+        feat_dim=model_cfg["feat_dim"],
+        hidden_dim=model_cfg["hidden_dim"],
+        encoder_in_channels=model_cfg["encoder_in_channels"],
+        free_index=data_cfg["free_index"],
+        pc_range=tuple(data_cfg["pc_range"]),
+        voxel_size=tuple(data_cfg["voxel_size"]),
+        fast_occ_thresh=data_cfg.get("fast_occ_thresh", 0.25),
+        decoder_init_scale=model_cfg.get("decoder_init_scale", 1.0e-3),
+        use_fast_residual=bool(model_cfg.get("use_fast_residual", True)),
+        func_g_inner_dim=model_cfg.get("func_g_inner_dim", 32),
+        func_g_body_dilations=tuple(model_cfg.get("func_g_body_dilations", [1, 2, 3])),
+        func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
+        timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
+    ).to(device)
+
+    # 先加载权重
+    start_epoch = 1
+    if args.resume:
+        payload = load_checkpoint(args.resume, model=model, optimizer=None, strict=False)
+        start_epoch = payload.get("epoch", 0) + 1
+
+    # 初始化进程组（默认 gloo，同节点双卡性能损失小）
+    rank, local_rank, world_size = setup_ddp_init(local_rank)
+    is_main = rank == 0
+    if is_main and args.resume:
+        print(f"[resume] 从 epoch={start_epoch} 继续训练")
+
+    # DDP 包装
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank])
+
+    # --- DistributedSampler 需要进程组已初始化，放在 init_ddp 之后 ---
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if use_ddp else None
+    train_loader_kwargs = dict(
+        batch_size=int(train_cfg["batch_size"]),
+        num_workers=num_workers,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        collate_fn=online_ncde_collate,
+        pin_memory=loader_cfg.get("pin_memory", False),
+    )
+    if num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
+        train_loader_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(train_cfg["lr"]),
+        weight_decay=float(train_cfg["weight_decay"]),
+    )
+    # resume 时恢复 optimizer 状态
+    if args.resume:
+        opt_state = torch.load(args.resume, map_location="cpu").get("optimizer", None)
+        if opt_state is not None:
+            optimizer.load_state_dict(opt_state)
+
+    scheduler = build_scheduler(optimizer, train_cfg, args)
+    if scheduler is not None and start_epoch > 1:
+        for _ in range(start_epoch - 1):
+            scheduler.step()
+
+    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"])
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        loss_fn=loss_fn,
+        device=device,
+        num_classes=data_cfg["num_classes"],
+        free_index=data_cfg["free_index"],
+        free_conf_thresh=eval_cfg.get("free_conf_thresh", None),
+        log_interval=train_cfg.get("log_interval", 10),
+        clip_norm=train_cfg.get("clip_norm", 5.0),
+        use_multistep_supervision=bool(train_cfg.get("use_multistep_supervision", False)),
+        supervision_labels=list(train_cfg.get("supervision_labels", ["t-1.5", "t-1.0", "t-0.5", "t"])),
+        supervision_weights=list(train_cfg.get("supervision_weights", [0.15, 0.20, 0.25, 0.40])),
+        supervision_weight_normalize=bool(train_cfg.get("supervision_weight_normalize", True)),
+        log_multistep_losses=bool(eval_cfg.get("log_multistep_losses", True)),
+        rollout_mode=str(train_cfg.get("rollout_mode", "full")),
+        primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
+        stepwise_max_step_index=train_cfg.get("max_step_index", None),
+        is_main=is_main,
+    )
+
+    run = None
+    if args.wandb and is_main:
+        if wandb is None:
+            raise ImportError("未安装 wandb，无法启用日志。")
+        run_name = wandb_cfg.get("name", "") or datetime.now().strftime("%Y%m%d_%H%M%S")
+        run = wandb.init(
+            entity=wandb_cfg.get("entity", "runheyang"),
+            project=wandb_cfg.get("project", "neural-ode"),
+            name=run_name,
+            config={
+                "epochs": int(train_cfg["epochs"]),
+                "batch_size": int(train_cfg["batch_size"]),
+                "lr": float(train_cfg["lr"]),
+                "weight_decay": float(train_cfg["weight_decay"]),
+            },
+        )
+        run.define_metric("epoch")
+        run.define_metric("train/*", step_metric="epoch")
+        run.define_metric("val/*", step_metric="epoch")
+
+    output_dir = resolve_path(root_path, train_cfg["output_dir"])
+    os.makedirs(output_dir, exist_ok=True)
+
+    for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
+        # DDP 模式下每 epoch 设置 sampler epoch，保证数据打乱不同
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
+        # 每 epoch 创建 train_loader，训练完立即释放
+        train_loader = DataLoader(train_dataset, **train_loader_kwargs)
+        train_metrics = trainer.train_one_epoch(
+            train_loader,
+            epoch=epoch,
+        )
+        del train_loader
+        _cleanup_gpu_cache()
+        if scheduler is not None:
+            scheduler.step()
+
+        if is_main:
+            train_sup_parts = []
+            for key, value in train_metrics.items():
+                if key.startswith("loss_t"):
+                    train_sup_parts.append(f"{key}={float(value):.4f}")
+            train_sup_text = (" " + " ".join(train_sup_parts)) if train_sup_parts else ""
+            print(
+                f"[train] epoch={epoch} "
+                f"loss={train_metrics['loss']:.4f} "
+                f"focal={train_metrics['focal']:.4f} "
+                f"aux={train_metrics['aux']:.4f} "
+                f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"{train_sup_text}"
+            )
+            if run is not None:
+                train_payload = {f"train/{k}": float(v) for k, v in train_metrics.items()}
+                train_payload["epoch"] = float(epoch)
+                should_eval = (
+                    val_dataset is not None
+                    and args.eval_every > 0
+                    and epoch % args.eval_every == 0
+                )
+                run.log(train_payload, commit=not should_eval)
+
+        # eval / checkpoint 仅 rank 0 执行，其他 rank 在 barrier 处等待
+        if is_main:
+            if val_dataset is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
+                # 每次 eval 创建 val_loader，评估完立即释放
+                val_loader = DataLoader(val_dataset, **val_loader_kwargs)
+                val_metrics = trainer.evaluate(val_loader)
+                del val_loader
+                _cleanup_gpu_cache()
+                val_sup_parts = []
+                for key, value in val_metrics.items():
+                    if isinstance(key, str) and key.startswith("sup_loss_t"):
+                        val_sup_parts.append(f"{key}={float(value):.4f}")
+                val_sup_text = (" " + " ".join(val_sup_parts)) if val_sup_parts else ""
+                print(
+                    f"[eval] epoch={epoch} "
+                    f"loss={val_metrics['loss']:.4f} "
+                    f"focal={val_metrics['focal']:.4f} "
+                    f"aux={val_metrics['aux']:.4f} "
+                    f"miou={val_metrics['miou']:.4f} "
+                    f"miou_d={val_metrics.get('miou_d', float('nan')):.4f}"
+                    f"{val_sup_text}"
+                )
+                class_names = val_metrics.get("class_names", [])
+                per_class = val_metrics.get("per_class_iou", [])
+                if isinstance(class_names, list) and isinstance(per_class, list):
+                    print(f"===> per class IoU of epoch {epoch}:")
+                    for name, value in zip(class_names, per_class):
+                        print(f"===> {name} - IoU = {round(float(value), 2)}")
+                if run is not None:
+                    payload = {"epoch": float(epoch)}
+                    for key in ("loss", "focal", "aux", "miou", "miou_d"):
+                        value = to_float(val_metrics.get(key, None))
+                        if value is not None:
+                            payload[f"val/{key}"] = value
+                    for key, value in val_metrics.items():
+                        if isinstance(key, str) and key.startswith("sup_loss_t"):
+                            score = to_float(value)
+                            if score is not None:
+                                payload[f"val/{key}"] = score
+                    if isinstance(class_names, list) and isinstance(per_class, list):
+                        for name, value in zip(class_names, per_class):
+                            score = to_float(value)
+                            if score is not None:
+                                payload[f"val/iou_{name}"] = score
+                    run.log(payload, commit=True)
+
+            ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
+            trainer.save_checkpoint(ckpt_path, epoch=epoch)
+            print(f"[ckpt] saved -> {ckpt_path}")
+
+        # 同步所有 rank，等待 rank 0 完成 eval/checkpoint
+        if use_ddp:
+            dist.barrier()
+
+    if run is not None:
+        run.finish()
+    cleanup_ddp()
+
+
+if __name__ == "__main__":
+    main()

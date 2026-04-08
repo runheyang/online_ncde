@@ -1,0 +1,9 @@
+# Online NCDE 200x200x16 全分辨率变体配置。
+# 继承原始 100x100x16 配置，仅覆盖输出目录。
+base_config: ../../online_ncde/fast_alocc2dmini__slow_alocc3d/train.yaml
+
+train:
+  output_dir: outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train_200x200x16
+
+eval:
+  output_dir: outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/eval_200x200x16
