@@ -50,4 +50,5 @@ htmlcov/
 .pytype/
 
 Auto-claude-code-research-in-sleep
+.codex
 
