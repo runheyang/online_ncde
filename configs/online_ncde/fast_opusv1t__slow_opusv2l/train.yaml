@@ -53,7 +53,7 @@ loss:
   # focal 全区域监督：mask 内 ×5.0，mask 外 ×1.0；lovasz 仍只算 mask 内。
   # 设为 null 或删除此行则回退到原始 train with mask 行为。
   focal_mask_weight: 5.0
-  class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 5]
+  class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
 
 train:
   batch_size: 1
