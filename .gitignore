@@ -1,12 +1,12 @@
 # 训练产生的大目录
-/checkpoints/
-/outputs/
-/models/
-/third_party/
-/data/
-/logs/
-/wandb/
-/docs/
+/checkpoints
+/outputs
+/models
+/third_party
+/data
+/logs
+/wandb
+/docs
 
 # 本地配置
 .vscode/

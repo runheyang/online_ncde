@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
@@ -19,7 +19,8 @@ from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
-from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
+from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner          # noqa: E402
+from online_ncde_200x200x16 import OnlineNcdeAligner200                      # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 
@@ -32,12 +33,13 @@ def parse_args() -> argparse.Namespace:
         help="配置文件路径",
     )
     parser.add_argument("--checkpoint", required=True, help="模型权重路径")
+    parser.add_argument("--200x200x16", dest="use_200", action="store_true",
+                        help="使用 200x200x16 分辨率模型结构")
     parser.add_argument("--rayiou", action="store_true", help="额外计算 RayIoU")
-    parser.add_argument(
-        "--sweep-pkl",
-        default="",
-        help="RayIoU 所需的 source sweep pkl 路径（默认从 canonical pkl metadata 推断）",
-    )
+    parser.add_argument("--limit", type=int, default=None,
+                        help="只使用前 N 条样本进行评估")
+    parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
+                        help="sweep pkl 路径（相对于项目根目录）")
     return parser.parse_args()
 
 
@@ -104,10 +106,15 @@ def main() -> None:
     if num_workers > 0:
         kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
         kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+    if args.limit is not None:
+        n = min(args.limit, len(dataset))
+        dataset = Subset(dataset, range(n))
+        print(f"[eval] --limit={args.limit}，使用前 {n} 条样本")
     loader = DataLoader(dataset, **kwargs)
 
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
-    model = OnlineNcdeAligner(
+    ModelClass = OnlineNcdeAligner200 if args.use_200 else OnlineNcdeAligner
+    model = ModelClass(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
         hidden_dim=model_cfg["hidden_dim"],

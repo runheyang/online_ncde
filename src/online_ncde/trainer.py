@@ -14,8 +14,10 @@ from online_ncde.utils.checkpoints import save_checkpoint as _save_checkpoint
 
 try:
     import progressbar
+    from online_ncde.utils.progress import make_pbar
 except Exception:  # pragma: no cover
     progressbar = None
+    make_pbar = None
 
 
 def online_ncde_collate(batch):
@@ -406,7 +408,7 @@ class Trainer:
         total_sup_count: Dict[str, int] = {}
 
         total_steps = len(loader)
-        pbar = progressbar.ProgressBar(max_value=total_steps, prefix=f"[train][epoch={epoch}] ").start() if (progressbar is not None and self.is_main) else None
+        pbar = make_pbar(total_steps, prefix=f"[train][epoch={epoch}] ").start() if (make_pbar is not None and self.is_main) else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             sup_loss_batch: Dict[str, float] = {}
@@ -496,7 +498,7 @@ class Trainer:
         )
 
         total_steps = len(loader)
-        pbar = progressbar.ProgressBar(max_value=total_steps, prefix="[eval] ").start() if (progressbar is not None and self.is_main) else None
+        pbar = make_pbar(total_steps, prefix="[eval] ").start() if (make_pbar is not None and self.is_main) else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             sup_loss_batch: Dict[str, float] = {}
