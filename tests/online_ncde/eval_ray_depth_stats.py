@@ -37,6 +37,7 @@ from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  #
 from online_ncde.losses import resize_labels_and_mask_to_logits  # noqa: E402
 from online_ncde.metrics import OCC3D_DYNAMIC_OBJECT_IDX, apply_free_threshold  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
+from online_ncde_200x200x16 import OnlineNcdeAligner200              # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 
@@ -164,6 +165,50 @@ def raycast_one_sample(
 # 深度误差统计累加器
 # ---------------------------------------------------------------------------
 
+class HitNoHitCounter:
+    """GT hit/no-hit × Pred hit/no-hit 四格表统计。"""
+
+    def __init__(self) -> None:
+        self.gt_hit_pred_hit: int = 0
+        self.gt_hit_pred_nohit: int = 0
+        self.gt_nohit_pred_hit: int = 0
+        self.gt_nohit_pred_nohit: int = 0
+
+    def update(self, gt_hit: np.ndarray, pred_hit: np.ndarray) -> None:
+        self.gt_hit_pred_hit += int((gt_hit & pred_hit).sum())
+        self.gt_hit_pred_nohit += int((gt_hit & ~pred_hit).sum())
+        self.gt_nohit_pred_hit += int((~gt_hit & pred_hit).sum())
+        self.gt_nohit_pred_nohit += int((~gt_hit & ~pred_hit).sum())
+
+    @property
+    def total(self) -> int:
+        return (self.gt_hit_pred_hit + self.gt_hit_pred_nohit
+                + self.gt_nohit_pred_hit + self.gt_nohit_pred_nohit)
+
+    @property
+    def gt_hit_total(self) -> int:
+        return self.gt_hit_pred_hit + self.gt_hit_pred_nohit
+
+    @property
+    def gt_nohit_total(self) -> int:
+        return self.gt_nohit_pred_hit + self.gt_nohit_pred_nohit
+
+    @property
+    def pred_hit_rate(self) -> float:
+        """Pred hit 占全部 ray 的比例。"""
+        return (self.gt_hit_pred_hit + self.gt_nohit_pred_hit) / max(self.total, 1)
+
+    @property
+    def miss_rate(self) -> float:
+        """GT hit 中 pred 未 hit 的比例。"""
+        return self.gt_hit_pred_nohit / max(self.gt_hit_total, 1)
+
+    @property
+    def false_hit_rate(self) -> float:
+        """GT no-hit 中 pred hit 的比例。"""
+        return self.gt_nohit_pred_hit / max(self.gt_nohit_total, 1)
+
+
 class RayDepthStats:
     """累计 per-ray 深度误差统计（含 signed error）。"""
 
@@ -257,6 +302,34 @@ class RayDepthStats:
 # 结果输出
 # ---------------------------------------------------------------------------
 
+def print_hit_nohit_comparison(
+    fast_c: HitNoHitCounter,
+    aligned_c: HitNoHitCounter,
+    region_name: str,
+) -> None:
+    """打印某个区域的 fast vs aligned hit/no-hit 四格表。"""
+    print(f"\n{'=' * 15} Hit/No-Hit: {region_name} {'=' * 15}")
+    header = f"{'Metric':<36} {'Fast Baseline':>14} {'Aligner Output':>14} {'Delta':>14}"
+    print(header)
+    print("-" * len(header))
+
+    def _row(name: str, v_f: float, v_a: float, fmt: str = ".4f") -> None:
+        delta = v_a - v_f
+        print(f"{name:<36} {v_f:>14{fmt}} {v_a:>14{fmt}} {delta:>+14{fmt}}")
+
+    def _row_int(name: str, v_f: int, v_a: int) -> None:
+        print(f"{name:<36} {v_f:>14,} {v_a:>14,} {v_a - v_f:>+14,}")
+
+    _row_int("Total rays", fast_c.total, aligned_c.total)
+    _row_int("GT hit & Pred hit", fast_c.gt_hit_pred_hit, aligned_c.gt_hit_pred_hit)
+    _row_int("GT hit & Pred no-hit", fast_c.gt_hit_pred_nohit, aligned_c.gt_hit_pred_nohit)
+    _row_int("GT no-hit & Pred hit", fast_c.gt_nohit_pred_hit, aligned_c.gt_nohit_pred_hit)
+    _row_int("GT no-hit & Pred no-hit", fast_c.gt_nohit_pred_nohit, aligned_c.gt_nohit_pred_nohit)
+    _row("Pred hit rate", fast_c.pred_hit_rate, aligned_c.pred_hit_rate)
+    _row("Miss rate (GT-hit)", fast_c.miss_rate, aligned_c.miss_rate)
+    _row("False-hit rate (GT-empty)", fast_c.false_hit_rate, aligned_c.false_hit_rate)
+
+
 def print_depth_comparison(
     fast_stats: RayDepthStats,
     aligned_stats: RayDepthStats,
@@ -330,6 +403,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
                         help="sweep pkl 路径（相对于项目根目录）")
+    parser.add_argument("--200x200x16", dest="use_200", action="store_true",
+                        help="使用 200x200x16 分辨率模型结构")
     parser.add_argument("--limit", type=int, default=0)
     return parser.parse_args()
 
@@ -394,7 +469,8 @@ def main() -> None:
 
     # --- 模型 ---
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
-    model = OnlineNcdeAligner(
+    ModelClass = OnlineNcdeAligner200 if args.use_200 else OnlineNcdeAligner
+    model = ModelClass(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
         hidden_dim=model_cfg["hidden_dim"],
@@ -492,6 +568,14 @@ def main() -> None:
     }
     dist_bin_keys = ["d_0_10", "d_10_20", "d_20_40", "d_40_plus"]
 
+    # hit/no-hit 四格表统计
+    hn_regions = ["all", "mask_in", "d_0_10", "d_10_20"]
+    hn_stats: dict[tuple[str, str], HitNoHitCounter] = {
+        (src, region): HitNoHitCounter()
+        for src in ("fast", "aligned")
+        for region in hn_regions
+    }
+
     skipped = 0
     t0 = time.time()
     for i, item in enumerate(predictions):
@@ -511,7 +595,30 @@ def main() -> None:
         rc_fast = raycast_one_sample(fast_vol, lidar_rays, lidar_origins)
         rc_aligned = raycast_one_sample(aligned_vol, lidar_rays, lidar_origins)
 
-        # 只分析 GT 命中非 free 的 ray
+        # --- hit/no-hit 统计（使用全部 ray）---
+        all_gt_hit = rc_gt["class"] != FREE_ID
+        all_gt_coord = rc_gt["coord"]  # (N, 3)
+
+        for src_name, rc_src in [("fast", rc_fast), ("aligned", rc_aligned)]:
+            all_pred_hit = rc_src["class"] != FREE_ID
+
+            # all
+            hn_stats[(src_name, "all")].update(all_gt_hit, all_pred_hit)
+
+            # mask 内
+            if mask_vol is not None:
+                m = mask_vol[all_gt_coord[:, 0], all_gt_coord[:, 1], all_gt_coord[:, 2]].astype(bool)
+                if m.any():
+                    hn_stats[(src_name, "mask_in")].update(all_gt_hit[m], all_pred_hit[m])
+
+            # 距离桶：GT hit 用 gt_dist，否则用 pred_dist
+            ref_dist = np.where(all_gt_hit, rc_gt["dist"], rc_src["dist"])
+            for lo, hi, key in [(0, 10, "d_0_10"), (10, 20, "d_10_20")]:
+                bin_m = (ref_dist >= lo) & (ref_dist < hi)
+                if bin_m.any():
+                    hn_stats[(src_name, key)].update(all_gt_hit[bin_m], all_pred_hit[bin_m])
+
+        # 只分析 GT 命中非 free 的 ray（原有深度统计）
         valid = rc_gt["class"] != FREE_ID
         gt_class = rc_gt["class"][valid]
         gt_dist = rc_gt["dist"][valid]
@@ -590,6 +697,20 @@ def main() -> None:
         if fast_s.total_rays == 0 and aligned_s.total_rays == 0:
             continue
         print_depth_comparison(fast_s, aligned_s, region_display[region])
+
+    # --- hit/no-hit 四格表 ---
+    hn_display = {
+        "all": "全部 ray",
+        "mask_in": "mask 内 ray",
+        "d_0_10": "距离 0-10m",
+        "d_10_20": "距离 10-20m",
+    }
+    for region in hn_regions:
+        fast_c = hn_stats[("fast", region)]
+        aligned_c = hn_stats[("aligned", region)]
+        if fast_c.total == 0 and aligned_c.total == 0:
+            continue
+        print_hit_nohit_comparison(fast_c, aligned_c, hn_display[region])
 
 
 if __name__ == "__main__":
