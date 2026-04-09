@@ -76,7 +76,7 @@ train:
 dataloader:
   pin_memory: true
   prefetch_factor: 2
-  persistent_workers: true
+  persistent_workers: false
 
 eval:
   batch_size: 1
