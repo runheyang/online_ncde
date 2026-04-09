@@ -253,15 +253,18 @@ class Trainer:
         }, per_step_loss, per_step_count
 
     def _forward_stepwise(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        return self.model(
+        # OnlineNcdeAligner200 统一用 mode 参数，原版用独立方法
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        kwargs = dict(
             fast_logits=sample["fast_logits"],
             slow_logits=sample["slow_logits"],
             frame_ego2global=sample["frame_ego2global"],
             frame_timestamps=sample.get("frame_timestamps", None),
             frame_dt=sample.get("frame_dt", None),
-            mode="stepwise_train",
-            max_step_index=self.stepwise_max_step_index,
         )
+        if hasattr(model, "forward_stepwise_train"):
+            return model.forward_stepwise_train(**kwargs, max_step_index=self.stepwise_max_step_index)
+        return self.model(**kwargs, mode="stepwise_train", max_step_index=self.stepwise_max_step_index)
 
     def _select_primary_supervision_batch(
         self,
