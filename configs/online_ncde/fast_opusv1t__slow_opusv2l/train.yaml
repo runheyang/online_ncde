@@ -1,19 +1,28 @@
 # Canonical config for fast=opusv1t, slow=opusv2l.
 
 data:
-  info_path: configs/online_ncde/ncde_align_infos_train.pkl
-  val_info_path: configs/online_ncde/ncde_align_infos_val.pkl
-  train_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_train_sup4_sidecar.pkl
-  val_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_val_sup4_sidecar.pkl
+  # --- 新路径：逐帧 full logits + canonical_infos ---
+  logits_format: opus_sparse_full
+  info_path: configs/online_ncde/canonical_infos_train.pkl
+  val_info_path: configs/online_ncde/canonical_infos_val.pkl
+  fast_logits_root: data/logits_opusv1t_full
+  slow_logit_root: data/logits_opusv2l_full
+  opus_full_topk_k: 3
+  opus_other_fill_value: -5.0
+  opus_free_fill_value: 5.0
+  # --- 旧路径（注释保留，切回时取消注释并删除上方新路径配置） ---
+  # info_path: configs/online_ncde/ncde_align_infos_train.pkl
+  # val_info_path: configs/online_ncde/ncde_align_infos_val.pkl
+  # train_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_train_sup4_sidecar.pkl
+  # val_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_val_sup4_sidecar.pkl
+  # fast_logits_root: data/logits_opusv1t
+  # slow_logit_root: data/logits_opusv2l
+  # fast_logits_variant: topk
+  # slow_logit_variant: topk
+  # full_logits_clamp_min: null
+  # topk_other_fill_value: -5.0
+  # topk_free_fill_value: 5.0
   hard_stats_path: configs/online_ncde/hard_oversample_train_stats.json
-  fast_logits_root: data/logits_opusv1t
-  slow_logit_root: data/logits_opusv2l
-  fast_logits_variant: topk
-  slow_logit_variant: topk
-  # fast_logits_root: data/logits_opusv1t_full
-  # slow_logit_root: data/logits_opusv2l_full
-  # fast_logits_variant: full_topk
-  # slow_logit_variant: full_topk
   gt_root: data/nuscenes/gts
   num_classes: 18
   free_index: 17
@@ -24,10 +33,6 @@ data:
   slow_noise_std: 0.0
   timestamp_scale: 1.0e-6
   fast_occ_thresh: 0.25
-  # Only applied after decoding full logits; null disables it.
-  full_logits_clamp_min: null
-  topk_other_fill_value: -5.0
-  topk_free_fill_value: 5.0
 
 model:
   feat_dim: 32
