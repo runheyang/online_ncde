@@ -170,102 +170,12 @@ class OnlineNcdeLoss(nn.Module):
         }
 
 
-class SoftDiceLoss(nn.Module):
-    """多类加权 Soft Dice Loss，支持逐体素权重。"""
-
-    def __init__(self, num_classes: int, smooth: float = 1.0) -> None:
-        super().__init__()
-        self.num_classes = num_classes
-        self.smooth = smooth
-
-    def forward(
-        self,
-        logits: torch.Tensor,
-        targets: torch.Tensor,
-        pixel_weights: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        probs = F.softmax(logits, dim=1)
-        one_hot = F.one_hot(targets, num_classes=self.num_classes).permute(0, 4, 1, 2, 3).float()
-
-        if pixel_weights is not None:
-            w = pixel_weights.unsqueeze(1)
-        else:
-            w = torch.ones(1, device=logits.device, dtype=logits.dtype)
-
-        # 按类别计算加权 dice
-        intersection = (probs * one_hot * w).sum(dim=(0, 2, 3, 4))
-        cardinality = ((probs + one_hot) * w).sum(dim=(0, 2, 3, 4))
-        dice_per_class = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
-
-        # 只对 present classes 求均值
-        present = one_hot.sum(dim=(0, 2, 3, 4)) > 0
-        if present.any():
-            return 1.0 - dice_per_class[present].mean()
-        return torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-
-
-class OnlineNcdeFocalDiceLoss(nn.Module):
-    """Focal + Dice，全区域监督，mask 内高权重。"""
-
-    def __init__(
-        self,
-        num_classes: int,
-        gamma: float = 2.0,
-        class_weights: list[float] | None = None,
-        lambda_focal: float = 1.0,
-        lambda_dice: float = 1.0,
-        mask_weight: float = 5.0,
-    ) -> None:
-        super().__init__()
-        self.focal = FocalLoss(
-            num_classes=num_classes,
-            gamma=gamma,
-            class_weights=class_weights,
-        )
-        self.dice = SoftDiceLoss(num_classes=num_classes)
-        self.lambda_focal = float(lambda_focal)
-        self.lambda_dice = float(lambda_dice)
-        self.mask_weight = float(mask_weight)
-
-    def forward(
-        self,
-        logits: torch.Tensor,
-        targets: torch.Tensor,
-        mask: torch.Tensor | None,
-    ) -> dict[str, torch.Tensor]:
-        targets, mask = resize_labels_and_mask_to_logits(logits, targets, mask)
-
-        # 构建逐体素权重：mask 内 mask_weight，mask 外 1.0
-        if mask is not None:
-            pixel_weights = torch.where(
-                mask > 0.5,
-                torch.tensor(self.mask_weight, device=logits.device, dtype=logits.dtype),
-                torch.tensor(1.0, device=logits.device, dtype=logits.dtype),
-            )
-        else:
-            pixel_weights = None
-
-        focal = self.focal(logits, targets, pixel_weights=pixel_weights)
-        dice = self.dice(logits, targets, pixel_weights=pixel_weights)
-
-        focal_weighted = self.lambda_focal * focal
-        dice_weighted = self.lambda_dice * dice
-        total = focal_weighted + dice_weighted
-        return {
-            "total": total,
-            "focal": focal_weighted,
-            "aux": dice_weighted,
-            "focal_raw": focal,
-            "aux_raw": dice,
-        }
-
-
 class SegAndRayLoss(nn.Module):
     """seg loss + ray first-hit/depth loss 的组合包装。
 
     - seg loss 照旧接收 (logits, targets, mask)，返回 dict（必含 total/focal/aux）。
     - ray loss 仅在 forward 的 kwargs 里同时给出 ray_origins / gt_dist 时才会计算；
-      否则只跑 seg loss（非多帧路径或 sidecar 缺失的 fallback）。
+      eval 路径刻意不传这两个字段（避免白跑），此时只记录 seg loss。
     - 返回 dict 保持 seg loss 的 key 兼容，额外带 ray_* 字段，便于日志。
     """
 
@@ -321,26 +231,16 @@ class SegAndRayLoss(nn.Module):
 def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
     """根据配置构建 loss 函数。"""
     loss_type = loss_cfg.get("type", "focal_lovasz")
-    if loss_type == "focal_lovasz":
-        seg = OnlineNcdeLoss(
-            num_classes=num_classes,
-            gamma=loss_cfg.get("gamma", 2.0),
-            class_weights=loss_cfg.get("class_weights", None),
-            lambda_focal=loss_cfg.get("lambda_focal", 1.0),
-            lambda_lovasz=loss_cfg.get("lambda_lovasz", 1.0),
-            focal_mask_weight=loss_cfg.get("focal_mask_weight", None),
-        )
-    elif loss_type == "focal_dice":
-        seg = OnlineNcdeFocalDiceLoss(
-            num_classes=num_classes,
-            gamma=loss_cfg.get("gamma", 2.0),
-            class_weights=loss_cfg.get("class_weights", None),
-            lambda_focal=loss_cfg.get("lambda_focal", 1.0),
-            lambda_dice=loss_cfg.get("lambda_dice", 1.0),
-            mask_weight=loss_cfg.get("mask_weight", 5.0),
-        )
-    else:
-        raise ValueError(f"未知 loss type: {loss_type!r}，支持 'focal_lovasz' 或 'focal_dice'")
+    if loss_type != "focal_lovasz":
+        raise ValueError(f"未知 loss type: {loss_type!r}，仅支持 'focal_lovasz'")
+    seg = OnlineNcdeLoss(
+        num_classes=num_classes,
+        gamma=loss_cfg.get("gamma", 2.0),
+        class_weights=loss_cfg.get("class_weights", None),
+        lambda_focal=loss_cfg.get("lambda_focal", 1.0),
+        lambda_lovasz=loss_cfg.get("lambda_lovasz", 1.0),
+        focal_mask_weight=loss_cfg.get("focal_mask_weight", None),
+    )
 
     ray_cfg = loss_cfg.get("ray", None)
     if not ray_cfg:

@@ -69,12 +69,20 @@ def main() -> None:
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     eval_cfg = cfg["eval"]
+    train_cfg = cfg.get("train", {})
     loader_cfg = cfg.get("dataloader", {})
     fast_logits_root = data_cfg.get("fast_logits_root", data_cfg.get("logits_root", ""))
     slow_logit_root = data_cfg.get("slow_logit_root", "")
     if not fast_logits_root or not slow_logit_root:
         raise KeyError("data.fast_logits_root 和 data.slow_logit_root 为必填项。")
     logits_loader = build_logits_loader(data_cfg, cfg["root_path"])
+
+    # val sidecar 不存在时回退到 train sidecar，保证 Trainer 的多帧监督路径能拿到 sup_* 字段
+    val_sidecar_path = (
+        data_cfg.get("val_supervision_sidecar_path")
+        or data_cfg.get("train_supervision_sidecar_path")
+        or None
+    )
 
     dataset = Occ3DOnlineNcdeDataset(
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
@@ -89,11 +97,14 @@ def main() -> None:
         slow_noise_std=0.0,
         topk_other_fill_value=data_cfg.get("topk_other_fill_value", -5.0),
         topk_free_fill_value=data_cfg.get("topk_free_fill_value", 5.0),
+        supervision_sidecar_path=val_sidecar_path,
         fast_logits_variant=data_cfg.get("fast_logits_variant", "topk"),
         slow_logit_variant=data_cfg.get("slow_logit_variant", "topk"),
         full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
         full_topk_k=data_cfg.get("full_topk_k", 3),
         logits_loader=logits_loader,
+        ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
+        ray_sidecar_split="val",
     )
     num_workers = int(eval_cfg.get("num_workers", 4))
     kwargs = dict(
@@ -134,7 +145,12 @@ def main() -> None:
     load_checkpoint(args.checkpoint, model=model, strict=False)
 
     loss_cfg = cfg["loss"]
-    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"])
+    # build_loss 在带 ray_cfg 时需要 pc_range / free_index，保持与 train 脚本一致
+    ray_cfg = loss_cfg.get("ray", None)
+    if ray_cfg is not None:
+        ray_cfg.setdefault("pc_range", list(data_cfg["pc_range"]))
+        ray_cfg.setdefault("free_index", int(data_cfg["free_index"]))
+    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"]).to(device)
     trainer = Trainer(
         model=model,
         optimizer=torch.optim.AdamW(model.parameters(), lr=1.0e-4),
@@ -145,6 +161,13 @@ def main() -> None:
         free_conf_thresh=eval_cfg.get("free_conf_thresh", None),
         log_interval=eval_cfg.get("log_interval", 20),
         clip_norm=1.0,
+        supervision_labels=list(train_cfg.get("supervision_labels", ["t-1.5", "t-1.0", "t-0.5", "t"])),
+        supervision_weights=list(train_cfg.get("supervision_weights", [0.15, 0.20, 0.25, 0.40])),
+        supervision_weight_normalize=bool(train_cfg.get("supervision_weight_normalize", True)),
+        log_multistep_losses=bool(eval_cfg.get("log_multistep_losses", True)),
+        rollout_mode=str(train_cfg.get("rollout_mode", "full")),
+        primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
+        stepwise_max_step_index=train_cfg.get("max_step_index", None),
     )
 
     # 单次推理：mIoU + 可选收集 predictions

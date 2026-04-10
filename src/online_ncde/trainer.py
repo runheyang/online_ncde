@@ -126,7 +126,6 @@ class Trainer:
         free_conf_thresh: float | None = None,
         log_interval: int = 10,
         clip_norm: float = 1.0,
-        use_multistep_supervision: bool = False,
         supervision_labels: list[str] | None = None,
         supervision_weights: list[float] | None = None,
         supervision_weight_normalize: bool = True,
@@ -147,7 +146,6 @@ class Trainer:
         self.log_interval = log_interval
         self.clip_norm = clip_norm
         self.base_lrs = [group["lr"] for group in optimizer.param_groups]
-        self.use_multistep_supervision = bool(use_multistep_supervision)
         self.supervision_labels = supervision_labels or ["t-1.5", "t-1.0", "t-0.5", "t"]
         if supervision_weights is None:
             supervision_weights = [1.0 / len(self.supervision_labels)] * len(self.supervision_labels)
@@ -180,6 +178,22 @@ class Trainer:
             None if resolved_step_max is None else int(resolved_step_max)
         )
 
+    @staticmethod
+    def _require_multistep_supervision(sample: Dict[str, Any], context: str) -> None:
+        """多帧监督现在是唯一路径，缺字段时立刻报错，提示去补 sidecar。"""
+        missing = [
+            k for k in ("sup_labels", "sup_masks", "sup_step_indices", "sup_valid_mask")
+            if sample.get(k, None) is None
+        ]
+        if not missing:
+            return
+        raise RuntimeError(
+            f"[{context}] sample 缺少多帧监督字段 {missing}；"
+            "Trainer 现已强制走多帧路径，请在 data 配置里补上 "
+            "train_supervision_sidecar_path / val_supervision_sidecar_path，"
+            "或使用 canonical 带 sup_* 的 info pkl。"
+        )
+
     def _pack_diag(self, diag_list: list[dict[str, torch.Tensor]]) -> Dict[str, float]:
         if not diag_list:
             return {}
@@ -190,14 +204,6 @@ class Trainer:
             if values:
                 merged[key] = sum(values) / len(values)
         return merged
-
-    def _has_multistep_fields(self, sample: Dict[str, Any]) -> bool:
-        return (
-            sample.get("sup_labels", None) is not None
-            and sample.get("sup_masks", None) is not None
-            and sample.get("sup_step_indices", None) is not None
-            and sample.get("sup_valid_mask", None) is not None
-        )
 
     def _compute_multistep_loss(
         self,
@@ -412,6 +418,12 @@ class Trainer:
         torch.Tensor,
         torch.Tensor,
     ]:
+        # eval 带 log_multistep_losses=False 时可以不依赖 sup_*，其它情况都必须有。
+        if not for_eval or self.log_multistep_losses:
+            self._require_multistep_supervision(
+                sample, context="eval" if for_eval else "train"
+            )
+
         outputs_step = self._forward_stepwise(sample)
         step_logits = cast(torch.Tensor, outputs_step["step_logits"])
         step_indices = cast(torch.Tensor, outputs_step["step_indices"])
@@ -500,26 +512,9 @@ class Trainer:
         pbar = make_pbar(total_steps, prefix=f"[train][epoch={epoch}] ").start() if (make_pbar is not None and self.is_main) else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
-            sup_loss_batch: Dict[str, float] = {}
-            sup_count_batch: Dict[str, int] = {}
-            if self.use_multistep_supervision and self._has_multistep_fields(sample):
-                outputs, loss_dict, sup_loss_batch, sup_count_batch, _, _, _ = (
-                    self._run_stepwise_and_compute_loss(sample=sample, for_eval=False)
-                )
-            else:
-                outputs = self.model(
-                    fast_logits=sample["fast_logits"],
-                    slow_logits=sample["slow_logits"],
-                    frame_ego2global=sample["frame_ego2global"],
-                    frame_timestamps=sample.get("frame_timestamps", None),
-                    frame_dt=sample.get("frame_dt", None),
-                )
-                logits = cast(torch.Tensor, outputs["aligned"])
-                loss_dict = self.loss_fn(
-                    logits,
-                    sample["gt_labels"],
-                    sample["gt_mask"],
-                )
+            outputs, loss_dict, sup_loss_batch, sup_count_batch, _, _, _ = (
+                self._run_stepwise_and_compute_loss(sample=sample, for_eval=False)
+            )
             loss = cast(torch.Tensor, loss_dict["total"])
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -603,28 +598,9 @@ class Trainer:
         pbar = make_pbar(total_steps, prefix="[eval] ").start() if (make_pbar is not None and self.is_main) else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
-            sup_loss_batch: Dict[str, float] = {}
-            sup_count_batch: Dict[str, int] = {}
-            if self.use_multistep_supervision and self._has_multistep_fields(sample):
-                _, loss_dict, sup_loss_batch, sup_count_batch, logits, eval_labels, eval_masks = (
-                    self._run_stepwise_and_compute_loss(sample=sample, for_eval=True)
-                )
-            else:
-                eval_labels = cast(torch.Tensor, sample["gt_labels"])
-                eval_masks = cast(torch.Tensor, sample["gt_mask"])
-                outputs = self.model(
-                    fast_logits=sample["fast_logits"],
-                    slow_logits=sample["slow_logits"],
-                    frame_ego2global=sample["frame_ego2global"],
-                    frame_timestamps=sample.get("frame_timestamps", None),
-                    frame_dt=sample.get("frame_dt", None),
-                )
-                logits = cast(torch.Tensor, outputs["aligned"])
-                loss_dict = self.loss_fn(
-                    logits,
-                    eval_labels,
-                    eval_masks,
-                )
+            _, loss_dict, sup_loss_batch, sup_count_batch, logits, eval_labels, eval_masks = (
+                self._run_stepwise_and_compute_loss(sample=sample, for_eval=True)
+            )
             total_loss += float(loss_dict["total"].item())
             total_focal += float(loss_dict["focal"].item())
             total_aux += float(loss_dict["aux"].item())

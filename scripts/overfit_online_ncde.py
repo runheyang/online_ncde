@@ -153,6 +153,7 @@ def main() -> None:
         ray_cfg.setdefault("free_index", int(data_cfg["free_index"]))
     loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"]).to(device)
     # 复用 Trainer 内的多帧监督 loss 组合逻辑，确保与正式训练一致。
+    eval_cfg = cfg.get("eval", {})
     loss_aggregator = Trainer(
         model=model,
         optimizer=optimizer,
@@ -163,11 +164,13 @@ def main() -> None:
         free_conf_thresh=train_cfg.get("free_conf_thresh", None),
         log_interval=int(train_cfg.get("log_interval", 10)),
         clip_norm=float(train_cfg.get("clip_norm", 5.0)),
-        use_multistep_supervision=bool(train_cfg.get("use_multistep_supervision", False)),
         supervision_labels=list(train_cfg.get("supervision_labels", ["t-1.5", "t-1.0", "t-0.5", "t"])),
         supervision_weights=list(train_cfg.get("supervision_weights", [0.15, 0.20, 0.25, 0.40])),
         supervision_weight_normalize=bool(train_cfg.get("supervision_weight_normalize", True)),
-        log_multistep_losses=bool(cfg.get("eval", {}).get("log_multistep_losses", True)),
+        log_multistep_losses=bool(eval_cfg.get("log_multistep_losses", True)),
+        rollout_mode=str(train_cfg.get("rollout_mode", "full")),
+        primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
+        stepwise_max_step_index=train_cfg.get("max_step_index", None),
     )
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -189,44 +192,14 @@ def main() -> None:
         for sample in loader:
             sample = move_to_device(sample, device)
 
-            sup_loss_batch: dict[str, float] = {}
-            sup_count_batch: dict[str, int] = {}
-            if (
-                loss_aggregator.use_multistep_supervision
-                and loss_aggregator._has_multistep_fields(sample)  # noqa: SLF001
-            ):
-                outputs_step = model.forward_stepwise_train(
-                    fast_logits=sample["fast_logits"],
-                    slow_logits=sample["slow_logits"],
-                    frame_ego2global=sample["frame_ego2global"],
-                    frame_timestamps=sample.get("frame_timestamps", None),
-                    frame_dt=sample.get("frame_dt", None),
+            # 直接复用 Trainer 的多帧 rollout + loss helper，确保 rollout_mode /
+            # max_step_index / ray 监督口径与正式训练完全一致。
+            _, loss_dict, sup_loss_batch, sup_count_batch, logits, _, _ = (
+                loss_aggregator._run_stepwise_and_compute_loss(  # noqa: SLF001
+                    sample=sample,
+                    for_eval=False,
                 )
-                step_logits = outputs_step["step_logits"]
-                step_indices = outputs_step["step_indices"]
-                loss_dict, sup_loss_batch, sup_count_batch = loss_aggregator._compute_multistep_loss(  # noqa: SLF001
-                    step_logits=step_logits,
-                    step_indices=step_indices,
-                    sup_labels=sample["sup_labels"],
-                    sup_masks=sample["sup_masks"],
-                    sup_step_indices=sample["sup_step_indices"],
-                    sup_valid_mask=sample["sup_valid_mask"],
-                    ray_gt_dist=sample.get("ray_gt_dist", None),
-                    ray_origin=sample.get("ray_origin", None),
-                    ray_sup_valid=sample.get("ray_sup_valid", None),
-                )
-                # overfit 指标仍按当前帧计算，与原脚本一致。
-                logits = step_logits[:, -1] if step_logits.shape[1] > 0 else sample["fast_logits"][:, -1]
-            else:
-                outputs = model(
-                    fast_logits=sample["fast_logits"],
-                    slow_logits=sample["slow_logits"],
-                    frame_ego2global=sample["frame_ego2global"],
-                    frame_timestamps=sample.get("frame_timestamps", None),
-                    frame_dt=sample.get("frame_dt", None),
-                )
-                logits = outputs["aligned"]
-                loss_dict = loss_fn(logits, sample["gt_labels"], sample["gt_mask"])
+            )
             loss = loss_dict["total"]
 
             optimizer.zero_grad(set_to_none=True)
@@ -237,7 +210,6 @@ def main() -> None:
             total_loss += float(loss.item())
             total_focal += float(loss_dict["focal"].item())
             total_aux += float(loss_dict["aux"].item())
-            # ray 指标仅在多帧路径上有效；单帧 fallback 不会产出 ray_total
             if "ray_total" in loss_dict:
                 sup_count = int(loss_dict.get("ray_sup_count", torch.tensor(0)).item())
                 if sup_count > 0:
@@ -253,8 +225,6 @@ def main() -> None:
                 total_sup_count[key] = total_sup_count.get(key, 0) + int(cnt)
             step_count += 1
 
-            # remove support stats extraction
-            
             gt_labels_rs, gt_mask_rs = resize_labels_and_mask_to_logits(
                 logits, sample["gt_labels"], sample["gt_mask"]
             )

@@ -99,7 +99,6 @@ train:
   clip_norm: 5.0
   log_interval: 10
   device: cuda
-  use_multistep_supervision: true
   supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
   supervision_weights: [0.15, 0.20, 0.25, 0.40]
   # supervision_weights: [0.0, 0.0, 0.0, 1.0]

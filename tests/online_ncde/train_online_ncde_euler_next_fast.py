@@ -599,7 +599,6 @@ def main() -> None:
         free_conf_thresh=eval_cfg.get("free_conf_thresh", None),
         log_interval=train_cfg.get("log_interval", 10),
         clip_norm=train_cfg.get("clip_norm", 5.0),
-        use_multistep_supervision=bool(train_cfg.get("use_multistep_supervision", False)),
         supervision_labels=list(train_cfg.get("supervision_labels", ["t-1.5", "t-1.0", "t-0.5", "t"])),
         supervision_weights=list(train_cfg.get("supervision_weights", [0.15, 0.20, 0.25, 0.40])),
         supervision_weight_normalize=bool(train_cfg.get("supervision_weight_normalize", True)),
