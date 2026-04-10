@@ -19,8 +19,6 @@ ROOT = Path(__file__).resolve().parents[2]
 THIS_DIR = Path(__file__).resolve().parent
 if str(ROOT / "src") not in sys.path:
     sys.path.append(str(ROOT / "src"))
-if str(ROOT / "utils") not in sys.path:
-    sys.path.append(str(ROOT / "utils"))
 if str(THIS_DIR) not in sys.path:
     sys.path.append(str(THIS_DIR))
 

@@ -17,7 +17,6 @@ from torch.utils.data import DataLoader, Subset
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
-sys.path.append(str(ROOT / "utils"))
 
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402

@@ -6,9 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from losses.lovasz_losses import lovasz_softmax, lovasz_softmax_flat  # type: ignore[import-not-found]
-
 from online_ncde.ray_loss import RayLoss, generate_lidar_rays
+from online_ncde.utils.lovasz_losses import lovasz_softmax, lovasz_softmax_flat
 
 
 def resize_labels_and_mask_to_logits(

@@ -21,8 +21,6 @@ from torch.utils.data import DataLoader, Subset
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.append(str(ROOT / "src"))
-if str(ROOT / "utils") not in sys.path:
-    sys.path.append(str(ROOT / "utils"))
 
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.ego_warp_list import (  # noqa: E402
