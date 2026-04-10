@@ -102,6 +102,7 @@ def build_dataset(
     slow_logit_root: str,
     supervision_sidecar_path: str | None = None,
     logits_loader=None,
+    ray_sidecar_split: str | None = None,
 ) -> Occ3DOnlineNcdeDataset:
     """根据 data_cfg 构造 Occ3DOnlineNcdeDataset。"""
     return Occ3DOnlineNcdeDataset(
@@ -123,6 +124,8 @@ def build_dataset(
         full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
         full_topk_k=data_cfg.get("full_topk_k", 3),
         logits_loader=logits_loader,
+        ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
+        ray_sidecar_split=ray_sidecar_split,
     )
 
 
@@ -167,6 +170,7 @@ def main() -> None:
         slow_logit_root=slow_logit_root,
         supervision_sidecar_path=train_sidecar_path if train_sidecar_path else None,
         logits_loader=logits_loader,
+        ray_sidecar_split="train",
     )
     train_dataset = build_subset(train_dataset, args.train_limit)
 
@@ -194,6 +198,7 @@ def main() -> None:
             slow_logit_root=slow_logit_root,
             supervision_sidecar_path=val_sidecar_path if val_sidecar_path else None,
             logits_loader=logits_loader,
+            ray_sidecar_split="val",
         )
         scene_names = [info.get("scene_name", "") for info in val_dataset.infos]
         unique_scenes = sorted({name for name in scene_names if name})
@@ -256,7 +261,12 @@ def main() -> None:
         for _ in range(start_epoch - 1):
             scheduler.step()
 
-    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"])
+    # 给 build_loss 注入 ray 需要的几何常量（yaml 里不重复填）。
+    ray_cfg = loss_cfg.get("ray", None)
+    if ray_cfg is not None:
+        ray_cfg.setdefault("pc_range", list(data_cfg["pc_range"]))
+        ray_cfg.setdefault("free_index", int(data_cfg["free_index"]))
+    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"]).to(device)
     trainer = Trainer(
         model=model,
         optimizer=optimizer,

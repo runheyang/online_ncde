@@ -112,6 +112,8 @@ def main() -> None:
         full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
         full_topk_k=data_cfg.get("full_topk_k", 3),
         logits_loader=logits_loader,
+        ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
+        ray_sidecar_split="train",
     )
     sub = Subset(dataset, list(range(min(args.sample_count, len(dataset)))))
     loader = DataLoader(
@@ -144,7 +146,12 @@ def main() -> None:
         lr=float(train_cfg["lr"]),
         weight_decay=float(train_cfg["weight_decay"]),
     )
-    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"])
+    # ray loss 的 pc_range / free_index 由 data 配置注入，与 train 脚本一致
+    ray_cfg = loss_cfg.get("ray", None)
+    if ray_cfg is not None:
+        ray_cfg.setdefault("pc_range", list(data_cfg["pc_range"]))
+        ray_cfg.setdefault("free_index", int(data_cfg["free_index"]))
+    loss_fn = build_loss(loss_cfg, num_classes=data_cfg["num_classes"]).to(device)
     # 复用 Trainer 内的多帧监督 loss 组合逻辑，确保与正式训练一致。
     loss_aggregator = Trainer(
         model=model,
@@ -171,6 +178,10 @@ def main() -> None:
         total_loss = 0.0
         total_focal = 0.0
         total_aux = 0.0
+        total_ray = 0.0
+        total_ray_hit = 0.0
+        total_ray_depth = 0.0
+        total_ray_sup_count = 0
         total_sup_loss: dict[str, float] = {}
         total_sup_count: dict[str, int] = {}
         step_count = 0
@@ -200,6 +211,9 @@ def main() -> None:
                     sup_masks=sample["sup_masks"],
                     sup_step_indices=sample["sup_step_indices"],
                     sup_valid_mask=sample["sup_valid_mask"],
+                    ray_gt_dist=sample.get("ray_gt_dist", None),
+                    ray_origin=sample.get("ray_origin", None),
+                    ray_sup_valid=sample.get("ray_sup_valid", None),
                 )
                 # overfit 指标仍按当前帧计算，与原脚本一致。
                 logits = step_logits[:, -1] if step_logits.shape[1] > 0 else sample["fast_logits"][:, -1]
@@ -223,6 +237,14 @@ def main() -> None:
             total_loss += float(loss.item())
             total_focal += float(loss_dict["focal"].item())
             total_aux += float(loss_dict["aux"].item())
+            # ray 指标仅在多帧路径上有效；单帧 fallback 不会产出 ray_total
+            if "ray_total" in loss_dict:
+                sup_count = int(loss_dict.get("ray_sup_count", torch.tensor(0)).item())
+                if sup_count > 0:
+                    total_ray += float(loss_dict["ray_total"].item())
+                    total_ray_hit += float(loss_dict["ray_hit"].item())
+                    total_ray_depth += float(loss_dict["ray_depth"].item())
+                    total_ray_sup_count += 1
             for key, value in sup_loss_batch.items():
                 cnt = sup_count_batch.get(key, 0)
                 if cnt <= 0:
@@ -263,6 +285,11 @@ def main() -> None:
             "present_class_count": int(miou_stats["present_class_count"]),
             "active_class_count": int(miou_stats["active_class_count"]),
         }
+        if total_ray_sup_count > 0:
+            rdenom = float(total_ray_sup_count)
+            train_metrics["ray_total"] = total_ray / rdenom
+            train_metrics["ray_hit"] = total_ray_hit / rdenom
+            train_metrics["ray_depth"] = total_ray_depth / rdenom
         for key, value in total_sup_loss.items():
             cnt = max(total_sup_count.get(key, 0), 1)
             train_metrics[key] = value / cnt
@@ -272,6 +299,13 @@ def main() -> None:
             if isinstance(key, str) and key.startswith("loss_t")
         )
         sup_part = f" {sup_line}" if sup_line else ""
+        ray_part = ""
+        if total_ray_sup_count > 0:
+            ray_part = (
+                f" ray_total={train_metrics['ray_total']:.4f} "
+                f"ray_hit={train_metrics['ray_hit']:.4f} "
+                f"ray_depth={train_metrics['ray_depth']:.4f}"
+            )
         print(
             f"[overfit] epoch={epoch} "
             f"loss={train_metrics['loss']:.4f} "
@@ -282,6 +316,7 @@ def main() -> None:
             f"absent_fp_rate={train_metrics['absent_fp_rate']:.6f} "
             f"present_cls={train_metrics['present_class_count']} "
             f"active_cls={train_metrics['active_class_count']}"
+            f"{ray_part}"
             f"{sup_part}"
         )
 

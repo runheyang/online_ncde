@@ -8,6 +8,8 @@ import torch.nn.functional as F
 
 from losses.lovasz_losses import lovasz_softmax, lovasz_softmax_flat  # type: ignore[import-not-found]
 
+from online_ncde.ray_loss import RayLoss, generate_lidar_rays
+
 
 def resize_labels_and_mask_to_logits(
     logits: torch.Tensor,
@@ -258,11 +260,69 @@ class OnlineNcdeFocalDiceLoss(nn.Module):
         }
 
 
+class SegAndRayLoss(nn.Module):
+    """seg loss + ray first-hit/depth loss 的组合包装。
+
+    - seg loss 照旧接收 (logits, targets, mask)，返回 dict（必含 total/focal/aux）。
+    - ray loss 仅在 forward 的 kwargs 里同时给出 ray_origins / gt_dist 时才会计算；
+      否则只跑 seg loss（非多帧路径或 sidecar 缺失的 fallback）。
+    - 返回 dict 保持 seg loss 的 key 兼容，额外带 ray_* 字段，便于日志。
+    """
+
+    def __init__(
+        self,
+        seg_loss: nn.Module,
+        ray_loss: "RayLoss",
+        lambda_ray: float = 0.5,
+    ) -> None:
+        super().__init__()
+        self.seg = seg_loss
+        self.ray = ray_loss
+        self.lambda_ray = float(lambda_ray)
+        # 14040 条固定 ray 方向作为 buffer，自动跟 model 同 device/dtype。
+        self.register_buffer("ray_dirs", generate_lidar_rays("cpu"), persistent=False)
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor | None,
+        *,
+        ray_origins: torch.Tensor | None = None,
+        gt_dist: torch.Tensor | None = None,
+        ray_valid: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        seg_out = self.seg(logits, targets, mask)
+
+        if ray_origins is None or gt_dist is None:
+            zero = logits.sum() * 0.0
+            seg_out["ray_total"] = zero.detach()
+            seg_out["ray_hit"] = zero.detach()
+            seg_out["ray_depth"] = zero.detach()
+            seg_out["ray_valid_rays"] = torch.tensor(0, device=logits.device)
+            return seg_out
+
+        ray_out = self.ray(
+            logits=logits,
+            ray_origins=ray_origins,
+            ray_dirs=self.ray_dirs,
+            gt_dist=gt_dist,
+            valid_mask=None,
+        )
+        ray_total = ray_out["total"]
+        seg_out["total"] = seg_out["total"] + self.lambda_ray * ray_total
+        seg_out["ray_total"] = (self.lambda_ray * ray_total).detach()
+        seg_out["ray_hit"] = ray_out["hit_raw"]
+        seg_out["ray_depth"] = ray_out["depth_raw"]
+        seg_out["ray_valid_rays"] = ray_out["valid_rays"]
+        return seg_out
+
+
 def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
     """根据配置构建 loss 函数。"""
     loss_type = loss_cfg.get("type", "focal_lovasz")
     if loss_type == "focal_lovasz":
-        return OnlineNcdeLoss(
+        seg = OnlineNcdeLoss(
             num_classes=num_classes,
             gamma=loss_cfg.get("gamma", 2.0),
             class_weights=loss_cfg.get("class_weights", None),
@@ -271,7 +331,7 @@ def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
             focal_mask_weight=loss_cfg.get("focal_mask_weight", None),
         )
     elif loss_type == "focal_dice":
-        return OnlineNcdeFocalDiceLoss(
+        seg = OnlineNcdeFocalDiceLoss(
             num_classes=num_classes,
             gamma=loss_cfg.get("gamma", 2.0),
             class_weights=loss_cfg.get("class_weights", None),
@@ -281,4 +341,46 @@ def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
         )
     else:
         raise ValueError(f"未知 loss type: {loss_type!r}，支持 'focal_lovasz' 或 'focal_dice'")
+
+    ray_cfg = loss_cfg.get("ray", None)
+    if not ray_cfg:
+        return seg
+
+    # pc_range / free_index 由 train 脚本从 data 配置注入；其余参数 yaml 可覆盖，
+    # 未填字段 fallback 到 RayLoss 默认值。
+    pc_range = ray_cfg.get("pc_range") or loss_cfg.get("pc_range")
+    free_index = ray_cfg.get("free_index")
+    if pc_range is None or free_index is None:
+        raise ValueError(
+            "build_loss(ray): 需要 pc_range 与 free_index（由 train 脚本注入 loss_cfg）。"
+        )
+    ray_kwargs: dict = {}
+    # 显式列出所有可调参数，避免 yaml 里混入无关 key 被误传给 RayLoss
+    for key in (
+        "num_samples",
+        "step_m",
+        "window_voxels",
+        "near_max_m",
+        "mid_max_m",
+        "near_weight",
+        "mid_weight",
+        "lambda_hit",
+        "lambda_depth",
+        "depth_asym_far",
+        "depth_asym_near",
+        "smooth_l1_beta",
+        "gt_dist_bias_m",
+    ):
+        if key in ray_cfg:
+            ray_kwargs[key] = ray_cfg[key]
+    ray = RayLoss(
+        pc_range=pc_range,
+        free_index=int(free_index),
+        **ray_kwargs,
+    )
+    return SegAndRayLoss(
+        seg_loss=seg,
+        ray_loss=ray,
+        lambda_ray=float(ray_cfg.get("lambda_ray", 0.5)),
+    )
 

@@ -23,6 +23,7 @@ configs/online_ncde/hard_oversample_train_stats.json
 
 # configs 下的索引 / sidecar / cache 类 pkl 文件统一不纳入版本控制
 configs/**/*.pkl
+configs/**/*.npy
 
 # -----------------------------------------------------------------------
 # Python 编译产物 & 打包产物

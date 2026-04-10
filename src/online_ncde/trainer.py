@@ -59,6 +59,23 @@ def online_ncde_collate(batch):
         sup_valid_mask = torch.stack(cast(list[torch.Tensor], sup_valid_mask), dim=0)
     else:
         sup_valid_mask = None
+
+    ray_gt_dist_list = [item.get("ray_gt_dist", None) for item in batch]
+    ray_origin_list = [item.get("ray_origin", None) for item in batch]
+    ray_sup_valid_list = [item.get("ray_sup_valid", None) for item in batch]
+    if all(x is not None for x in ray_gt_dist_list):
+        ray_gt_dist = torch.stack(cast(list[torch.Tensor], ray_gt_dist_list), dim=0)
+    else:
+        ray_gt_dist = None
+    if all(x is not None for x in ray_origin_list):
+        ray_origin = torch.stack(cast(list[torch.Tensor], ray_origin_list), dim=0)
+    else:
+        ray_origin = None
+    if all(x is not None for x in ray_sup_valid_list):
+        ray_sup_valid = torch.stack(cast(list[torch.Tensor], ray_sup_valid_list), dim=0)
+    else:
+        ray_sup_valid = None
+
     meta = [item.get("meta", {}) for item in batch]
 
     return {
@@ -73,6 +90,9 @@ def online_ncde_collate(batch):
         "sup_masks": sup_masks,
         "sup_step_indices": sup_step_indices,
         "sup_valid_mask": sup_valid_mask,
+        "ray_gt_dist": ray_gt_dist,
+        "ray_origin": ray_origin,
+        "ray_sup_valid": ray_sup_valid,
         "meta": meta,
     }
 
@@ -187,8 +207,15 @@ class Trainer:
         sup_masks: torch.Tensor,
         sup_step_indices: torch.Tensor,
         sup_valid_mask: torch.Tensor,
+        ray_gt_dist: torch.Tensor | None = None,
+        ray_origin: torch.Tensor | None = None,
+        ray_sup_valid: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, float], dict[str, int]]:
-        """按 sidecar 指定 step 做 4 时刻联合监督（不做 detach）。"""
+        """按 sidecar 指定 step 做 4 时刻联合监督（不做 detach）。
+
+        当 ray_* 三件套齐全时，对每个 sup 额外把该 sup 的 origin/gt_dist 以 kwargs
+        形式传给 loss_fn，由 SegAndRayLoss 内部决定是否启用 ray loss 分支。
+        """
         step_map = {int(v): i for i, v in enumerate(step_indices.detach().cpu().tolist())}
         num_sup = len(self.supervision_labels)
         if sup_labels.shape[1] != num_sup:
@@ -196,9 +223,17 @@ class Trainer:
                 f"监督时刻数不一致: labels.shape[1]={sup_labels.shape[1]} vs expected={num_sup}"
             )
 
+        has_ray = (
+            ray_gt_dist is not None and ray_origin is not None and ray_sup_valid is not None
+        )
+
         total = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
         total_focal = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
         total_aux = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
+        total_ray = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
+        total_ray_hit = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
+        total_ray_depth = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
+        ray_sup_count = 0
         per_step_loss: dict[str, float] = {}
         per_step_count: dict[str, int] = {}
         active_any = False
@@ -210,6 +245,8 @@ class Trainer:
             logits_list = []
             labels_list = []
             masks_list = []
+            ray_origin_list: list[torch.Tensor] = []
+            ray_dist_list: list[torch.Tensor] = []
             for b in rows:
                 step_value = int(sup_step_indices[b, sup_i].item())
                 local_step = step_map.get(step_value, None)
@@ -218,6 +255,22 @@ class Trainer:
                 logits_list.append(step_logits[b, local_step])
                 labels_list.append(sup_labels[b, sup_i])
                 masks_list.append(sup_masks[b, sup_i])
+                if has_ray and float(ray_sup_valid[b, sup_i].item()) > 0.5:
+                    ray_origin_list.append(ray_origin[b, sup_i])
+                    ray_dist_list.append(ray_gt_dist[b, sup_i])
+                elif has_ray:
+                    # ray 无效时给 NaN，让 RayLoss 内的 gt_is_valid 自行过滤。
+                    ray_origin_list.append(
+                        torch.zeros(3, device=step_logits.device, dtype=step_logits.dtype)
+                    )
+                    ray_dist_list.append(
+                        torch.full(
+                            (ray_gt_dist.shape[-1],),
+                            float("nan"),
+                            device=step_logits.device,
+                            dtype=step_logits.dtype,
+                        )
+                    )
 
             if not logits_list:
                 per_step_loss[key] = 0.0
@@ -227,7 +280,13 @@ class Trainer:
             logits_i = torch.stack(logits_list, dim=0)
             labels_i = torch.stack(labels_list, dim=0)
             masks_i = torch.stack(masks_list, dim=0)
-            loss_i = self.loss_fn(logits_i, labels_i, masks_i)
+
+            loss_kwargs: dict[str, torch.Tensor] = {}
+            if has_ray and ray_origin_list:
+                loss_kwargs["ray_origins"] = torch.stack(ray_origin_list, dim=0)
+                loss_kwargs["gt_dist"] = torch.stack(ray_dist_list, dim=0)
+
+            loss_i = self.loss_fn(logits_i, labels_i, masks_i, **loss_kwargs)
             weight = float(self.supervision_weights[sup_i])
             weighted_total = loss_i["total"] * weight
             weighted_focal = loss_i["focal"] * weight
@@ -235,6 +294,13 @@ class Trainer:
             total = total + weighted_total
             total_focal = total_focal + weighted_focal
             total_aux = total_aux + weighted_aux
+            if "ray_total" in loss_i:
+                # ray_total 已经含 lambda_ray，这里再乘以 sup 权重保持整体加权一致。
+                total_ray = total_ray + loss_i["ray_total"] * weight
+                total_ray_hit = total_ray_hit + loss_i["ray_hit"] * weight
+                total_ray_depth = total_ray_depth + loss_i["ray_depth"] * weight
+                if int(loss_i.get("ray_valid_rays", torch.tensor(0)).item()) > 0:
+                    ray_sup_count += 1
             per_step_loss[key] = float(weighted_total.detach().item())
             per_step_count[key] = int(len(logits_list))
             active_any = True
@@ -245,11 +311,18 @@ class Trainer:
             total = zero
             total_focal = zero
             total_aux = zero
+            total_ray = zero
+            total_ray_hit = zero
+            total_ray_depth = zero
 
         return {
             "total": total,
             "focal": total_focal,
             "aux": total_aux,
+            "ray_total": total_ray.detach(),
+            "ray_hit": total_ray_hit.detach(),
+            "ray_depth": total_ray_depth.detach(),
+            "ray_sup_count": torch.tensor(ray_sup_count, device=step_logits.device),
         }, per_step_loss, per_step_count
 
     def _forward_stepwise(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
@@ -343,12 +416,18 @@ class Trainer:
         step_logits = cast(torch.Tensor, outputs_step["step_logits"])
         step_indices = cast(torch.Tensor, outputs_step["step_indices"])
 
+        ray_gt_dist = sample.get("ray_gt_dist", None)
+        ray_origin = sample.get("ray_origin", None)
+        ray_sup_valid = sample.get("ray_sup_valid", None)
+
         if for_eval:
             logits, eval_labels, eval_masks = self._resolve_eval_targets_from_stepwise(
                 step_logits=step_logits,
                 step_indices=step_indices,
                 sample=sample,
             )
+            # eval 不关心 ray 指标，单点 loss 和 multistep sup loss 都不传 ray，
+            # 避免每个 val batch 白跑 4 次 ray forward。
             loss_dict = self.loss_fn(logits, eval_labels, eval_masks)
             sup_loss_batch: dict[str, float] = {}
             sup_count_batch: dict[str, int] = {}
@@ -378,6 +457,9 @@ class Trainer:
             sup_masks=cast(torch.Tensor, sample["sup_masks"]),
             sup_step_indices=cast(torch.Tensor, sample["sup_step_indices"]),
             sup_valid_mask=cast(torch.Tensor, sample["sup_valid_mask"]),
+            ray_gt_dist=ray_gt_dist,
+            ray_origin=ray_origin,
+            ray_sup_valid=ray_sup_valid,
         )
         logits = (
             step_logits[:, -1]
@@ -407,6 +489,10 @@ class Trainer:
         total_focal = 0.0
         total_aux = 0.0
         total_delta = 0.0
+        total_ray = 0.0
+        total_ray_hit = 0.0
+        total_ray_depth = 0.0
+        total_ray_sup_count = 0
         total_sup_loss: Dict[str, float] = {}
         total_sup_count: Dict[str, int] = {}
 
@@ -444,6 +530,15 @@ class Trainer:
             total_loss += float(loss.item())
             total_focal += float(loss_dict["focal"].item())
             total_aux += float(loss_dict["aux"].item())
+            if "ray_total" in loss_dict:
+                ray_sup_cnt = int(
+                    cast(torch.Tensor, loss_dict.get("ray_sup_count", torch.tensor(0))).item()
+                )
+                if ray_sup_cnt > 0:
+                    total_ray += float(loss_dict["ray_total"].item())
+                    total_ray_hit += float(loss_dict["ray_hit"].item())
+                    total_ray_depth += float(loss_dict["ray_depth"].item())
+                    total_ray_sup_count += ray_sup_cnt
             for key, value in sup_loss_batch.items():
                 cnt = sup_count_batch.get(key, 0)
                 if cnt <= 0:
@@ -469,6 +564,10 @@ class Trainer:
             "aux": total_aux / denom,
             "delta_scene_abs_mean": total_delta / denom,
         }
+        if total_ray_sup_count > 0:
+            metrics["ray"] = total_ray / denom
+            metrics["ray_hit"] = total_ray_hit / denom
+            metrics["ray_depth"] = total_ray_depth / denom
         for key, value in total_sup_loss.items():
             count = max(total_sup_count.get(key, 0), 1)
             metrics[key] = value / count

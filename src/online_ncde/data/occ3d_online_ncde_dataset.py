@@ -20,6 +20,10 @@ from online_ncde.data.logits_io import (
     sparse_full_to_topk,
 )
 from online_ncde.data.logits_loader import LogitsLoader
+from online_ncde.data.ray_sidecar import RaySidecar
+
+# 进程级 flag：缺 token warning 每个 worker 进程只打一次
+_RAY_MISSING_WARNED = False
 
 
 class Occ3DOnlineNcdeDataset(Dataset):
@@ -45,6 +49,8 @@ class Occ3DOnlineNcdeDataset(Dataset):
         full_logits_clamp_min: float | None = None,
         full_topk_k: int = 3,
         logits_loader: LogitsLoader | None = None,
+        ray_sidecar_dir: str | None = None,
+        ray_sidecar_split: str | None = None,
     ) -> None:
         self.root_path = root_path
         self.info_path = resolve_path(root_path, info_path)
@@ -73,6 +79,10 @@ class Occ3DOnlineNcdeDataset(Dataset):
         self.logits_loader = logits_loader
         self.supervision_labels = ["t-1.5", "t-1.0", "t-0.5", "t"]
         self.supervision_by_token: Dict[str, Dict[str, Any]] | None = None
+        # ray sidecar 延后到 supervision_labels 定版后再构造，方便做顺序校验
+        self.ray_sidecar: RaySidecar | None = None
+        self._ray_sidecar_dir = ray_sidecar_dir
+        self._ray_sidecar_split = ray_sidecar_split
 
         with open(self.info_path, "rb") as f:
             payload = pickle.load(f)
@@ -110,6 +120,22 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 token = str(info.get("token", ""))
                 if token:
                     self.supervision_by_token[token] = info
+
+        # supervision_labels 已定版，构造 ray sidecar 并校验时刻顺序
+        if self._ray_sidecar_dir:
+            split = self._ray_sidecar_split or "train"
+            self.ray_sidecar = RaySidecar(
+                sidecar_dir=resolve_path(root_path, self._ray_sidecar_dir),
+                split=split,
+            )
+            ray_labels = list(self.ray_sidecar.supervision_labels)
+            if ray_labels and ray_labels != self.supervision_labels:
+                raise ValueError(
+                    "ray sidecar 与 dataset 的 supervision_labels 不一致，"
+                    "会把 ray GT 监督到错误时刻：\n"
+                    f"  dataset: {self.supervision_labels}\n"
+                    f"  ray    : {ray_labels}"
+                )
 
     def __len__(self) -> int:
         return len(self.infos)
@@ -365,6 +391,33 @@ class Occ3DOnlineNcdeDataset(Dataset):
         if frame_dt is not None:
             frame_dt = torch.from_numpy(frame_dt).float()
 
+        ray_gt_dist = None
+        ray_origin = None
+        ray_sup_valid = None
+        if self.ray_sidecar is not None:
+            hit = self.ray_sidecar.query(token)
+            if hit is None:
+                # token 缺失：整条样本跳过 ray loss。每个 worker 进程首次遇到时
+                # 打印一次 warning（DataLoader 多 worker 下无法做到全局唯一）。
+                global _RAY_MISSING_WARNED
+                if not _RAY_MISSING_WARNED:
+                    pid = os.getpid()
+                    print(
+                        f"[ray_sidecar pid={pid}] WARN: token={token} 缺失，"
+                        f"该样本将跳过 ray loss；本 worker 后续缺失不再提示。"
+                    )
+                    _RAY_MISSING_WARNED = True
+                num_sup = len(self.supervision_labels)
+                num_rays = self.ray_sidecar.num_rays
+                ray_gt_dist = torch.full((num_sup, num_rays), float("nan"), dtype=torch.float32)
+                ray_origin = torch.zeros((num_sup, 3), dtype=torch.float32)
+                ray_sup_valid = torch.zeros((num_sup,), dtype=torch.float32)
+            else:
+                dist_np, origin_np, mask_np = hit
+                ray_gt_dist = torch.from_numpy(dist_np)
+                ray_origin = torch.from_numpy(origin_np)
+                ray_sup_valid = torch.from_numpy(mask_np.astype("float32"))
+
         return {
             "fast_logits": fast_logits,
             "slow_logits": slow_logits,
@@ -377,6 +430,9 @@ class Occ3DOnlineNcdeDataset(Dataset):
             "sup_masks": sup_masks,
             "sup_step_indices": sup_step_indices,
             "sup_valid_mask": sup_valid_mask,
+            "ray_gt_dist": ray_gt_dist,
+            "ray_origin": ray_origin,
+            "ray_sup_valid": ray_sup_valid,
             "meta": {
                 "scene_name": scene_name,
                 "token": token,
