@@ -35,7 +35,11 @@ from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import resize_labels_and_mask_to_logits  # noqa: E402
-from online_ncde.metrics import OCC3D_DYNAMIC_OBJECT_IDX, apply_free_threshold  # noqa: E402
+from online_ncde.metrics import (  # noqa: E402
+    OCC3D_DYNAMIC_OBJECT_IDX,
+    MetricMiouOcc3D,
+    apply_free_threshold,
+)
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde_200x200x16 import OnlineNcdeAligner200              # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
@@ -492,11 +496,23 @@ def main() -> None:
 
     free_conf_thresh = eval_cfg.get("free_conf_thresh", None)
 
-    # --- 阶段 1：推理收集 predictions ---
+    # --- 阶段 1：推理收集 predictions + mIoU 统计 ---
     print("[phase1] 推理收集 predictions...")
     predictions: list[dict] = []
     total_steps = len(loader)
     t0 = time.time()
+
+    # mIoU 累加器（与 Trainer.evaluate 口径一致：use_image_mask=True, use_lidar_mask=False）
+    metric_fast = MetricMiouOcc3D(
+        num_classes=data_cfg["num_classes"],
+        use_image_mask=True,
+        use_lidar_mask=False,
+    )
+    metric_aligned = MetricMiouOcc3D(
+        num_classes=data_cfg["num_classes"],
+        use_image_mask=True,
+        use_lidar_mask=False,
+    )
 
     with torch.no_grad():
         for step, sample in enumerate(loader, start=1):
@@ -526,13 +542,31 @@ def main() -> None:
             if isinstance(meta_list, dict):
                 meta_list = [meta_list]
 
-            for b in range(pred_aligned.shape[0]):
+            pred_fast_np = pred_fast.cpu().numpy()
+            pred_aligned_np = pred_aligned.cpu().numpy()
+            gt_np = gt_labels.cpu().numpy()
+            mask_np = gt_mask.cpu().numpy() if gt_mask is not None else None
+
+            for b in range(pred_aligned_np.shape[0]):
                 token = meta_list[b].get("token", "") if b < len(meta_list) else ""
-                mask_b = gt_mask[b].cpu().numpy() if gt_mask is not None else None
+                mask_b = mask_np[b] if mask_np is not None else None
+                # 累加 mIoU（fast 和 aligned 各一份）
+                metric_fast.add_batch(
+                    semantics_pred=pred_fast_np[b],
+                    semantics_gt=gt_np[b],
+                    mask_lidar=None,
+                    mask_camera=mask_b,
+                )
+                metric_aligned.add_batch(
+                    semantics_pred=pred_aligned_np[b],
+                    semantics_gt=gt_np[b],
+                    mask_lidar=None,
+                    mask_camera=mask_b,
+                )
                 predictions.append({
-                    "pred_fast": pred_fast[b].cpu().numpy().astype(np.uint8),
-                    "pred_aligned": pred_aligned[b].cpu().numpy().astype(np.uint8),
-                    "gt": gt_labels[b].cpu().numpy().astype(np.uint8),
+                    "pred_fast": pred_fast_np[b].astype(np.uint8),
+                    "pred_aligned": pred_aligned_np[b].astype(np.uint8),
+                    "gt": gt_np[b].astype(np.uint8),
                     "mask": mask_b,
                     "token": token,
                 })
@@ -542,6 +576,27 @@ def main() -> None:
                 print(f"  step={step}/{total_steps}  {spd:.1f} it/s")
 
     print(f"[phase1] 共收集 {len(predictions)} 个样本")
+
+    # --- 阶段 1.5：打印 mIoU 和 per-class IoU ---
+    print("\n" + "=" * 20 + " mIoU 对比 " + "=" * 20)
+    miou_fast = metric_fast.count_miou(verbose=False)
+    miou_d_fast = metric_fast.count_miou_d(verbose=False)
+    per_class_fast = np.nan_to_num(metric_fast.get_per_class_iou(), nan=0.0)
+
+    miou_aligned = metric_aligned.count_miou(verbose=False)
+    miou_d_aligned = metric_aligned.count_miou_d(verbose=False)
+    per_class_aligned = np.nan_to_num(metric_aligned.get_per_class_iou(), nan=0.0)
+
+    header = f"{'Metric':<28} {'Fast Baseline':>14} {'Aligner Output':>14} {'Delta':>14}"
+    print(header)
+    print("-" * len(header))
+    print(f"{'mIoU':<28} {miou_fast:>14.4f} {miou_aligned:>14.4f} {miou_aligned - miou_fast:>+14.4f}")
+    print(f"{'mIoU_d (dynamic)':<28} {miou_d_fast:>14.4f} {miou_d_aligned:>14.4f} {miou_d_aligned - miou_d_fast:>+14.4f}")
+    print()
+    print(f"{'Class':<28} {'Fast':>14} {'Aligned':>14} {'Delta':>14}")
+    print("-" * len(header))
+    for name, v_f, v_a in zip(metric_fast.class_names, per_class_fast, per_class_aligned):
+        print(f"{name:<28} {float(v_f):>14.4f} {float(v_a):>14.4f} {float(v_a) - float(v_f):>+14.4f}")
 
     # --- 阶段 2：加载 lidar origins ---
     print("[phase2] 加载 lidar origins...")
