@@ -630,7 +630,11 @@ def main() -> None:
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("val/*", step_metric="epoch")
 
-    output_dir = _resolve_variant_output_dir(root_path, train_cfg["output_dir"])
+    # 从 config 路径推导输出目录
+    config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+    output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(output_base, f"{timestamp}_euler_next_fast")
     os.makedirs(output_dir, exist_ok=True)
     print("[variant] solver=euler func_g_input=next_fast_only")
     print(f"[output] checkpoints -> {output_dir}")

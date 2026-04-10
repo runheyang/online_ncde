@@ -605,16 +605,17 @@ def main() -> None:
             # all
             hn_stats[(src_name, "all")].update(all_gt_hit, all_pred_hit)
 
-            # mask 内
+            # mask 内（注意：GT no-hit ray 的 coord 是 DVR 最后遍历的栅格点，
+            # 大概率在边界 free 区域、不在 mask 内，因此 mask_in 主要反映 GT hit ray）
             if mask_vol is not None:
                 m = mask_vol[all_gt_coord[:, 0], all_gt_coord[:, 1], all_gt_coord[:, 2]].astype(bool)
                 if m.any():
                     hn_stats[(src_name, "mask_in")].update(all_gt_hit[m], all_pred_hit[m])
 
-            # 距离桶：GT hit 用 gt_dist，否则用 pred_dist
-            ref_dist = np.where(all_gt_hit, rc_gt["dist"], rc_src["dist"])
+            # 距离桶：统一用 gt_dist 分桶，保证 fast/aligned 对比的是同一批 ray
+            gt_dist_all = rc_gt["dist"]
             for lo, hi, key in [(0, 10, "d_0_10"), (10, 20, "d_10_20")]:
-                bin_m = (ref_dist >= lo) & (ref_dist < hi)
+                bin_m = (gt_dist_all >= lo) & (gt_dist_all < hi)
                 if bin_m.any():
                     hn_stats[(src_name, key)].update(all_gt_hit[bin_m], all_pred_hit[bin_m])
 

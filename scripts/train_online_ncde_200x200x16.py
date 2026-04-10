@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 sys.path.append(str(ROOT / "utils"))
 
-from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
+from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
@@ -365,8 +365,26 @@ def main() -> None:
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("val/*", step_metric="epoch")
 
-    output_dir = resolve_path(root_path, train_cfg["output_dir"])
+    # 从 config 路径推导输出目录：configs/X/Y/train.yaml → outputs/X/Y/{timestamp}_200x200x16
+    # DDP 模式下 rank0 生成时间戳后广播，保证所有 rank 目录一致
+    config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+    output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
+    if use_ddp:
+        if rank == 0:
+            ts_tensor = torch.tensor(
+                [int(datetime.now().strftime("%Y%m%d%H%M%S"))], dtype=torch.long, device=device
+            )
+        else:
+            ts_tensor = torch.zeros(1, dtype=torch.long, device=device)
+        dist.broadcast(ts_tensor, src=0)
+        timestamp = str(ts_tensor.item())
+        timestamp = f"{timestamp[:8]}_{timestamp[8:]}"
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(output_base, f"{timestamp}_200x200x16")
     os.makedirs(output_dir, exist_ok=True)
+    if is_main:
+        print(f"[ckpt] output_dir: {output_dir}")
 
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
         # DDP 模式下每 epoch 设置 sampler epoch，保证数据打乱不同
