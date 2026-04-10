@@ -1,6 +1,5 @@
 # Acknowledgments: https://github.com/tarashakhurana/4d-occ-forecasting
 # Modified by Haisong Liu
-import math
 import copy
 import os
 import numpy as np
@@ -8,6 +7,7 @@ import torch
 from torch.utils.cpp_extension import load
 from prettytable import PrettyTable
 from online_ncde.utils.progress import make_pbar
+from online_ncde.ops.dvr.lidar_rays import generate_lidar_rays  # noqa: F401
 
 
 _dvr_dir = os.path.dirname(os.path.abspath(__file__))
@@ -61,32 +61,6 @@ def meshgrid3d(occ_size, pc_range):
     xyz = torch.stack((xs, ys, zs), -1)
 
     return xyz
-
-
-def generate_lidar_rays():
-    # prepare lidar ray angles
-    pitch_angles = []
-    for k in range(10):
-        angle = math.pi / 2 - math.atan(k + 1)
-        pitch_angles.append(-angle)
-    
-    # nuscenes lidar fov: [0.2107773983152201, -0.5439104895672159] (rad)
-    while pitch_angles[-1] < 0.21:
-        delta = pitch_angles[-1] - pitch_angles[-2]
-        pitch_angles.append(pitch_angles[-1] + delta)
-
-    lidar_rays = []
-    for pitch_angle in pitch_angles:
-        for azimuth_angle in np.arange(0, 360, 1):
-            azimuth_angle = np.deg2rad(azimuth_angle)
-
-            x = np.cos(pitch_angle) * np.cos(azimuth_angle)
-            y = np.cos(pitch_angle) * np.sin(azimuth_angle)
-            z = np.sin(pitch_angle)
-
-            lidar_rays.append((x, y, z))
-
-    return np.array(lidar_rays, dtype=np.float32)
 
 
 def process_one_sample(sem_pred, lidar_rays, output_origin):

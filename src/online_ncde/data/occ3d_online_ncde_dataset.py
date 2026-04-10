@@ -394,8 +394,12 @@ class Occ3DOnlineNcdeDataset(Dataset):
         ray_gt_dist = None
         ray_origin = None
         ray_sup_valid = None
+        ray_origin_mask = None
         if self.ray_sidecar is not None:
             hit = self.ray_sidecar.query(token)
+            num_sup = len(self.supervision_labels)
+            num_rays = self.ray_sidecar.num_rays
+            num_origins = self.ray_sidecar.num_origins
             if hit is None:
                 # token 缺失：整条样本跳过 ray loss。每个 worker 进程首次遇到时
                 # 打印一次 warning（DataLoader 多 worker 下无法做到全局唯一）。
@@ -407,16 +411,18 @@ class Occ3DOnlineNcdeDataset(Dataset):
                         f"该样本将跳过 ray loss；本 worker 后续缺失不再提示。"
                     )
                     _RAY_MISSING_WARNED = True
-                num_sup = len(self.supervision_labels)
-                num_rays = self.ray_sidecar.num_rays
-                ray_gt_dist = torch.full((num_sup, num_rays), float("nan"), dtype=torch.float32)
-                ray_origin = torch.zeros((num_sup, 3), dtype=torch.float32)
+                ray_gt_dist = torch.full(
+                    (num_sup, num_origins, num_rays), float("nan"), dtype=torch.float32
+                )
+                ray_origin = torch.zeros((num_sup, num_origins, 3), dtype=torch.float32)
+                ray_origin_mask = torch.zeros((num_sup, num_origins), dtype=torch.float32)
                 ray_sup_valid = torch.zeros((num_sup,), dtype=torch.float32)
             else:
-                dist_np, origin_np, mask_np = hit
-                ray_gt_dist = torch.from_numpy(dist_np)
-                ray_origin = torch.from_numpy(origin_np)
-                ray_sup_valid = torch.from_numpy(mask_np.astype("float32"))
+                dist_np, origin_np, sup_mask_np, origin_mask_np = hit
+                ray_gt_dist = torch.from_numpy(dist_np)                    # (sup, K, R)
+                ray_origin = torch.from_numpy(origin_np)                   # (sup, K, 3)
+                ray_sup_valid = torch.from_numpy(sup_mask_np.astype("float32"))  # (sup,)
+                ray_origin_mask = torch.from_numpy(origin_mask_np.astype("float32"))  # (sup, K)
 
         return {
             "fast_logits": fast_logits,
@@ -432,6 +438,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
             "sup_valid_mask": sup_valid_mask,
             "ray_gt_dist": ray_gt_dist,
             "ray_origin": ray_origin,
+            "ray_origin_mask": ray_origin_mask,
             "ray_sup_valid": ray_sup_valid,
             "meta": {
                 "scene_name": scene_name,

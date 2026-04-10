@@ -20,80 +20,38 @@ except Exception:  # pragma: no cover
     make_pbar = None
 
 
+def _stack_or_none(batch: list, key: str) -> torch.Tensor | None:
+    vals = [item.get(key, None) for item in batch]
+    if any(v is None for v in vals):
+        return None
+    return torch.stack(cast(list[torch.Tensor], vals), dim=0)
+
+
 def online_ncde_collate(batch):
     """组 batch，并处理可选时序字段。"""
     fast_logits = torch.stack([item["fast_logits"] for item in batch], dim=0)
     slow_logits = torch.stack([item["slow_logits"] for item in batch], dim=0)
     frame_ego2global = torch.stack([item["frame_ego2global"] for item in batch], dim=0)
-
-    frame_timestamps = [item.get("frame_timestamps", None) for item in batch]
-    frame_dt = [item.get("frame_dt", None) for item in batch]
-    if all(ts is not None for ts in frame_timestamps):
-        frame_timestamps = torch.stack(cast(list[torch.Tensor], frame_timestamps), dim=0)
-    else:
-        frame_timestamps = None
-    if all(dt is not None for dt in frame_dt):
-        frame_dt = torch.stack(cast(list[torch.Tensor], frame_dt), dim=0)
-    else:
-        frame_dt = None
-
     gt_labels = torch.stack([item["gt_labels"] for item in batch], dim=0)
     gt_mask = torch.stack([item["gt_mask"] for item in batch], dim=0)
-    sup_labels = [item.get("sup_labels", None) for item in batch]
-    sup_masks = [item.get("sup_masks", None) for item in batch]
-    sup_step_indices = [item.get("sup_step_indices", None) for item in batch]
-    sup_valid_mask = [item.get("sup_valid_mask", None) for item in batch]
-    if all(x is not None for x in sup_labels):
-        sup_labels = torch.stack(cast(list[torch.Tensor], sup_labels), dim=0)
-    else:
-        sup_labels = None
-    if all(x is not None for x in sup_masks):
-        sup_masks = torch.stack(cast(list[torch.Tensor], sup_masks), dim=0)
-    else:
-        sup_masks = None
-    if all(x is not None for x in sup_step_indices):
-        sup_step_indices = torch.stack(cast(list[torch.Tensor], sup_step_indices), dim=0)
-    else:
-        sup_step_indices = None
-    if all(x is not None for x in sup_valid_mask):
-        sup_valid_mask = torch.stack(cast(list[torch.Tensor], sup_valid_mask), dim=0)
-    else:
-        sup_valid_mask = None
-
-    ray_gt_dist_list = [item.get("ray_gt_dist", None) for item in batch]
-    ray_origin_list = [item.get("ray_origin", None) for item in batch]
-    ray_sup_valid_list = [item.get("ray_sup_valid", None) for item in batch]
-    if all(x is not None for x in ray_gt_dist_list):
-        ray_gt_dist = torch.stack(cast(list[torch.Tensor], ray_gt_dist_list), dim=0)
-    else:
-        ray_gt_dist = None
-    if all(x is not None for x in ray_origin_list):
-        ray_origin = torch.stack(cast(list[torch.Tensor], ray_origin_list), dim=0)
-    else:
-        ray_origin = None
-    if all(x is not None for x in ray_sup_valid_list):
-        ray_sup_valid = torch.stack(cast(list[torch.Tensor], ray_sup_valid_list), dim=0)
-    else:
-        ray_sup_valid = None
-
-    meta = [item.get("meta", {}) for item in batch]
 
     return {
         "fast_logits": fast_logits,
         "slow_logits": slow_logits,
         "frame_ego2global": frame_ego2global,
-        "frame_timestamps": frame_timestamps,
-        "frame_dt": frame_dt,
+        "frame_timestamps": _stack_or_none(batch, "frame_timestamps"),
+        "frame_dt": _stack_or_none(batch, "frame_dt"),
         "gt_labels": gt_labels,
         "gt_mask": gt_mask,
-        "sup_labels": sup_labels,
-        "sup_masks": sup_masks,
-        "sup_step_indices": sup_step_indices,
-        "sup_valid_mask": sup_valid_mask,
-        "ray_gt_dist": ray_gt_dist,
-        "ray_origin": ray_origin,
-        "ray_sup_valid": ray_sup_valid,
-        "meta": meta,
+        "sup_labels": _stack_or_none(batch, "sup_labels"),
+        "sup_masks": _stack_or_none(batch, "sup_masks"),
+        "sup_step_indices": _stack_or_none(batch, "sup_step_indices"),
+        "sup_valid_mask": _stack_or_none(batch, "sup_valid_mask"),
+        "ray_gt_dist": _stack_or_none(batch, "ray_gt_dist"),
+        "ray_origin": _stack_or_none(batch, "ray_origin"),
+        "ray_origin_mask": _stack_or_none(batch, "ray_origin_mask"),
+        "ray_sup_valid": _stack_or_none(batch, "ray_sup_valid"),
+        "meta": [item.get("meta", {}) for item in batch],
     }
 
 
@@ -215,12 +173,15 @@ class Trainer:
         sup_valid_mask: torch.Tensor,
         ray_gt_dist: torch.Tensor | None = None,
         ray_origin: torch.Tensor | None = None,
+        ray_origin_mask: torch.Tensor | None = None,
         ray_sup_valid: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, float], dict[str, int]]:
         """按 sidecar 指定 step 做 4 时刻联合监督（不做 detach）。
 
-        当 ray_* 三件套齐全时，对每个 sup 额外把该 sup 的 origin/gt_dist 以 kwargs
-        形式传给 loss_fn，由 SegAndRayLoss 内部决定是否启用 ray loss 分支。
+        ray_* 字段齐全时对每个 sup 额外把该 sup 的 origin/gt_dist/origin_mask 以
+        kwargs 形式传给 loss_fn，由 SegAndRayLoss 内部决定是否启用 ray loss 分支。
+        数据布局约定：ray_origin (B,sup,K,3)、ray_gt_dist (B,sup,K,R)、
+        ray_origin_mask (B,sup,K)。
         """
         step_map = {int(v): i for i, v in enumerate(step_indices.detach().cpu().tolist())}
         num_sup = len(self.supervision_labels)
@@ -244,6 +205,16 @@ class Trainer:
         per_step_count: dict[str, int] = {}
         active_any = False
 
+        if has_ray:
+            if ray_origin.dim() != 4:
+                raise ValueError(
+                    f"ray_origin 必须是 (B,sup,K,3)，实际 {tuple(ray_origin.shape)}"
+                )
+            if ray_origin_mask is None:
+                raise ValueError(
+                    "has_ray=True 但 ray_origin_mask 缺失；Dataset/collate 未正确产出"
+                )
+
         for sup_i, label in enumerate(self.supervision_labels):
             key = f"loss_{label}"
             valid_rows = sup_valid_mask[:, sup_i] > 0.5
@@ -251,8 +222,7 @@ class Trainer:
             logits_list = []
             labels_list = []
             masks_list = []
-            ray_origin_list: list[torch.Tensor] = []
-            ray_dist_list: list[torch.Tensor] = []
+            kept_rows: list[int] = []
             for b in rows:
                 step_value = int(sup_step_indices[b, sup_i].item())
                 local_step = step_map.get(step_value, None)
@@ -261,22 +231,7 @@ class Trainer:
                 logits_list.append(step_logits[b, local_step])
                 labels_list.append(sup_labels[b, sup_i])
                 masks_list.append(sup_masks[b, sup_i])
-                if has_ray and float(ray_sup_valid[b, sup_i].item()) > 0.5:
-                    ray_origin_list.append(ray_origin[b, sup_i])
-                    ray_dist_list.append(ray_gt_dist[b, sup_i])
-                elif has_ray:
-                    # ray 无效时给 NaN，让 RayLoss 内的 gt_is_valid 自行过滤。
-                    ray_origin_list.append(
-                        torch.zeros(3, device=step_logits.device, dtype=step_logits.dtype)
-                    )
-                    ray_dist_list.append(
-                        torch.full(
-                            (ray_gt_dist.shape[-1],),
-                            float("nan"),
-                            device=step_logits.device,
-                            dtype=step_logits.dtype,
-                        )
-                    )
+                kept_rows.append(b)
 
             if not logits_list:
                 per_step_loss[key] = 0.0
@@ -288,9 +243,19 @@ class Trainer:
             masks_i = torch.stack(masks_list, dim=0)
 
             loss_kwargs: dict[str, torch.Tensor] = {}
-            if has_ray and ray_origin_list:
-                loss_kwargs["ray_origins"] = torch.stack(ray_origin_list, dim=0)
-                loss_kwargs["gt_dist"] = torch.stack(ray_dist_list, dim=0)
+            if has_ray:
+                # (B_eff,K,3) / (B_eff,K,R) / (B_eff,K) —— row-mask gather，
+                # 一次拿全。ray_sup_valid 为 0 的行对应的 origin_mask 本身就是 0，
+                # RayLoss 会自己过滤。
+                row_idx = torch.tensor(kept_rows, device=ray_origin.device, dtype=torch.long)
+                sup_sel = torch.full_like(row_idx, sup_i)
+                loss_kwargs["ray_origins"] = ray_origin[row_idx, sup_sel]
+                loss_kwargs["gt_dist"] = ray_gt_dist[row_idx, sup_sel]
+                # origin_mask 对 ray_sup_valid=0 的行整段清零，让 RayLoss 早退
+                sup_valid_vec = ray_sup_valid[row_idx, sup_sel].to(ray_origin_mask.dtype)
+                loss_kwargs["origin_mask"] = (
+                    ray_origin_mask[row_idx, sup_sel] * sup_valid_vec.unsqueeze(-1)
+                )
 
             loss_i = self.loss_fn(logits_i, labels_i, masks_i, **loss_kwargs)
             weight = float(self.supervision_weights[sup_i])
@@ -430,6 +395,7 @@ class Trainer:
 
         ray_gt_dist = sample.get("ray_gt_dist", None)
         ray_origin = sample.get("ray_origin", None)
+        ray_origin_mask = sample.get("ray_origin_mask", None)
         ray_sup_valid = sample.get("ray_sup_valid", None)
 
         if for_eval:
@@ -471,6 +437,7 @@ class Trainer:
             sup_valid_mask=cast(torch.Tensor, sample["sup_valid_mask"]),
             ray_gt_dist=ray_gt_dist,
             ray_origin=ray_origin,
+            ray_origin_mask=ray_origin_mask,
             ray_sup_valid=ray_sup_valid,
         )
         logits = (

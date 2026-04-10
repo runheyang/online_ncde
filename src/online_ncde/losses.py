@@ -199,6 +199,7 @@ class SegAndRayLoss(nn.Module):
         *,
         ray_origins: torch.Tensor | None = None,
         gt_dist: torch.Tensor | None = None,
+        origin_mask: torch.Tensor | None = None,
         ray_valid: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         seg_out = self.seg(logits, targets, mask)
@@ -217,6 +218,7 @@ class SegAndRayLoss(nn.Module):
             ray_dirs=self.ray_dirs,
             gt_dist=gt_dist,
             valid_mask=None,
+            origin_mask=origin_mask,
         )
         ray_total = ray_out["total"]
         seg_out["total"] = seg_out["total"] + self.lambda_ray * ray_total

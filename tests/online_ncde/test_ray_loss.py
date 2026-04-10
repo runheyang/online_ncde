@@ -431,6 +431,89 @@ def test_depth_loss_asymmetric_far_heavier_than_near():
 
 
 # ---------------------------------------------------------------------------
+# 7. 多原点接口：向后兼容、origin_mask、两原点独立贡献
+# ---------------------------------------------------------------------------
+
+
+def test_multi_origin_k1_equivalence_to_legacy_interface():
+    """(B,1,3) 多原点接口 K=1 与老 (B,3) 单原点接口 bit-level 相同。"""
+    origin, direction = _straight_x_ray()            # origin:(1,3), dir:(1,1,3)
+    rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=1.0)
+    logits = _occupied_at(*GT_VOXEL, free_val=20.0)
+    gt_dist_2d = torch.tensor([[GT_DIST]])           # (1,1)
+
+    out_legacy = rl(logits, origin, direction, gt_dist_2d)
+
+    origin_3d = origin.unsqueeze(1)                  # (1,1,3)
+    gt_dist_3d = gt_dist_2d.unsqueeze(1)             # (1,1,1)
+    out_new = rl(logits, origin_3d, direction, gt_dist_3d)
+
+    for key in ("hit_raw", "depth_raw"):
+        diff = (out_legacy[key] - out_new[key]).abs().item()
+        assert diff < 1e-6, (
+            f"K=1 多原点接口应与老接口等价，{key} 差异 {diff:.2e}"
+        )
+    assert int(out_legacy["valid_rays"].item()) == int(out_new["valid_rays"].item())
+
+
+def test_multi_origin_two_identical_origins_match_single():
+    """两份完全相同的原点 → hit_raw/depth_raw 与单原点等价（加权平均的重复）。"""
+    origin, direction = _straight_x_ray()
+    rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=1.0)
+    logits = _occupied_at(*GT_VOXEL, free_val=20.0)
+    gt_dist_2d = torch.tensor([[GT_DIST]])
+
+    out_ref = rl(logits, origin, direction, gt_dist_2d)
+
+    # 复制出 K=2 的 origin/gt_dist，不用 expand（避免共享 storage 影响后续 reshape）
+    origin_k2 = origin.unsqueeze(1).repeat(1, 2, 1).contiguous()        # (1,2,3)
+    gt_dist_k2 = gt_dist_2d.unsqueeze(1).repeat(1, 2, 1).contiguous()    # (1,2,1)
+
+    out_k2 = rl(logits, origin_k2, direction, gt_dist_k2)
+
+    for key in ("hit_raw", "depth_raw"):
+        diff = (out_ref[key] - out_k2[key]).abs().item()
+        assert diff < 1e-6, (
+            f"两份相同原点的加权平均应等于单原点，{key} 差异 {diff:.2e}"
+        )
+    # valid_rays 会翻倍
+    assert int(out_k2["valid_rays"].item()) == 2 * int(out_ref["valid_rays"].item())
+
+
+def test_multi_origin_mask_excludes_padded_origin():
+    """origin_mask=0 的 pad 原点对 loss 完全不贡献。
+
+    K=2：第 0 个原点是真正的 GT 对齐原点，第 1 个原点被放到一个不相干的位置（而且
+    GT 也乱填），但 origin_mask 标 0。结果应与单原点等价。
+    """
+    origin, direction = _straight_x_ray()
+    rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=1.0)
+    logits = _occupied_at(*GT_VOXEL, free_val=20.0)
+    gt_dist_2d = torch.tensor([[GT_DIST]])
+
+    out_ref = rl(logits, origin, direction, gt_dist_2d)
+
+    # 第 1 个原点放在 pc_range 边界，GT 也乱填（5.0m），正常参与会产生很大的 hit loss
+    pad_origin = torch.tensor([30.0, 30.0, 2.0])
+    origin_k2 = torch.stack(
+        [origin.squeeze(0), pad_origin], dim=0
+    ).unsqueeze(0).contiguous()                                          # (1,2,3)
+    gt_dist_k2 = torch.tensor([[[GT_DIST], [5.0]]], dtype=torch.float32) # (1,2,1)
+    origin_mask = torch.tensor([[True, False]])
+
+    out = rl(
+        logits, origin_k2, direction, gt_dist_k2, origin_mask=origin_mask
+    )
+
+    for key in ("hit_raw", "depth_raw"):
+        diff = (out_ref[key] - out[key]).abs().item()
+        assert diff < 1e-6, (
+            f"pad 原点 mask=0 应不贡献，{key} 差异 {diff:.2e}"
+        )
+    assert int(out["valid_rays"].item()) == int(out_ref["valid_rays"].item())
+
+
+# ---------------------------------------------------------------------------
 # 运行入口：不依赖 pytest，直接 python 跑
 # ---------------------------------------------------------------------------
 

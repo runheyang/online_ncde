@@ -17,44 +17,22 @@
 
 from __future__ import annotations
 
-import math
 from typing import Dict, Optional, Sequence, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 def generate_lidar_rays(device: torch.device | str = "cpu") -> torch.Tensor:
-    """生成全场景共享的 14040 条 lidar ray 单位方向。
+    """生成全场景共享的 14040 条 lidar ray 单位方向（torch 版，对齐评估）。
 
-    与 `src/online_ncde/ops/dvr/ray_metrics.generate_lidar_rays` 完全一致，
-    训练侧复用以保证与 RayIoU 评估指标的 ray 集合对齐。
-
-    Returns:
-        (R, 3) float32 tensor。
+    delegate 到 `online_ncde.ops.dvr.lidar_rays.generate_lidar_rays`，保证训练
+    与 RayIoU 评估用的是同一份 numpy 实现，避免 pitch/azimuth 两侧漂移。
     """
-    pitch_angles = []
-    for k in range(10):
-        angle = math.pi / 2 - math.atan(k + 1)
-        pitch_angles.append(-angle)
-    while pitch_angles[-1] < 0.21:
-        delta = pitch_angles[-1] - pitch_angles[-2]
-        pitch_angles.append(pitch_angles[-1] + delta)
+    from online_ncde.ops.dvr.lidar_rays import generate_lidar_rays as _np_rays
 
-    rays = []
-    for pitch in pitch_angles:
-        for az_deg in np.arange(0, 360, 1):
-            az = np.deg2rad(az_deg)
-            rays.append(
-                (
-                    float(np.cos(pitch) * np.cos(az)),
-                    float(np.cos(pitch) * np.sin(az)),
-                    float(np.sin(pitch)),
-                )
-            )
-    return torch.tensor(rays, dtype=torch.float32, device=device)
+    return torch.from_numpy(_np_rays()).to(device=device, dtype=torch.float32)
 
 
 class RayLoss(nn.Module):
@@ -159,15 +137,20 @@ class RayLoss(nn.Module):
         ray_dirs: torch.Tensor,
         gt_dist: torch.Tensor,
         valid_mask: Optional[torch.Tensor] = None,
+        origin_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """计算 L_hit + L_depth。
+        """计算 L_hit + L_depth（支持多原点）。
 
         Args:
             logits:      (B, C, X, Y, Z) 模型输出 logits。
-            ray_origins: (B, 3) ego 系下的 lidar origin。
-            ray_dirs:    (R, 3) 或 (B, R, 3) 单位方向向量。
-            gt_dist:     (B, R) GT first-hit 距离（米）。NaN 表示该 ray 无效。
-            valid_mask:  (B, R) bool，可选；false 表示忽略该 ray。
+            ray_origins: (B, 3) 或 (B, K, 3) ego 系下的 lidar origin。K=1 时两种
+                         形状等价，用于兼容旧调用。
+            ray_dirs:    (R, 3) 或 (B, R, 3) 单位方向向量。所有 K 个原点共用同一
+                         套方向。
+            gt_dist:     (B, R) 或 (B, K, R) GT first-hit 距离（米）。NaN 表示该
+                         ray 无效。若 ray_origins 给的是 2D 会自动 unsqueeze。
+            valid_mask:  (B, R) / (B, K, R) bool 可选；false 表示忽略该 ray。
+            origin_mask: (B, K) bool 可选；false 表示该原点是 pad，不贡献 loss。
 
         Returns:
             dict 包含:
@@ -176,7 +159,7 @@ class RayLoss(nn.Module):
                 depth:      加权后 depth loss（参与 total）
                 hit_raw:    未加权 hit loss（便于日志）
                 depth_raw:  未加权 depth loss
-                valid_rays: 本 batch 参与计算的 ray 数量
+                valid_rays: 本 batch 参与计算的 ray 数量（跨 K × R 求和）
         """
         if logits.dim() != 5:
             raise ValueError(f"logits 必须是 5D (B,C,X,Y,Z)，实际 {tuple(logits.shape)}")
@@ -184,31 +167,69 @@ class RayLoss(nn.Module):
         device = logits.device
         dtype = logits.dtype
 
+        # --- 0. shape 归一化：把旧的 2D 接口自动升到 (B, 1, *) 走同一条路径 ---
+        if ray_origins.dim() == 2:
+            ray_origins = ray_origins.unsqueeze(1)           # (B,3) → (B,1,3)
+        elif ray_origins.dim() != 3:
+            raise ValueError(
+                f"ray_origins 必须是 (B,3) 或 (B,K,3)，实际 {tuple(ray_origins.shape)}"
+            )
+        if gt_dist.dim() == 2:
+            gt_dist = gt_dist.unsqueeze(1)                   # (B,R) → (B,1,R)
+        elif gt_dist.dim() != 3:
+            raise ValueError(
+                f"gt_dist 必须是 (B,R) 或 (B,K,R)，实际 {tuple(gt_dist.shape)}"
+            )
+        if valid_mask is not None and valid_mask.dim() == 2:
+            valid_mask = valid_mask.unsqueeze(1)             # (B,R) → (B,1,R)
+
+        K = ray_origins.shape[1]
+        if gt_dist.shape[0] != B or gt_dist.shape[1] != K:
+            raise ValueError(
+                f"gt_dist shape {tuple(gt_dist.shape)} 与 ray_origins "
+                f"shape {tuple(ray_origins.shape)} 不匹配"
+            )
+        if valid_mask is not None:
+            if valid_mask.dim() != 3 or valid_mask.shape[:2] != (B, K):
+                raise ValueError(
+                    f"valid_mask 必须是 (B,R) 或 (B,K,R) 且前两维匹配 logits/origins，"
+                    f"实际 {tuple(valid_mask.shape)}"
+                )
+
         if ray_dirs.dim() == 2:
-            ray_dirs = ray_dirs.unsqueeze(0).expand(B, -1, -1)
-        elif ray_dirs.dim() != 3:
+            R = ray_dirs.shape[0]
+            dirs_base = ray_dirs.to(device=device, dtype=dtype).view(1, 1, R, 1, 3)
+        elif ray_dirs.dim() == 3:
+            if ray_dirs.shape[0] != B:
+                raise ValueError(
+                    f"ray_dirs batch 维 {ray_dirs.shape[0]} 与 logits batch {B} 不一致"
+                )
+            R = ray_dirs.shape[1]
+            dirs_base = ray_dirs.to(device=device, dtype=dtype).view(B, 1, R, 1, 3)
+        else:
             raise ValueError(f"ray_dirs 维度不合法：{tuple(ray_dirs.shape)}")
-        R = ray_dirs.shape[1]
+        if gt_dist.shape[2] != R:
+            raise ValueError(
+                f"gt_dist ray 维 {gt_dist.shape[2]} 与 ray_dirs ray 维 {R} 不一致"
+            )
         N = self.num_samples
 
         ray_origins = ray_origins.to(device=device, dtype=dtype)
-        ray_dirs = ray_dirs.to(device=device, dtype=dtype)
         gt_dist = gt_dist.to(device=device, dtype=dtype)
 
-        # --- 1. 构造采样点 (B, R, N, 3) ---
+        # --- 1. 构造采样点 (B, K, R, N, 3) ---
         d = self.sample_depths.to(device=device, dtype=dtype)  # (N,)
-        origins_e = ray_origins.view(B, 1, 1, 3)
-        dirs_e = ray_dirs.unsqueeze(2)                          # (B,R,1,3)
-        d_e = d.view(1, 1, N, 1)                                # (1,1,N,1)
-        xyz = origins_e + d_e * dirs_e                          # (B,R,N,3)
+        origins_e = ray_origins.view(B, K, 1, 1, 3)
+        d_e = d.view(1, 1, 1, N, 1)                             # (1,1,1,N,1)
+        xyz = origins_e + d_e * dirs_base                       # (B,K,R,N,3)
 
         # --- 2. 归一化到 grid_sample 坐标 ---
-        grid = self._world_to_grid(xyz)                         # (B,R,N,3)
+        grid = self._world_to_grid(xyz)                         # (B,K,R,N,3)
         # 采样点是否落在体积内（三个归一化坐标都在 [-1,1]）
-        sample_valid = (grid.abs() <= 1.0).all(dim=-1)          # (B,R,N) bool
-        # grid_sample 5D: grid shape (N, D_out, H_out, W_out, 3)
-        # 把 (R*N) 压到 D_out，另外两个维度置 1。
-        grid_s = grid.view(B, R * N, 1, 1, 3)
+        sample_valid = (grid.abs() <= 1.0).all(dim=-1)          # (B,K,R,N) bool
+        # grid_sample 5D: input (B,1,X,Y,Z)，grid 需要 (B, D_out, H_out, W_out, 3)。
+        # 把 (K*R*N) 压到 D_out，另外两个维度置 1，一次 kernel 调用搞定。
+        grid_s = grid.reshape(B, K * R * N, 1, 1, 3)
 
         # --- 3. p_free → p_occ 三线性插值 ---
         probs = F.softmax(logits, dim=1)                        # (B,C,X,Y,Z)
@@ -219,35 +240,41 @@ class RayLoss(nn.Module):
             mode="bilinear",
             padding_mode="border",
             align_corners=False,
-        )  # (B, 1, R*N, 1, 1)
-        p_free = p_free.view(B, R, N)
+        )  # (B, 1, K*R*N, 1, 1)
+        p_free = p_free.reshape(B, K, R, N)
         # 完全越界的 sample：border padding 会复用边界值，这里强制当作 free
         # (p_free=1 → p_occ=0)，避免边界外 ray 沿用边界 p_free 产生假 first-hit。
         # 体积内、靠近边界的 sample 仍走 border padding，避免 zeros 在边界内侧把
         # p_free 低估 / p_occ 高估。
         p_free = torch.where(sample_valid, p_free, torch.ones_like(p_free))
-        p_occ = (1.0 - p_free).clamp(max=1.0 - self.eps)  # (B,R,N)
+        p_occ = (1.0 - p_free).clamp(max=1.0 - self.eps)  # (B,K,R,N)
 
         # --- 4. first-hit 分布 q_i ---
         # trans_i = Π_{j<i}(1 - p_j)，q_i = p_i * trans_i
         log_one_minus_p = torch.log(
             (1.0 - p_occ).clamp(min=self.eps)
-        )  # (B,R,N)
-        cum = torch.cumsum(log_one_minus_p, dim=-1)             # (B,R,N)
+        )  # (B,K,R,N)
+        cum = torch.cumsum(log_one_minus_p, dim=-1)             # (B,K,R,N)
         # exclusive cumsum: log_trans_i = sum_{j<i} log(1 - p_j)
         log_trans = torch.cat(
             [torch.zeros_like(cum[..., :1]), cum[..., :-1]], dim=-1
         )
-        trans = torch.exp(log_trans)                            # (B,R,N)
-        q = p_occ * trans                                       # (B,R,N)
-        trans_end = torch.exp(cum[..., -1])                     # (B,R) 完全打不到的概率
+        trans = torch.exp(log_trans)                            # (B,K,R,N)
+        q = p_occ * trans                                       # (B,K,R,N)
+        trans_end = torch.exp(cum[..., -1])                     # (B,K,R) 完全打不到的概率
 
         # --- 5. GT 有效 ray 过滤 ---
         gt_is_valid = (
             torch.isfinite(gt_dist)
             & (gt_dist > 0)
             & (gt_dist < self.mid_max_m)
-        )
+        )  # (B,K,R)
+        if origin_mask is not None:
+            if origin_mask.dim() != 2 or origin_mask.shape != (B, K):
+                raise ValueError(
+                    f"origin_mask 必须是 (B,K)，实际 {tuple(origin_mask.shape)}"
+                )
+            gt_is_valid = gt_is_valid & origin_mask.to(device=device).bool().unsqueeze(-1)
         if valid_mask is not None:
             gt_is_valid = gt_is_valid & valid_mask.to(device=device).bool()
 
@@ -275,22 +302,22 @@ class RayLoss(nn.Module):
         gt_dist_eff = gt_dist_safe - self.gt_dist_bias_m
 
         half_win_m = self.window_voxels * self.step_m
-        d_broadcast = d.view(1, 1, N)
-        in_window = (d_broadcast - gt_dist_eff.unsqueeze(-1)).abs() <= half_win_m
+        d_broadcast = d.view(1, 1, 1, N)
+        in_window = (d_broadcast - gt_dist_eff.unsqueeze(-1)).abs() <= half_win_m  # (B,K,R,N)
         # 窗口内必须至少有一个 sample，否则产生恒定大常数惩罚污染均值
-        has_window = in_window.any(dim=-1)
+        has_window = in_window.any(dim=-1)                      # (B,K,R)
         gt_is_valid = gt_is_valid & has_window
-        w = base_w * gt_is_valid.to(dtype)
+        w = base_w * gt_is_valid.to(dtype)                      # (B,K,R)
         w_sum = w.sum().clamp_min(self.eps)
 
         # --- 6. L_hit：窗口内 q 之和的 NLL ---
-        q_in_window = (q * in_window.to(q.dtype)).sum(dim=-1)    # (B,R)
-        nll = -torch.log(q_in_window + self.eps)                 # (B,R)
+        q_in_window = (q * in_window.to(q.dtype)).sum(dim=-1)    # (B,K,R)
+        nll = -torch.log(q_in_window + self.eps)                 # (B,K,R)
         hit_raw = (nll * w).sum() / w_sum
 
         # --- 7. L_depth：非对称 SmoothL1 on expected first-hit depth ---
         d_max = float(N * self.step_m)
-        d_hat = (q * d_broadcast).sum(dim=-1) + trans_end * d_max  # (B,R)
+        d_hat = (q * d_broadcast).sum(dim=-1) + trans_end * d_max  # (B,K,R)
         err = d_hat - gt_dist_eff                                   # 正 = 预测更远
         pos_err = err.clamp(min=0.0)
         neg_err = (-err).clamp(min=0.0)

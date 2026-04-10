@@ -105,6 +105,7 @@ def compute_lidar_origins(
 def load_origins_from_sweep_pkl(
     sweep_pkl_path: str | Path,
     max_origins: int = 8,
+    range_limit: float = 39.0,
 ) -> Dict[str, torch.Tensor]:
     """从 nuscenes_infos_*_sweep.pkl 加载并计算 lidar origins。"""
     path = Path(sweep_pkl_path)
@@ -114,4 +115,6 @@ def load_origins_from_sweep_pkl(
         infos = payload["infos"]
     else:
         infos = payload
-    return compute_lidar_origins(infos, max_origins=max_origins)
+    return compute_lidar_origins(
+        infos, max_origins=max_origins, range_limit=range_limit
+    )
