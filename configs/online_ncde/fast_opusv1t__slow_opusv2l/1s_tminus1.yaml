@@ -1,74 +1,20 @@
-# Canonical 1s_tminus1 preset for fast=opusv1t, slow=opusv2l.
-
-data:
-  info_path: configs/online_ncde/ncde_align_infos_train.pkl
-  val_info_path: configs/online_ncde/ncde_align_infos_val.pkl
-  train_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_train_sup4_sidecar.pkl
-  val_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_val_sup4_sidecar.pkl
-  hard_stats_path: configs/online_ncde/hard_oversample_train_stats.json
-  fast_logits_root: data/logits_opusv1t
-  slow_logit_root: data/logits_opusv2l
-  gt_root: data/nuscenes/gts
-  num_classes: 18
-  free_index: 17
-  pc_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
-  voxel_size: [0.4, 0.4, 0.4]
-  grid_size: [200, 200, 16]
-  gt_mask_key: mask_camera
-  slow_noise_std: 0.0
-  timestamp_scale: 1.0e-6
-  fast_occ_thresh: 0.25
-  topk_other_fill_value: -5.0
-  topk_free_fill_value: 5.0
+# 1s_tminus1 preset：以同目录 train.yaml 为基底，仅覆盖 rollout / 监督权重等差异字段。
+# 未覆盖的字段（loss.ray、loss.focal_mask_weight 等）跟随 train.yaml 当前默认。
+base_config: ./train.yaml
 
 model:
-  feat_dim: 32
-  hidden_dim: 32
-  encoder_in_channels: 18
-  use_fast_residual: true
-  decoder_init_scale: 1.0e-6
   func_g_inner_dim: 32
-  func_g_body_dilations: [1, 2, 3]
-  func_g_gn_groups: 8
 
 loss:
-  gamma: 2.0
   lambda_focal: 0.5
-  lambda_lovasz: 1.0
-  class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
 
 train:
-  batch_size: 1
-  num_workers: 16
-  epochs: 20
-  lr: 1.0e-4
-  warmup_epochs: 1
-  warmup_start_lr: 1.0e-5
-  weight_decay: 1.0e-2
-  clip_norm: 5.0
-  log_interval: 10
-  device: cuda
   rollout_mode: one_second_tminus1
   max_step_index: 6
-  supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
   supervision_weights: [0.50, 0.50, 0.0, 0.0]
-  supervision_weight_normalize: true
 
 dataloader:
-  pin_memory: true
-  prefetch_factor: 2
   persistent_workers: true
 
 eval:
-  batch_size: 1
-  num_workers: 16
-  device: cuda
-  free_conf_thresh: null
-  log_interval: 20
-  log_multistep_losses: true
   primary_supervision_label: t-1.0
-
-wandb:
-  entity: runheyang
-  project: neural-ode
-  name: ""

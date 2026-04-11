@@ -24,7 +24,6 @@ data:
   full_logits_clamp_min: null
   topk_other_fill_value: -5.0
   topk_free_fill_value: 5.0
-  hard_stats_path: configs/online_ncde/hard_oversample_train_stats.json
   gt_root: data/nuscenes/gts
   num_classes: 18
   free_index: 17

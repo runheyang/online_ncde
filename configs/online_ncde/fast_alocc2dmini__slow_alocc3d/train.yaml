@@ -6,7 +6,6 @@ data:
   val_info_path: configs/online_ncde/canonical_infos_val.pkl
   # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
   ray_sidecar_dir: data/online_ncde_ray_sidecar
-  hard_stats_path: ""
   fast_logits_root: data/alocc2d_mini_wo_mask
   slow_logit_root: data/alocc3d_wo_mask
   # ALOCC dense top-k 专用参数
