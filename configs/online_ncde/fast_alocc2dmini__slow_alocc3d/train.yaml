@@ -4,6 +4,8 @@ data:
   logits_format: alocc_dense_topk
   info_path: configs/online_ncde/canonical_infos_train.pkl
   val_info_path: configs/online_ncde/canonical_infos_val.pkl
+  # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
+  ray_sidecar_dir: data/online_ncde_ray_sidecar
   hard_stats_path: ""
   fast_logits_root: data/alocc2d_mini_wo_mask
   slow_logit_root: data/alocc3d_wo_mask
@@ -42,6 +44,32 @@ loss:
   # 设为 null 或删除此行则回退到原始 train with mask 行为。
   focal_mask_weight: 5.0
   class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
+  # Ray first-hit + depth loss（RayLoss）。pc_range / free_index 由 train 脚本
+  # 从 data 配置注入；下列参数均可注释掉走 RayLoss 默认值。
+  ray:
+    # SegAndRayLoss 外层权重：total = seg_total + lambda_ray * ray_total
+    lambda_ray: 0.2
+    # RayLoss 内部两项权重：ray_total = lambda_hit * hit + lambda_depth * depth
+    lambda_hit: 0.5
+    lambda_depth: 0.2
+    # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
+    num_samples: 50
+    step_m: 0.4
+    # L_hit 窗口半宽（单位：step_m）。δ=1 → ±0.4m 内的 q 求和作为命中概率
+    window_voxels: 1
+    # 近/中场切分：gt_dist < near_max_m 用 near_weight，其余用 mid_weight；
+    # gt_dist >= mid_max_m 的 ray 直接丢弃（对齐 RayIoU 的口径）
+    near_max_m: 10.0
+    mid_max_m: 20.0
+    near_weight: 2.0
+    mid_weight: 1.0
+    # 非对称 depth loss：pred 比 GT 远乘 far，比 GT 近乘 near（鼓励保守预测）
+    depth_asym_far: 2.0
+    depth_asym_near: 1.0
+    smooth_l1_beta: 1.0
+    # DVR 出射距离 → center 语义的偏置补偿。null 走默认 0.5 * step_m。
+    # 测试/已 center 化 GT 显式传 0.0
+    gt_dist_bias_m: null
 
 train:
   batch_size: 1

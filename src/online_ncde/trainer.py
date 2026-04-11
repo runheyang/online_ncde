@@ -190,8 +190,13 @@ class Trainer:
                 f"监督时刻数不一致: labels.shape[1]={sup_labels.shape[1]} vs expected={num_sup}"
             )
 
+        # 既要 sidecar 数据齐全，又要 loss_fn 明确声明接受 ray_* kwargs；
+        # 否则把 kwargs 透传给普通 seg loss 会直接 TypeError。
         has_ray = (
-            ray_gt_dist is not None and ray_origin is not None and ray_sup_valid is not None
+            ray_gt_dist is not None
+            and ray_origin is not None
+            and ray_sup_valid is not None
+            and getattr(self.loss_fn, "accepts_ray_kwargs", False)
         )
 
         total = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)

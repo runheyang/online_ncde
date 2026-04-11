@@ -178,6 +178,9 @@ class SegAndRayLoss(nn.Module):
     - 返回 dict 保持 seg loss 的 key 兼容，额外带 ray_* 字段，便于日志。
     """
 
+    # trainer 靠这个标志位判断能否把 ray_* kwargs 透传进来，避免和 isinstance 绑死。
+    accepts_ray_kwargs: bool = True
+
     def __init__(
         self,
         seg_loss: nn.Module,
@@ -200,7 +203,8 @@ class SegAndRayLoss(nn.Module):
         ray_origins: torch.Tensor | None = None,
         gt_dist: torch.Tensor | None = None,
         origin_mask: torch.Tensor | None = None,
-        ray_valid: torch.Tensor | None = None,
+        # per-ray 过滤暂未接入；如需 FOV/方向屏蔽，直接在此处构造 valid_mask
+        # 透传给 self.ray(valid_mask=...)，不要再添加假参数。
     ) -> dict[str, torch.Tensor]:
         seg_out = self.seg(logits, targets, mask)
 
