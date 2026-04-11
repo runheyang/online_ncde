@@ -189,15 +189,20 @@ def test_first_hit_distribution_analytical():
 
 
 def _straight_x_ray() -> tuple[torch.Tensor, torch.Tensor]:
-    """沿 +X 方向的单条 ray。
+    """沿 +X 方向的单条 ray，K=1。
 
     origin 选在 (0, 0.2, 0.4)：这样 ray 正好穿过 iy=100, iz=3 这一行的体素中心，
     并且等间距采样 (0.2, 0.6, ..., 19.8m) 能与 ix=100,101,...149 的体素中心精确对齐，
     避免 bilinear 插值精度问题。
     """
-    origin = torch.tensor([[0.0, 0.2, 0.4]], dtype=torch.float32)
-    direction = torch.tensor([[[1.0, 0.0, 0.0]]], dtype=torch.float32)
+    origin = torch.tensor([[[0.0, 0.2, 0.4]]], dtype=torch.float32)  # (B=1,K=1,3)
+    direction = torch.tensor([[[1.0, 0.0, 0.0]]], dtype=torch.float32)  # (B=1,R=1,3)
     return origin, direction
+
+
+def _gt(gt_value: float) -> torch.Tensor:
+    """构造 (B=1,K=1,R=1) 的 GT 深度。"""
+    return torch.tensor([[[gt_value]]], dtype=torch.float32)
 
 
 # 参考 GT voxel：ix=120, iy=100, iz=3，ray 经过该体素中心，d_star=8.2m
@@ -210,7 +215,7 @@ def test_hit_loss_large_when_all_free():
     origin, direction = _straight_x_ray()
     rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=0.0)
     logits = _free_everywhere_logits()
-    gt_dist = torch.tensor([[GT_DIST]])
+    gt_dist = _gt(GT_DIST)
     out = rl(logits, origin, direction, gt_dist)
     assert out["valid_rays"].item() == 1
     assert out["hit_raw"].item() > 5.0, (
@@ -223,7 +228,7 @@ def test_hit_loss_small_when_voxel_hit():
     origin, direction = _straight_x_ray()
     rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=0.0)
     logits = _occupied_at(*GT_VOXEL)
-    gt_dist = torch.tensor([[GT_DIST]])
+    gt_dist = _gt(GT_DIST)
     out = rl(logits, origin, direction, gt_dist)
     assert out["valid_rays"].item() == 1
     assert out["hit_raw"].item() < 1.0, (
@@ -235,9 +240,9 @@ def test_invalid_ray_skipped():
     """valid_rays=0 时应返回可反传零损失。"""
     rl = _make_ray_loss()
     logits = _free_everywhere_logits().requires_grad_(True)
-    origin = torch.zeros((1, 3))
+    origin = torch.zeros((1, 1, 3))
     direction = torch.tensor([[1.0, 0.0, 0.0]]).view(1, 1, 3)
-    gt_dist = torch.tensor([[float("nan")]])
+    gt_dist = _gt(float("nan"))
     out = rl(logits, origin, direction, gt_dist)
     assert out["valid_rays"].item() == 0
     # 零损失仍应可反传
@@ -262,7 +267,7 @@ def test_gt_dist_bias_compensates_dvr_exit_distance():
             depth_asym_far=2.0, depth_asym_near=1.0,
             gt_dist_bias_m=bias,
         )
-        out = rl(logits, origin, direction, torch.tensor([[gt]]))
+        out = rl(logits, origin, direction, _gt(gt))
         return out["depth_raw"].item()
 
     loss_center_nobias = _depth_raw(0.0, 8.2)
@@ -305,10 +310,10 @@ def test_out_of_bound_samples_do_not_produce_false_hits():
     logits[:, FREE_IDX] = -10.0
 
     # origin 在 +X 边界外 10m，ray 沿 +X 射出，50 个采样点全在场外
-    origin = torch.tensor([[50.0, 0.0, 2.0]])
+    origin = torch.tensor([[[50.0, 0.0, 2.0]]])
     direction = torch.tensor([[[1.0, 0.0, 0.0]]])
     # GT 放在 d[0] = 0.2m，窗口 [0, 0.6] 覆盖最早几个 sample
-    gt_dist = torch.tensor([[0.2]])
+    gt_dist = _gt(0.2)
 
     out = rl(logits, origin, direction, gt_dist)
     assert out["valid_rays"].item() == 1
@@ -334,7 +339,7 @@ def test_hit_loss_gradient_pushes_free_down():
         window_voxels=2,  # 放宽窗口以覆盖最近几个采样点
     )
     logits = _free_everywhere_logits().clone().requires_grad_(True)
-    gt_dist = torch.tensor([[GT_DIST]])
+    gt_dist = _gt(GT_DIST)
     out = rl(logits, origin, direction, gt_dist)
     out["total"].backward()
 
@@ -375,7 +380,7 @@ def test_hit_loss_optimization_converges():
     )
     logits = _free_everywhere_logits().clone().requires_grad_(True)
     opt = torch.optim.Adam([logits], lr=0.5)
-    gt_dist = torch.tensor([[GT_DIST]])
+    gt_dist = _gt(GT_DIST)
 
     losses = []
     for _ in range(200):
@@ -404,7 +409,7 @@ def test_depth_loss_asymmetric_far_heavier_than_near():
     GT 放在 ix=120；场景 A 占据 ix=121（err=+0.4），场景 B 占据 ix=119（err=-0.4）。
     """
     origin, direction = _straight_x_ray()
-    gt_dist = torch.tensor([[GT_DIST]])  # 8.2m
+    gt_dist = _gt(GT_DIST)  # 8.2m
 
     rl = _make_ray_loss(
         lambda_hit=0.0, lambda_depth=1.0, window_voxels=1,
@@ -431,43 +436,21 @@ def test_depth_loss_asymmetric_far_heavier_than_near():
 
 
 # ---------------------------------------------------------------------------
-# 7. 多原点接口：向后兼容、origin_mask、两原点独立贡献
+# 7. 多原点接口：K>1、origin_mask
 # ---------------------------------------------------------------------------
-
-
-def test_multi_origin_k1_equivalence_to_legacy_interface():
-    """(B,1,3) 多原点接口 K=1 与老 (B,3) 单原点接口 bit-level 相同。"""
-    origin, direction = _straight_x_ray()            # origin:(1,3), dir:(1,1,3)
-    rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=1.0)
-    logits = _occupied_at(*GT_VOXEL, free_val=20.0)
-    gt_dist_2d = torch.tensor([[GT_DIST]])           # (1,1)
-
-    out_legacy = rl(logits, origin, direction, gt_dist_2d)
-
-    origin_3d = origin.unsqueeze(1)                  # (1,1,3)
-    gt_dist_3d = gt_dist_2d.unsqueeze(1)             # (1,1,1)
-    out_new = rl(logits, origin_3d, direction, gt_dist_3d)
-
-    for key in ("hit_raw", "depth_raw"):
-        diff = (out_legacy[key] - out_new[key]).abs().item()
-        assert diff < 1e-6, (
-            f"K=1 多原点接口应与老接口等价，{key} 差异 {diff:.2e}"
-        )
-    assert int(out_legacy["valid_rays"].item()) == int(out_new["valid_rays"].item())
 
 
 def test_multi_origin_two_identical_origins_match_single():
     """两份完全相同的原点 → hit_raw/depth_raw 与单原点等价（加权平均的重复）。"""
-    origin, direction = _straight_x_ray()
+    origin, direction = _straight_x_ray()             # origin:(1,1,3)
     rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=1.0)
     logits = _occupied_at(*GT_VOXEL, free_val=20.0)
-    gt_dist_2d = torch.tensor([[GT_DIST]])
+    gt_dist = _gt(GT_DIST)                            # (1,1,1)
 
-    out_ref = rl(logits, origin, direction, gt_dist_2d)
+    out_ref = rl(logits, origin, direction, gt_dist)
 
-    # 复制出 K=2 的 origin/gt_dist，不用 expand（避免共享 storage 影响后续 reshape）
-    origin_k2 = origin.unsqueeze(1).repeat(1, 2, 1).contiguous()        # (1,2,3)
-    gt_dist_k2 = gt_dist_2d.unsqueeze(1).repeat(1, 2, 1).contiguous()    # (1,2,1)
+    origin_k2 = origin.repeat(1, 2, 1).contiguous()   # (1,2,3)
+    gt_dist_k2 = gt_dist.repeat(1, 2, 1).contiguous() # (1,2,1)
 
     out_k2 = rl(logits, origin_k2, direction, gt_dist_k2)
 
@@ -476,7 +459,6 @@ def test_multi_origin_two_identical_origins_match_single():
         assert diff < 1e-6, (
             f"两份相同原点的加权平均应等于单原点，{key} 差异 {diff:.2e}"
         )
-    # valid_rays 会翻倍
     assert int(out_k2["valid_rays"].item()) == 2 * int(out_ref["valid_rays"].item())
 
 
@@ -486,19 +468,17 @@ def test_multi_origin_mask_excludes_padded_origin():
     K=2：第 0 个原点是真正的 GT 对齐原点，第 1 个原点被放到一个不相干的位置（而且
     GT 也乱填），但 origin_mask 标 0。结果应与单原点等价。
     """
-    origin, direction = _straight_x_ray()
+    origin, direction = _straight_x_ray()             # origin:(1,1,3)
     rl = _make_ray_loss(lambda_hit=1.0, lambda_depth=1.0)
     logits = _occupied_at(*GT_VOXEL, free_val=20.0)
-    gt_dist_2d = torch.tensor([[GT_DIST]])
+    gt_dist = _gt(GT_DIST)
 
-    out_ref = rl(logits, origin, direction, gt_dist_2d)
+    out_ref = rl(logits, origin, direction, gt_dist)
 
-    # 第 1 个原点放在 pc_range 边界，GT 也乱填（5.0m），正常参与会产生很大的 hit loss
-    pad_origin = torch.tensor([30.0, 30.0, 2.0])
-    origin_k2 = torch.stack(
-        [origin.squeeze(0), pad_origin], dim=0
-    ).unsqueeze(0).contiguous()                                          # (1,2,3)
-    gt_dist_k2 = torch.tensor([[[GT_DIST], [5.0]]], dtype=torch.float32) # (1,2,1)
+    # 第 1 个原点放在 pc_range 边界，GT 也乱填（5.0m），正常参与会产生很大 hit loss
+    pad_origin = torch.tensor([[[30.0, 30.0, 2.0]]], dtype=torch.float32)
+    origin_k2 = torch.cat([origin, pad_origin], dim=1).contiguous()       # (1,2,3)
+    gt_dist_k2 = torch.tensor([[[GT_DIST], [5.0]]], dtype=torch.float32)   # (1,2,1)
     origin_mask = torch.tensor([[True, False]])
 
     out = rl(

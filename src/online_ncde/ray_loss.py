@@ -139,17 +139,15 @@ class RayLoss(nn.Module):
         valid_mask: Optional[torch.Tensor] = None,
         origin_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """计算 L_hit + L_depth（支持多原点）。
+        """计算 L_hit + L_depth（多原点）。
 
         Args:
             logits:      (B, C, X, Y, Z) 模型输出 logits。
-            ray_origins: (B, 3) 或 (B, K, 3) ego 系下的 lidar origin。K=1 时两种
-                         形状等价，用于兼容旧调用。
+            ray_origins: (B, K, 3) ego 系下的 lidar origin。
             ray_dirs:    (R, 3) 或 (B, R, 3) 单位方向向量。所有 K 个原点共用同一
                          套方向。
-            gt_dist:     (B, R) 或 (B, K, R) GT first-hit 距离（米）。NaN 表示该
-                         ray 无效。若 ray_origins 给的是 2D 会自动 unsqueeze。
-            valid_mask:  (B, R) / (B, K, R) bool 可选；false 表示忽略该 ray。
+            gt_dist:     (B, K, R) GT first-hit 距离（米）。NaN 表示该 ray 无效。
+            valid_mask:  (B, K, R) bool 可选；false 表示忽略该 ray。
             origin_mask: (B, K) bool 可选；false 表示该原点是 pad，不贡献 loss。
 
         Returns:
@@ -167,21 +165,14 @@ class RayLoss(nn.Module):
         device = logits.device
         dtype = logits.dtype
 
-        # --- 0. shape 归一化：把旧的 2D 接口自动升到 (B, 1, *) 走同一条路径 ---
-        if ray_origins.dim() == 2:
-            ray_origins = ray_origins.unsqueeze(1)           # (B,3) → (B,1,3)
-        elif ray_origins.dim() != 3:
+        if ray_origins.dim() != 3:
             raise ValueError(
-                f"ray_origins 必须是 (B,3) 或 (B,K,3)，实际 {tuple(ray_origins.shape)}"
+                f"ray_origins 必须是 (B,K,3)，实际 {tuple(ray_origins.shape)}"
             )
-        if gt_dist.dim() == 2:
-            gt_dist = gt_dist.unsqueeze(1)                   # (B,R) → (B,1,R)
-        elif gt_dist.dim() != 3:
+        if gt_dist.dim() != 3:
             raise ValueError(
-                f"gt_dist 必须是 (B,R) 或 (B,K,R)，实际 {tuple(gt_dist.shape)}"
+                f"gt_dist 必须是 (B,K,R)，实际 {tuple(gt_dist.shape)}"
             )
-        if valid_mask is not None and valid_mask.dim() == 2:
-            valid_mask = valid_mask.unsqueeze(1)             # (B,R) → (B,1,R)
 
         K = ray_origins.shape[1]
         if gt_dist.shape[0] != B or gt_dist.shape[1] != K:
@@ -192,8 +183,7 @@ class RayLoss(nn.Module):
         if valid_mask is not None:
             if valid_mask.dim() != 3 or valid_mask.shape[:2] != (B, K):
                 raise ValueError(
-                    f"valid_mask 必须是 (B,R) 或 (B,K,R) 且前两维匹配 logits/origins，"
-                    f"实际 {tuple(valid_mask.shape)}"
+                    f"valid_mask 必须是 (B,K,R)，实际 {tuple(valid_mask.shape)}"
                 )
 
         if ray_dirs.dim() == 2:
