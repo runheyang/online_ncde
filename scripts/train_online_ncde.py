@@ -14,7 +14,14 @@ from pathlib import Path
 import math
 
 import torch
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Subset
+
+# 使用 file_system 共享策略，避免低 ulimit 下多 epoch 重建 DataLoader 导致 fd 耗尽
+try:
+    mp.set_sharing_strategy("file_system")
+except RuntimeError:
+    pass
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
