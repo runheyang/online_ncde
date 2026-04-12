@@ -423,12 +423,15 @@ def main() -> None:
                 if key.startswith("loss_t"):
                     train_sup_parts.append(f"{key}={float(value):.4f}")
             train_sup_text = (" " + " ".join(train_sup_parts)) if train_sup_parts else ""
-            # 仅在本 epoch 有 ray 监督样本时打印 ray_total（trainer 聚合键名为 "ray"）
-            ray_total_text = (
-                f" ray_total={float(train_metrics['ray']):.4f}"
-                if "ray" in train_metrics
-                else ""
-            )
+            # 仅在本 epoch 有 ray 监督样本时打印 ray 分项。
+            ray_total_text = ""
+            if "ray" in train_metrics:
+                ray_total_text = (
+                    f" ray_total={float(train_metrics['ray']):.4f}"
+                    f" ray_hit={float(train_metrics['ray_hit']):.4f}"
+                    f" ray_empty={float(train_metrics['ray_empty']):.4f}"
+                    f" ray_depth={float(train_metrics['ray_depth']):.4f}"
+                )
             print(
                 f"[train] epoch={epoch} "
                 f"loss={train_metrics['loss']:.4f} "

@@ -6,6 +6,7 @@ from typing import Any, Dict, cast
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from online_ncde.losses import resize_labels_and_mask_to_logits
@@ -162,6 +163,31 @@ class Trainer:
             if values:
                 merged[key] = sum(values) / len(values)
         return merged
+
+    @staticmethod
+    def _ddp_enabled() -> bool:
+        return dist.is_available() and dist.is_initialized()
+
+    def _ddp_stats_device(self) -> torch.device:
+        """统计 all_reduce 的设备选择。
+
+        默认双卡训练使用 gloo，统计张量需放在 CPU；若切回 nccl，则放回当前
+        rank 的 CUDA 设备。
+        """
+        if not self._ddp_enabled():
+            return self.device
+        backend = dist.get_backend()
+        if backend == "nccl":
+            return self.device
+        return torch.device("cpu")
+
+    def _all_reduce_sums(self, values: list[float]) -> list[float]:
+        """对一组标量做一次性 sum all_reduce。"""
+        if not self._ddp_enabled():
+            return values
+        stats = torch.tensor(values, dtype=torch.float64, device=self._ddp_stats_device())
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        return [float(v) for v in stats.cpu().tolist()]
 
     def _compute_multistep_loss(
         self,
@@ -530,7 +556,46 @@ class Trainer:
         if pbar is not None:
             pbar.finish()
 
-        denom = max(total_steps, 1)
+        main_stats = self._all_reduce_sums([
+            total_loss,
+            total_focal,
+            total_aux,
+            total_delta,
+            total_ray,
+            total_ray_hit,
+            total_ray_empty,
+            total_ray_depth,
+            float(total_ray_sup_count),
+            float(total_steps),
+        ])
+        (
+            total_loss,
+            total_focal,
+            total_aux,
+            total_delta,
+            total_ray,
+            total_ray_hit,
+            total_ray_empty,
+            total_ray_depth,
+            total_ray_sup_count_f,
+            total_steps_f,
+        ) = main_stats
+        total_ray_sup_count = int(round(total_ray_sup_count_f))
+        denom = max(int(round(total_steps_f)), 1)
+
+        sup_keys = [f"loss_{label}" for label in self.supervision_labels]
+        sup_stats = self._all_reduce_sums(
+            [total_sup_loss.get(key, 0.0) for key in sup_keys]
+            + [float(total_sup_count.get(key, 0)) for key in sup_keys]
+        )
+        sup_split = len(sup_keys)
+        total_sup_loss = {
+            key: float(value) for key, value in zip(sup_keys, sup_stats[:sup_split])
+        }
+        total_sup_count = {
+            key: int(round(value)) for key, value in zip(sup_keys, sup_stats[sup_split:])
+        }
+
         metrics = {
             "loss": total_loss / denom,
             "focal": total_focal / denom,
