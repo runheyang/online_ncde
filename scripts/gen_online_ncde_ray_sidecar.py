@@ -9,12 +9,15 @@ sweep pkl 里用 `compute_lidar_origins` 计算最多 K 个 lidar origin（与 R
 
 输出布局（一个目录，便于 mmap 加载）：
     <out_dir>/
-      <split>_dist.npy        (N, 4, K, R)  float16   NaN = 无效 ray
+      <split>_dist.npy        (N, 4, K, R)  float16
+                            finite = hit 距离（米）
+                            +inf   = 监督视野内 no-hit
+                            NaN    = ignore
       <split>_origin.npy      (N, 4, K, 3)  float32   lidar origin（pad 填零）
       <split>_origin_mask.npy (N, 4, K)     uint8     1 = 该 origin 有效
       <split>_sup_mask.npy    (N, 4)        uint8     1 = 该 sup 有效
       <split>_meta.pkl        {"token_to_idx", "supervision_labels",
-                               "num_origins", "schema_version": v2, ...}
+                               "num_origins", "schema_version": v3, ...}
 
 用法:
     python scripts/gen_online_ncde_ray_sidecar.py \
@@ -43,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
-from online_ncde.data.ray_sidecar import _SCHEMA_V2  # noqa: E402
+from online_ncde.data.ray_sidecar import _SCHEMA_V3  # noqa: E402
 from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
 from online_ncde.ray_loss import generate_lidar_rays  # noqa: E402
 
@@ -164,7 +167,13 @@ def parse_args() -> argparse.Namespace:
         "--max-valid-m",
         type=float,
         default=60.0,
-        help="超过此距离视为无效（即 DVR 跑到边界都没命中）",
+        help="occupied hit 超过此距离视为 ignore；free/no-hit ray 不受此阈值影响",
+    )
+    parser.add_argument(
+        "--ray-horizon-m",
+        type=float,
+        default=20.0,
+        help="训练监督视野半径。hit >= 此距离时编码为 no-hit（inf）",
     )
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
@@ -198,6 +207,9 @@ def main() -> None:
     K = int(args.num_origins)
     if K < 1:
         raise ValueError(f"--num-origins 必须 >=1，实际 {K}")
+    ray_horizon_m = float(args.ray_horizon_m)
+    if ray_horizon_m <= 0:
+        raise ValueError(f"--ray-horizon-m 必须 > 0，实际 {ray_horizon_m}")
 
     print(f"[load] info={info_path}")
     info_payload = _load_pkl(info_path)
@@ -237,7 +249,7 @@ def main() -> None:
     print(f"[origins] got origins for {len(origins_by_token)} tokens (K={K})")
 
     # ------------------------------------------------------------------
-    # 预分配输出（新 schema v2，文件名带 split 前缀）
+    # 预分配输出（新 schema v3，文件名带 split 前缀）
     # ------------------------------------------------------------------
     dist_path = out_dir / f"{prefix}dist.npy"
     origin_path = out_dir / f"{prefix}origin.npy"
@@ -260,6 +272,9 @@ def main() -> None:
     num_raycasts = 0
     num_skipped_missing_gt = 0
     num_skipped_missing_origins = 0
+    num_hit_rays = 0
+    num_empty_rays = 0
+    num_ignore_rays = 0
     origin_count_hist: list[int] = []
 
     def _load_semantics(rel_path: str) -> np.ndarray | None:
@@ -332,17 +347,39 @@ def main() -> None:
                     grid_size=grid_size,
                     device=device,
                 )
-                invalid = (
-                    (cls_k == free_index)
-                    | (dist_k <= 0)
-                    | (dist_k >= args.max_valid_m)
+                dist_store = dist_k.astype(np.float32, copy=True)
+                bad = (~np.isfinite(dist_store)) | (dist_store <= 0)
+                too_far_hit = (
+                    (cls_k != free_index)
+                    & (~bad)
+                    & (dist_store >= float(args.max_valid_m))
                 )
-                dist_k[invalid] = np.nan
+                is_hit = (
+                    (cls_k != free_index)
+                    & (~bad)
+                    & (~too_far_hit)
+                    & (dist_store < ray_horizon_m)
+                )
+                is_empty = (
+                    ((cls_k == free_index) & (~bad))
+                    | (
+                        (cls_k != free_index)
+                        & (~bad)
+                        & (~too_far_hit)
+                        & (dist_store >= ray_horizon_m)
+                    )
+                )
+                ignore = ~(is_hit | is_empty)
+                dist_store[is_empty] = np.inf
+                dist_store[ignore] = np.nan
 
-                dist_arr[idx, sup_i, k] = dist_k.astype(np.float16)
+                dist_arr[idx, sup_i, k] = dist_store.astype(np.float16)
                 origin_arr[idx, sup_i, k] = origins_np[k]
                 origin_mask_arr[idx, sup_i, k] = 1
                 num_raycasts += 1
+                num_hit_rays += int(is_hit.sum())
+                num_empty_rays += int(is_empty.sum())
+                num_ignore_rays += int(ignore.sum())
 
             sup_mask_arr[idx, sup_i] = 1
             any_sup = True
@@ -379,7 +416,8 @@ def main() -> None:
         origin_cnt_max = 0
 
     meta = {
-        "schema_version": _SCHEMA_V2,
+        "schema_version": _SCHEMA_V3,
+        "dist_semantics": "finite=hit_dist_m, inf=no_hit, nan=ignore",
         "split": split,
         "source_info_path": info_path,
         "source_sup4_sidecar_path": sup4_path,
@@ -392,11 +430,16 @@ def main() -> None:
         "num_rays": R,
         "num_origins": K,
         "origin_range_limit": float(args.origin_range_limit),
+        "ray_horizon_m": ray_horizon_m,
+        "far_hit_encoded_as_empty_within_horizon": True,
         "ray_dirs": lidar_rays_cpu.cpu().numpy().astype(np.float32),
         "supervision_labels": ["t-1.5", "t-1.0", "t-0.5", "t"],
         "num_entries": int(N),
         "num_valid_entries": int(num_valid_entries),
         "num_raycasts": int(num_raycasts),
+        "num_hit_rays": int(num_hit_rays),
+        "num_empty_rays": int(num_empty_rays),
+        "num_ignore_rays": int(num_ignore_rays),
         "num_skipped_missing_gt": int(num_skipped_missing_gt),
         "num_skipped_missing_origins": int(num_skipped_missing_origins),
         "origin_count_mean": origin_cnt_mean,
@@ -415,6 +458,7 @@ def main() -> None:
         f"[done] split={split} N={N} K={K} valid={num_valid_entries} "
         f"raycasts={num_raycasts} skipped_gt={num_skipped_missing_gt} "
         f"skipped_origins={num_skipped_missing_origins} "
+        f"hit={num_hit_rays} empty={num_empty_rays} ignore={num_ignore_rays} "
         f"origin_cnt=(min={origin_cnt_min}, mean={origin_cnt_mean:.2f}, max={origin_cnt_max}) "
         f"size={total_bytes / 1024 / 1024:.1f} MB"
     )

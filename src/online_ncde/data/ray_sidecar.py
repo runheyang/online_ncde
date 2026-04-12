@@ -3,7 +3,10 @@
 数据布局（由 scripts/gen_online_ncde_ray_sidecar.py 产出）：
 
     <dir>/
-      <split>_dist.npy        (N, 4, K, R) float16   NaN = 无效 ray
+      <split>_dist.npy        (N, 4, K, R) float16
+                           finite = hit 距离（米）
+                           +inf   = 监督视野内 no-hit
+                           NaN    = ignore
       <split>_origin.npy      (N, 4, K, 3) float32
       <split>_origin_mask.npy (N, 4, K)    uint8     1 = 该 origin 有效
       <split>_sup_mask.npy    (N, 4)       uint8     1 = 该 sup 有效
@@ -21,7 +24,7 @@ from typing import Dict, Tuple
 import numpy as np
 
 
-_SCHEMA_V2 = "online_ncde_ray_sidecar_v2"
+_SCHEMA_V3 = "online_ncde_ray_sidecar_v3"
 
 
 class RaySidecar:
@@ -38,14 +41,18 @@ class RaySidecar:
         with open(meta_path, "rb") as f:
             meta = pickle.load(f)
         schema_version = str(meta.get("schema_version", ""))
-        if schema_version != _SCHEMA_V2:
+        if schema_version != _SCHEMA_V3:
             raise ValueError(
-                f"仅支持 schema={_SCHEMA_V2}，实际 {schema_version!r}；"
+                f"仅支持 schema={_SCHEMA_V3}，实际 {schema_version!r}；"
                 "请用 scripts/gen_online_ncde_ray_sidecar.py 重新生成 sidecar。"
             )
         self.schema_version = schema_version
         self.token_to_idx: Dict[str, int] = dict(meta["token_to_idx"])
         self.supervision_labels = list(meta.get("supervision_labels", []))
+        self.dist_semantics = str(
+            meta.get("dist_semantics", "finite=hit_dist_m, inf=no_hit, nan=ignore")
+        )
+        self.ray_horizon_m = float(meta.get("ray_horizon_m", 0.0))
 
         # mmap 打开，worker 进程 / DDP rank 间共享 page cache
         self.dist = np.load(dist_path, mmap_mode="r")
@@ -81,7 +88,10 @@ class RaySidecar:
         """按 token 查一条样本。
 
         返回 tuple:
-            dist:        (num_sup, K, R) float32   NaN = 无效 ray
+            dist:        (num_sup, K, R) float32
+                         finite = hit 距离（米）
+                         inf    = 监督视野内 no-hit
+                         NaN    = ignore
             origin:      (num_sup, K, 3) float32
             sup_mask:    (num_sup,)      uint8     1 = 该 sup 有效
             origin_mask: (num_sup, K)    uint8     1 = 该 origin 有效

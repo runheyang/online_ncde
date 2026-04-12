@@ -48,9 +48,11 @@ loss:
   ray:
     # SegAndRayLoss 外层权重：total = seg_total + lambda_ray * ray_total
     lambda_ray: 0.2
-    # RayLoss 内部两项权重：ray_total = lambda_hit * hit + lambda_depth * depth
+    # 第一版：补 empty/no-hit 监督，depth 降为辅助项。
+    # ray_total = lambda_hit * hit + lambda_empty * empty + lambda_depth * depth
     lambda_hit: 0.5
-    lambda_depth: 0.2
+    lambda_empty: 0.5
+    lambda_depth: 0.05
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4

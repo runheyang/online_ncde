@@ -13,16 +13,20 @@
 from __future__ import annotations
 
 import math
+import pickle
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
+from online_ncde.data.ray_sidecar import RaySidecar, _SCHEMA_V3  # noqa: E402
 from online_ncde.ray_loss import RayLoss, generate_lidar_rays  # noqa: E402
 
 
@@ -208,6 +212,7 @@ def _gt(gt_value: float) -> torch.Tensor:
 # 参考 GT voxel：ix=120, iy=100, iz=3，ray 经过该体素中心，d_star=8.2m
 GT_VOXEL = (120, 100, 3)
 GT_DIST = PC_RANGE[0] + (GT_VOXEL[0] + 0.5) * VOXEL_SIZE  # 8.2
+FALSE_HIT_VOXEL = (102, 100, 3)
 
 
 def test_hit_loss_large_when_all_free():
@@ -247,6 +252,111 @@ def test_invalid_ray_skipped():
     assert out["valid_rays"].item() == 0
     # 零损失仍应可反传
     out["total"].backward()
+
+
+def test_zero_early_return_contains_new_fields():
+    """supervised_rays=0 的 early return 应返回完整字段。"""
+    rl = _make_ray_loss(lambda_hit=1.0, lambda_empty=1.0, lambda_depth=1.0)
+    logits = _free_everywhere_logits().requires_grad_(True)
+    origin = torch.zeros((1, 1, 3))
+    direction = torch.tensor([[1.0, 0.0, 0.0]]).view(1, 1, 3)
+    gt_dist = _gt(float("nan"))
+    out = rl(logits, origin, direction, gt_dist)
+    for key in (
+        "empty",
+        "empty_raw",
+        "hit_rays",
+        "empty_rays",
+        "supervised_rays",
+        "valid_rays",
+    ):
+        assert key in out, f"缺少字段 {key}"
+    assert int(out["supervised_rays"].item()) == 0
+    assert int(out["empty_rays"].item()) == 0
+    out["total"].backward()
+
+
+def test_empty_ray_loss_small_when_all_free():
+    """GT=no-hit 且 volume 全 free 时，empty loss 应很小。"""
+    origin, direction = _straight_x_ray()
+    rl = _make_ray_loss(lambda_hit=0.0, lambda_empty=1.0, lambda_depth=0.0)
+    logits = _free_everywhere_logits()
+    out = rl(logits, origin, direction, _gt(float("inf")))
+    assert int(out["hit_rays"].item()) == 0
+    assert int(out["empty_rays"].item()) == 1
+    assert int(out["valid_rays"].item()) == 1
+    assert out["hit_raw"].item() == 0.0
+    assert out["depth_raw"].item() == 0.0
+    assert out["empty_raw"].item() < 0.1, (
+        f"全 free 时 no-hit loss 应很小，实际 {out['empty_raw'].item():.4f}"
+    )
+    assert torch.allclose(out["total"], out["empty"])
+
+
+def test_empty_ray_loss_large_when_false_hit_exists():
+    """GT=no-hit，但 ray 前方有 occupied 时，empty loss 应明显增大。"""
+    origin, direction = _straight_x_ray()
+    rl = _make_ray_loss(lambda_hit=0.0, lambda_empty=1.0, lambda_depth=0.0)
+    out_free = rl(_free_everywhere_logits(), origin, direction, _gt(float("inf")))
+    out_false = rl(
+        _occupied_at(*FALSE_HIT_VOXEL, free_val=20.0),
+        origin,
+        direction,
+        _gt(float("inf")),
+    )
+    assert int(out_false["hit_rays"].item()) == 0
+    assert int(out_false["empty_rays"].item()) == 1
+    assert out_false["empty_raw"].item() > out_free["empty_raw"].item() + 0.05, (
+        f"前方假 hit 应显著降低 no-hit 概率："
+        f"free={out_free['empty_raw'].item():.4f}, "
+        f"false={out_false['empty_raw'].item():.4f}"
+    )
+
+
+def test_far_hit_is_treated_as_empty_within_horizon():
+    """GT 有限但超出监督 horizon 时，应按 empty ray 处理。"""
+    origin, direction = _straight_x_ray()
+    rl = _make_ray_loss(
+        lambda_hit=1.0, lambda_empty=1.0, lambda_depth=1.0, mid_max_m=20.0
+    )
+    out = rl(_free_everywhere_logits(), origin, direction, _gt(25.0))
+    assert int(out["hit_rays"].item()) == 0
+    assert int(out["empty_rays"].item()) == 1
+    assert int(out["supervised_rays"].item()) == 1
+    assert out["hit_raw"].item() == 0.0
+    assert out["depth_raw"].item() == 0.0
+    assert torch.allclose(out["total"], out["empty"])
+
+
+def test_sidecar_v3_inf_round_trip():
+    """v3 sidecar 中的 inf/no-hit 读回后仍应保持 inf。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dist = np.array([[[[1.0, np.inf, np.nan]]]], dtype=np.float16)
+        origin = np.zeros((1, 1, 1, 3), dtype=np.float32)
+        sup_mask = np.ones((1, 1), dtype=np.uint8)
+        origin_mask = np.ones((1, 1, 1), dtype=np.uint8)
+        meta = {
+            "schema_version": _SCHEMA_V3,
+            "token_to_idx": {"tok": 0},
+            "supervision_labels": ["t"],
+            "num_rays": 3,
+            "dist_semantics": "finite=hit_dist_m, inf=no_hit, nan=ignore",
+            "ray_horizon_m": 20.0,
+        }
+        np.save(Path(tmpdir) / "train_dist.npy", dist)
+        np.save(Path(tmpdir) / "train_origin.npy", origin)
+        np.save(Path(tmpdir) / "train_sup_mask.npy", sup_mask)
+        np.save(Path(tmpdir) / "train_origin_mask.npy", origin_mask)
+        with open(Path(tmpdir) / "train_meta.pkl", "wb") as f:
+            pickle.dump(meta, f)
+
+        sidecar = RaySidecar(tmpdir, "train")
+        hit = sidecar.query("tok")
+        assert hit is not None
+        dist_q, _, _, _ = hit
+        assert np.isfinite(dist_q[0, 0, 0])
+        assert np.isinf(dist_q[0, 0, 1])
+        assert np.isnan(dist_q[0, 0, 2])
 
 
 def test_gt_dist_bias_compensates_dvr_exit_distance():
