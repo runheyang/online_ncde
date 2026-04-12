@@ -69,7 +69,7 @@ loss:
     # ray_total = lambda_hit * hit + lambda_empty * empty + lambda_depth * depth
     lambda_hit: 0.5
     lambda_empty: 0.5
-    lambda_depth: 0.05
+    lambda_depth: 0.1
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4
