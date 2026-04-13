@@ -335,8 +335,12 @@ def main() -> None:
 
     scheduler = build_scheduler(optimizer, train_cfg, args)
     if scheduler is not None and start_epoch > 1:
-        for _ in range(start_epoch - 1):
-            scheduler.step()
+        # resume 快进 scheduler 到当前 epoch，无需对应 optimizer.step()，suppress 警告
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*before.*optimizer.step.*")
+            for _ in range(start_epoch - 1):
+                scheduler.step()
 
     # 给 build_loss 注入 ray 需要的几何常量（yaml 里不重复填）。
     ray_cfg = loss_cfg.get("ray", None)
@@ -364,15 +368,43 @@ def main() -> None:
         is_main=is_main,
     )
 
+    # --- 推导 output_dir：resume 时复用原目录，否则新建时间戳目录 ---
+    resumed_wandb_id = None
+    if args.resume:
+        # checkpoint 路径形如 .../20260412_225327_200x200x16/epoch_4.pth，取父目录
+        output_dir = os.path.dirname(os.path.abspath(args.resume))
+        # 从 checkpoint 中读取 wandb_run_id 用于续接
+        _ckpt_payload = torch.load(args.resume, map_location="cpu")
+        resumed_wandb_id = _ckpt_payload.get("wandb_run_id", None)
+        del _ckpt_payload
+    else:
+        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+        output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
+        if use_ddp:
+            if rank == 0:
+                ts_tensor = torch.tensor(
+                    [int(datetime.now().strftime("%Y%m%d%H%M%S"))], dtype=torch.long, device=device
+                )
+            else:
+                ts_tensor = torch.zeros(1, dtype=torch.long, device=device)
+            dist.broadcast(ts_tensor, src=0)
+            timestamp = str(ts_tensor.item())
+            timestamp = f"{timestamp[:8]}_{timestamp[8:]}"
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = os.path.join(output_base, f"{timestamp}_200x200x16")
+    os.makedirs(output_dir, exist_ok=True)
+    if is_main:
+        print(f"[ckpt] output_dir: {output_dir}")
+
+    # --- wandb 初始化：resume 时续接同一个 run ---
     run = None
     if args.wandb and is_main:
         if wandb is None:
             raise ImportError("未安装 wandb，无法启用日志。")
-        run_name = wandb_cfg.get("name", "") or datetime.now().strftime("%Y%m%d_%H%M%S")
-        run = wandb.init(
+        wandb_kwargs = dict(
             entity=wandb_cfg.get("entity", "runheyang"),
             project=wandb_cfg.get("project", "neural-ode"),
-            name=run_name,
             config={
                 "epochs": int(train_cfg["epochs"]),
                 "batch_size": int(train_cfg["batch_size"]),
@@ -380,30 +412,16 @@ def main() -> None:
                 "weight_decay": float(train_cfg["weight_decay"]),
             },
         )
+        if resumed_wandb_id:
+            # 续接之前的 run
+            wandb_kwargs["id"] = resumed_wandb_id
+            wandb_kwargs["resume"] = "must"
+        else:
+            wandb_kwargs["name"] = wandb_cfg.get("name", "") or datetime.now().strftime("%Y%m%d_%H%M%S")
+        run = wandb.init(**wandb_kwargs)
         run.define_metric("epoch")
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("val/*", step_metric="epoch")
-
-    # 从 config 路径推导输出目录：configs/X/Y/train.yaml → outputs/X/Y/{timestamp}_200x200x16
-    # DDP 模式下 rank0 生成时间戳后广播，保证所有 rank 目录一致
-    config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
-    output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
-    if use_ddp:
-        if rank == 0:
-            ts_tensor = torch.tensor(
-                [int(datetime.now().strftime("%Y%m%d%H%M%S"))], dtype=torch.long, device=device
-            )
-        else:
-            ts_tensor = torch.zeros(1, dtype=torch.long, device=device)
-        dist.broadcast(ts_tensor, src=0)
-        timestamp = str(ts_tensor.item())
-        timestamp = f"{timestamp[:8]}_{timestamp[8:]}"
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(output_base, f"{timestamp}_200x200x16")
-    os.makedirs(output_dir, exist_ok=True)
-    if is_main:
-        print(f"[ckpt] output_dir: {output_dir}")
 
     # 循环外创建 train_loader（persistent_workers 常驻），避免每轮重建开销
     train_loader = DataLoader(train_dataset, **train_loader_kwargs)
@@ -543,7 +561,10 @@ def main() -> None:
                     run.log(payload, commit=True)
 
             ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
-            trainer.save_checkpoint(ckpt_path, epoch=epoch)
+            ckpt_extra = {}
+            if run is not None:
+                ckpt_extra["wandb_run_id"] = run.id
+            trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
             print(f"[ckpt] saved -> {ckpt_path}")
 
         # 同步所有 rank，等待 rank 0 完成 eval/checkpoint

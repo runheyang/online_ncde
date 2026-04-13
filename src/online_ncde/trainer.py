@@ -725,7 +725,7 @@ class Trainer:
             metrics["predictions"] = collected
         return metrics
 
-    def save_checkpoint(self, path: str, epoch: int | None = None) -> None:
+    def save_checkpoint(self, path: str, epoch: int | None = None, extra: dict | None = None) -> None:
         """保存模型参数及 optimizer 状态（自动解包 DDP）。"""
         raw_model = self.model.module if hasattr(self.model, "module") else self.model
-        _save_checkpoint(path, model=raw_model, optimizer=self.optimizer, epoch=epoch)
+        _save_checkpoint(path, model=raw_model, optimizer=self.optimizer, epoch=epoch, extra=extra)
