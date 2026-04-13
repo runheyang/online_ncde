@@ -266,7 +266,9 @@ def main() -> None:
         )
         if val_workers > 0:
             val_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-            val_loader_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+            # val 强制关闭 persistent_workers：eval 频率低，worker 用完即释放，
+            # 避免与 train workers 同时常驻导致内存峰值过高
+            val_loader_kwargs["persistent_workers"] = False
 
     # DDP 模式下按 local_rank 分配 GPU，否则用配置值
     device = torch.device(f"cuda:{local_rank}" if use_ddp else (train_cfg["device"] if torch.cuda.is_available() else "cpu"))
@@ -316,7 +318,9 @@ def main() -> None:
     )
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-        train_loader_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+        # DDP 多进程时关闭 persistent_workers，避免 train/val 切换期间
+        # worker 同时常驻导致内存峰值过高（3 卡 × 16 workers × 2 loader = 96 进程）
+        train_loader_kwargs["persistent_workers"] = False if use_ddp else loader_cfg.get("persistent_workers", False)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -401,18 +405,20 @@ def main() -> None:
     if is_main:
         print(f"[ckpt] output_dir: {output_dir}")
 
+    # 循环外创建 train_loader（persistent_workers 常驻），避免每轮重建开销
+    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
+    # val_loader 在循环外创建一次，persistent_workers=False 故 worker 每次迭代结束自动回收
+    val_loader = DataLoader(val_dataset, **val_loader_kwargs) if val_dataset is not None else None
+
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
         # DDP 模式下每 epoch 设置 sampler epoch，保证数据打乱不同
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        # 每 epoch 创建 train_loader，训练完立即释放
-        train_loader = DataLoader(train_dataset, **train_loader_kwargs)
         train_metrics = trainer.train_one_epoch(
             train_loader,
             epoch=epoch,
         )
-        del train_loader
         _cleanup_gpu_cache()
         if scheduler is not None:
             scheduler.step()
@@ -453,11 +459,8 @@ def main() -> None:
 
         # eval / checkpoint 仅 rank 0 执行，其他 rank 在 barrier 处等待
         if is_main:
-            if val_dataset is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
-                # 每次 eval 创建 val_loader，评估完立即释放
-                val_loader = DataLoader(val_dataset, **val_loader_kwargs)
+            if val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
                 val_metrics = trainer.evaluate(val_loader, collect_predictions=args.rayiou)
-                del val_loader
                 _cleanup_gpu_cache()
                 val_sup_parts = []
                 for key, value in val_metrics.items():
