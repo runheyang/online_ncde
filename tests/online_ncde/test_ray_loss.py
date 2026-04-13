@@ -604,6 +604,72 @@ def test_multi_origin_mask_excludes_padded_origin():
 
 
 # ---------------------------------------------------------------------------
+# 8. L_pre_free 测试
+# ---------------------------------------------------------------------------
+
+
+def test_pre_free_zero_when_no_pre_surface_points():
+    """GT 命中距离很近（≤ margin）时，没有 pre-surface 采样点，pre_free 应为 0。"""
+    origin, direction = _straight_x_ray()
+    # GT 距离设为 0.4m（第一个采样点 d=0.2m，margin=0.4m → 没有点满足 d < 0.4 - 0.4 = 0）
+    gt_dist = torch.tensor([[[0.4]]], dtype=torch.float32)
+    rl = _make_ray_loss(lambda_hit=1.0, lambda_pre_free=1.0, lambda_depth=0.0)
+    logits = _free_everywhere_logits()
+    out = rl(logits, origin, direction, gt_dist)
+    assert out["pre_free_raw"].item() < 1e-6, (
+        f"无 pre-surface 点时 pre_free_raw 应为 0，实际 {out['pre_free_raw'].item():.6f}"
+    )
+
+
+def test_pre_free_large_when_false_occupied_before_surface():
+    """GT surface 前方有假 occupied 时，pre_free_raw 应明显大于全 free 场景���"""
+    origin, direction = _straight_x_ray()
+    gt_dist = _gt(GT_DIST)  # 8.2m
+    rl = _make_ray_loss(lambda_hit=0.0, lambda_pre_free=1.0, lambda_depth=0.0)
+
+    # 基线：全 free
+    logits_clean = _free_everywhere_logits()
+    out_clean = rl(logits_clean, origin, direction, gt_dist)
+
+    # 在 GT surface 前方放一个假 occupied voxel (ix=110, 距离约 4.2m < 8.2m)
+    ix_false, iy, iz = 110, GT_VOXEL[1], GT_VOXEL[2]
+    logits_dirty = _occupied_at(ix_false, iy, iz, free_val=20.0)
+    out_dirty = rl(logits_dirty, origin, direction, gt_dist)
+
+    assert out_dirty["pre_free_raw"].item() > out_clean["pre_free_raw"].item() + 0.01, (
+        f"前方假 occupied 应增大 pre_free_raw："
+        f"clean={out_clean['pre_free_raw'].item():.4f}, "
+        f"dirty={out_dirty['pre_free_raw'].item():.4f}"
+    )
+
+
+def test_pre_free_disabled_when_lambda_zero():
+    """lambda_pre_free=0 时，行为与旧版完全一致（pre_free 不影响 total）。"""
+    origin, direction = _straight_x_ray()
+    gt_dist = _gt(GT_DIST)
+
+    rl_old = _make_ray_loss(lambda_hit=1.0, lambda_pre_free=0.0, lambda_depth=1.0)
+    rl_new = _make_ray_loss(lambda_hit=1.0, lambda_pre_free=0.5, lambda_depth=1.0)
+
+    # 在 GT 前方放假 occupied
+    ix_false, iy, iz = 110, GT_VOXEL[1], GT_VOXEL[2]
+    logits = _occupied_at(ix_false, iy, iz, free_val=20.0)
+
+    out_old = rl_old(logits, origin, direction, gt_dist)
+    out_new = rl_new(logits, origin, direction, gt_dist)
+
+    # lambda=0 时 pre_free 不进 total
+    assert abs(out_old["pre_free"].item()) < 1e-8, (
+        f"lambda_pre_free=0 时 pre_free weighted 应为 0，实际 {out_old['pre_free'].item()}"
+    )
+    # lambda>0 时 total 应更大
+    assert out_new["total"].item() > out_old["total"].item(), (
+        f"lambda_pre_free>0 时 total 应更大："
+        f"old={out_old['total'].item():.4f}, new={out_new['total'].item():.4f}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 运行入口：不依赖 pytest，直接 python 跑
 # ---------------------------------------------------------------------------
 

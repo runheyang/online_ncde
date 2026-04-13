@@ -47,7 +47,7 @@ class RayLoss(nn.Module):
         window_voxels:   L_hit 窗口半宽，以 step 为单位（δ=1 → 窗口 ±0.4m）。
         near_max_m/mid_max_m: 近场/中场的深度上界。
         near_weight/mid_weight: 两段的 ray 权重。
-        lambda_hit/lambda_empty/lambda_depth: 三项 loss 的组合权重。
+        lambda_hit/lambda_empty/lambda_pre_free/lambda_depth: 各项 loss 的组合权重。
         depth_asym_far:  pred 比 GT 远时 SmoothL1 的权重。
         depth_asym_near: pred 比 GT 近时 SmoothL1 的权重。
         smooth_l1_beta:  SmoothL1 的切换阈值（米）。
@@ -72,6 +72,7 @@ class RayLoss(nn.Module):
         mid_weight: float = 1.0,
         lambda_hit: float = 0.5,
         lambda_empty: float = 0.5,
+        lambda_pre_free: float = 0.0,
         lambda_depth: float = 0.2,
         depth_asym_far: float = 2.0,
         depth_asym_near: float = 1.0,
@@ -95,6 +96,7 @@ class RayLoss(nn.Module):
         self.mid_weight = float(mid_weight)
         self.lambda_hit = float(lambda_hit)
         self.lambda_empty = float(lambda_empty)
+        self.lambda_pre_free = float(lambda_pre_free)
         self.lambda_depth = float(lambda_depth)
         self.depth_asym_far = float(depth_asym_far)
         self.depth_asym_near = float(depth_asym_near)
@@ -310,9 +312,11 @@ class RayLoss(nn.Module):
                 "total": zero,
                 "hit": zero,
                 "empty": zero,
+                "pre_free": zero,
                 "depth": zero,
                 "hit_raw": zero.detach(),
                 "empty_raw": zero.detach(),
+                "pre_free_raw": zero.detach(),
                 "depth_raw": zero.detach(),
                 "hit_rays": zero_count,
                 "empty_rays": zero_count,
@@ -331,6 +335,30 @@ class RayLoss(nn.Module):
         # --- 7. L_empty：no-hit 概率的 NLL ---
         empty_nll = -torch.log(trans_end + self.eps)             # (B,K,R)
         empty_raw = _masked_mean(empty_nll, w_empty)
+
+        # --- 7.5 L_pre_free：GT surface 前方采样点显式约束为 free ---
+        # 对 hit ray，在 GT 表面前方（距离 < gt_dist_eff - δ）的采样点上，
+        # 直接监督 p_occ → 0，补充 L_hit 窗口 NLL 对前方脏点的弱隐式惩罚。
+        if self.lambda_pre_free > 0.0 and int(hit_rays.item()) > 0:
+            pre_margin_m = self.window_voxels * self.step_m  # 与 hit 窗口同宽的 margin
+            # (B,K,R,N) bool：采样深度严格小于 GT surface - margin
+            pre_surface = (
+                d_broadcast < (gt_dist_eff.unsqueeze(-1) - pre_margin_m)
+            ) & hit_mask.unsqueeze(-1)  # 只对 hit ray 生效
+            pre_count = pre_surface.sum(dim=-1)  # (B,K,R) 每条 ray 的 pre-surface 点数
+            # -log(1 - p_occ) = -log(p_free)，要求前方点为 free
+            pre_free_nll = -torch.log(
+                (1.0 - p_occ).clamp(min=self.eps)
+            )  # (B,K,R,N)
+            # 先按每条 ray 内的 pre-surface 点求均值，再按 ray 加权均值
+            pre_free_per_ray = (pre_free_nll * pre_surface.to(pre_free_nll.dtype)).sum(
+                dim=-1
+            ) / pre_count.clamp(min=1).to(pre_free_nll.dtype)  # (B,K,R)
+            # 只对有 pre-surface 点的 hit ray 参与均值
+            w_pre = w_hit * (pre_count > 0).to(dtype)
+            pre_free_raw = _masked_mean(pre_free_per_ray, w_pre)
+        else:
+            pre_free_raw = logits.sum() * 0.0
 
         # --- 8. L_depth：非对称 SmoothL1 on expected first-hit depth ---
         d_max = float(N * self.step_m)
@@ -353,15 +381,18 @@ class RayLoss(nn.Module):
         # --- 9. 汇总 ---
         hit_weighted = self.lambda_hit * hit_raw
         empty_weighted = self.lambda_empty * empty_raw
+        pre_free_weighted = self.lambda_pre_free * pre_free_raw
         depth_weighted = self.lambda_depth * depth_raw
-        total = hit_weighted + empty_weighted + depth_weighted
+        total = hit_weighted + empty_weighted + pre_free_weighted + depth_weighted
         return {
             "total": total,
             "hit": hit_weighted,
             "empty": empty_weighted,
+            "pre_free": pre_free_weighted,
             "depth": depth_weighted,
             "hit_raw": hit_raw.detach(),
             "empty_raw": empty_raw.detach(),
+            "pre_free_raw": pre_free_raw.detach(),
             "depth_raw": depth_raw.detach(),
             "hit_rays": hit_rays,
             "empty_rays": empty_rays,

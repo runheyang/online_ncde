@@ -183,6 +183,7 @@ def main() -> None:
         total_ray = 0.0
         total_ray_hit = 0.0
         total_ray_empty = 0.0
+        total_ray_pre_free = 0.0
         total_ray_depth = 0.0
         total_ray_sup_count = 0
         total_sup_loss: dict[str, float] = {}
@@ -216,6 +217,7 @@ def main() -> None:
                     total_ray += float(loss_dict["ray_total"].item())
                     total_ray_hit += float(loss_dict["ray_hit"].item())
                     total_ray_empty += float(loss_dict["ray_empty"].item())
+                    total_ray_pre_free += float(loss_dict.get("ray_pre_free", torch.tensor(0.0)).item())
                     total_ray_depth += float(loss_dict["ray_depth"].item())
                     total_ray_sup_count += 1
             for key, value in sup_loss_batch.items():
@@ -261,6 +263,7 @@ def main() -> None:
             train_metrics["ray_total"] = total_ray / rdenom
             train_metrics["ray_hit"] = total_ray_hit / rdenom
             train_metrics["ray_empty"] = total_ray_empty / rdenom
+            train_metrics["ray_pre_free"] = total_ray_pre_free / rdenom
             train_metrics["ray_depth"] = total_ray_depth / rdenom
         for key, value in total_sup_loss.items():
             cnt = max(total_sup_count.get(key, 0), 1)
@@ -277,6 +280,7 @@ def main() -> None:
                 f" ray_total={train_metrics['ray_total']:.4f} "
                 f"ray_hit={train_metrics['ray_hit']:.4f} "
                 f"ray_empty={train_metrics['ray_empty']:.4f} "
+                f"ray_pre_free={train_metrics.get('ray_pre_free', 0.0):.4f} "
                 f"ray_depth={train_metrics['ray_depth']:.4f}"
             )
         print(

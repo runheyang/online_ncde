@@ -213,6 +213,7 @@ class SegAndRayLoss(nn.Module):
             seg_out["ray_total"] = zero.detach()
             seg_out["ray_hit"] = zero.detach()
             seg_out["ray_empty"] = zero.detach()
+            seg_out["ray_pre_free"] = zero.detach()
             seg_out["ray_depth"] = zero.detach()
             seg_out["ray_hit_rays"] = torch.tensor(0, device=logits.device)
             seg_out["ray_empty_rays"] = torch.tensor(0, device=logits.device)
@@ -232,6 +233,7 @@ class SegAndRayLoss(nn.Module):
         seg_out["ray_total"] = (self.lambda_ray * ray_total).detach()
         seg_out["ray_hit"] = ray_out["hit_raw"]
         seg_out["ray_empty"] = ray_out["empty_raw"]
+        seg_out["ray_pre_free"] = ray_out["pre_free_raw"]
         seg_out["ray_depth"] = ray_out["depth_raw"]
         seg_out["ray_hit_rays"] = ray_out["hit_rays"]
         seg_out["ray_empty_rays"] = ray_out["empty_rays"]
@@ -277,6 +279,7 @@ def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
         "mid_weight",
         "lambda_hit",
         "lambda_empty",
+        "lambda_pre_free",
         "lambda_depth",
         "depth_asym_far",
         "depth_asym_near",
