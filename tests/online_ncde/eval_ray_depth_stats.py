@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from prettytable import PrettyTable
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -290,11 +291,15 @@ class RayDepthStats:
     def exceed_ratio(self, threshold: float) -> float:
         return self.exceed_count[threshold] / max(self.total_rays, 1)
 
-    def rayiou_at(self, threshold_idx: int) -> float:
+    def per_class_rayiou_at(self, threshold_idx: int) -> np.ndarray:
+        """返回各类别 RayIoU（不含 free），shape=(num_classes-1,)。"""
         iou = self.tp_cnt[threshold_idx] / np.maximum(
             self.gt_cnt + self.pred_cnt - self.tp_cnt[threshold_idx], 1
         )
-        return float(np.nanmean(iou[:-1]))
+        return iou[:-1]
+
+    def rayiou_at(self, threshold_idx: int) -> float:
+        return float(np.nanmean(self.per_class_rayiou_at(threshold_idx)))
 
     @property
     def rayiou(self) -> float:
@@ -752,6 +757,32 @@ def main() -> None:
         if fast_s.total_rays == 0 and aligned_s.total_rays == 0:
             continue
         print_depth_comparison(fast_s, aligned_s, region_display[region])
+
+    # --- 各类别 RayIoU 对比表（与 ray_metrics.py 输出格式一致）---
+    def _print_per_class_rayiou(stats_obj: RayDepthStats, label: str) -> None:
+        """打印单个来源的各类别 RayIoU PrettyTable。"""
+        table = PrettyTable(['Class Names', 'RayIoU@1', 'RayIoU@2', 'RayIoU@4'])
+        table.float_format = '.3'
+        cls_names = occ_class_names[:-1]  # 不含 free
+        iou1 = stats_obj.per_class_rayiou_at(0)
+        iou2 = stats_obj.per_class_rayiou_at(1)
+        iou4 = stats_obj.per_class_rayiou_at(2)
+        for i, name in enumerate(cls_names):
+            table.add_row([name, iou1[i], iou2[i], iou4[i]],
+                          divider=(i == len(cls_names) - 1))
+        table.add_row(['MEAN',
+                       float(np.nanmean(iou1)),
+                       float(np.nanmean(iou2)),
+                       float(np.nanmean(iou4))])
+        print(f"\n{'=' * 20} 各类别 RayIoU: {label} {'=' * 20}")
+        print(table)
+
+    fast_all = stats[("fast", "all")]
+    aligned_all = stats[("aligned", "all")]
+    if fast_all.total_rays > 0:
+        _print_per_class_rayiou(fast_all, "Fast Baseline")
+    if aligned_all.total_rays > 0:
+        _print_per_class_rayiou(aligned_all, "Aligner Output")
 
     # --- hit/no-hit 四格表 ---
     hn_display = {

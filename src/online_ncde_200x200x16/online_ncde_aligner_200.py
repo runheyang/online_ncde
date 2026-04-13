@@ -445,6 +445,63 @@ class OnlineNcdeAligner200(nn.Module):
             "diagnostics": {k: v.float() for k, v in diagnostics.items()},
         }
 
+    def forward_stepwise_eval(
+        self,
+        fast_logits: torch.Tensor,
+        slow_logits: torch.Tensor,
+        frame_ego2global: torch.Tensor,
+        frame_timestamps: torch.Tensor | None,
+        frame_dt: torch.Tensor | None,
+    ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
+        """评估接口：返回每个循环步的 logits 与耗时（批处理包装）。"""
+        if fast_logits.dim() == 5:
+            fast_logits = fast_logits.unsqueeze(0)
+            slow_logits = slow_logits.unsqueeze(0)
+            frame_ego2global = frame_ego2global.unsqueeze(0)
+            if frame_timestamps is not None:
+                frame_timestamps = frame_timestamps.unsqueeze(0)
+            if frame_dt is not None:
+                frame_dt = frame_dt.unsqueeze(0)
+
+        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
+        step_logits_list: list[torch.Tensor] = []
+        step_time_list: list[torch.Tensor] = []
+        diag_list: list[dict[str, torch.Tensor]] = []
+        step_indices: torch.Tensor | None = None
+        with amp_ctx:
+            for b in range(fast_logits.shape[0]):
+                out = self._forward_single_stepwise_eval(
+                    fast_logits=fast_logits[b],
+                    slow_logits=slow_logits[b],
+                    frame_ego2global=frame_ego2global[b],
+                    frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
+                    frame_dt=frame_dt[b] if frame_dt is not None else None,
+                )
+                sample_step_logits = cast(torch.Tensor, out["step_logits"])
+                sample_step_time = cast(torch.Tensor, out["step_time_ms"])
+                sample_step_indices = cast(torch.Tensor, out["step_indices"])
+                if step_indices is None:
+                    step_indices = sample_step_indices
+                elif sample_step_indices.shape != step_indices.shape:
+                    raise ValueError(
+                        f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
+                    )
+
+                step_logits_list.append(sample_step_logits)
+                step_time_list.append(sample_step_time)
+                diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+
+        if step_indices is None:
+            step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
+        step_logits = torch.stack(step_logits_list, dim=0)
+        step_time_ms = torch.stack(step_time_list, dim=0)
+        return {
+            "step_logits": step_logits,
+            "step_time_ms": step_time_ms,
+            "step_indices": step_indices,
+            "diagnostics": diag_list,
+        }
+
     def _unsqueeze_inputs(
         self,
         fast_logits: torch.Tensor,

@@ -89,6 +89,16 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="仅评估前 N 个有效样本，0 表示全量",
     )
+    parser.add_argument(
+        "--rayiou",
+        action="store_true",
+        help="额外计算 RayIoU",
+    )
+    parser.add_argument(
+        "--sweep-pkl",
+        default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
+        help="sweep pkl 路径（相对于项目根目录），用于 RayIoU 计算",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +154,9 @@ def main() -> None:
     missing_gt = 0
     evaluated = 0
 
+    # RayIoU: 收集 pred/gt/token 用于后续计算
+    rayiou_items: list[dict] = [] if args.rayiou else []
+
     iterator = progressbar.progressbar(valid_infos, prefix="Evaluating ") if progressbar else valid_infos
     for info in iterator:
         scene_name = info["scene_name"]
@@ -190,6 +203,14 @@ def main() -> None:
         )
         evaluated += 1
 
+        # 收集 RayIoU 所需数据
+        if args.rayiou:
+            rayiou_items.append({
+                "token": info["token"],
+                "pred": pred_sem,
+                "gt": gt_semantics,
+            })
+
     # 输出结果
     print(f"\n评估完成: {evaluated} 个样本")
     print(f"缺失预测: {missing_pred}, 缺失 GT: {missing_gt}")
@@ -197,6 +218,42 @@ def main() -> None:
     print()
 
     miou = metric.count_miou(verbose=True)
+
+    # --- RayIoU ---
+    rayiou_result = None
+    if args.rayiou:
+        print("\n[rayiou] 加载 lidar origins...")
+        sweep_pkl_path = args.sweep_pkl
+        if not os.path.isabs(sweep_pkl_path):
+            sweep_pkl_path = os.path.join(root_path, sweep_pkl_path)
+        print(f"[rayiou] sweep pkl: {sweep_pkl_path}")
+
+        from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+        origins_by_token = load_origins_from_sweep_pkl(sweep_pkl_path)
+        print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
+
+        from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+
+        sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
+        skipped = 0
+        for item in rayiou_items:
+            token = item["token"]
+            if token not in origins_by_token:
+                skipped += 1
+                continue
+            sem_pred_list.append(item["pred"])
+            sem_gt_list.append(item["gt"])
+            lidar_origin_list.append(origins_by_token[token])
+
+        if skipped:
+            print(f"[rayiou] 跳过 {skipped} 个样本（无对应 lidar origin）")
+        print(f"[rayiou] {len(sem_pred_list)} 个样本参与计算")
+
+        rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
+        print(f"\n[rayiou] RayIoU={rayiou_result['RayIoU']:.4f}")
+        print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
+        print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
+        print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
 
     # 可选输出 json
     if args.output_json:
@@ -214,6 +271,10 @@ def main() -> None:
                 for i, name in enumerate(metric.class_names)
             },
         }
+        if rayiou_result is not None:
+            result["rayiou"] = {
+                k: float(v) for k, v in rayiou_result.items()
+            }
         output_path = args.output_json
         if not os.path.isabs(output_path):
             output_path = os.path.join(root_path, output_path)

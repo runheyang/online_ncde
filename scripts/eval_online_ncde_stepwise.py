@@ -24,6 +24,7 @@ from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
+from online_ncde_200x200x16 import OnlineNcdeAligner200              # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 
@@ -41,6 +42,8 @@ def parse_args() -> argparse.Namespace:
         help="配置文件路径",
     )
     parser.add_argument("--checkpoint", required=True, help="模型权重路径")
+    parser.add_argument("--200x200x16", dest="use_200", action="store_true",
+                        help="使用 200x200x16 分辨率模型结构")
     parser.add_argument("--limit", type=int, default=0, help="仅评估前 N 个样本，0 表示全量")
     parser.add_argument("--batch-size", type=int, default=0, help="覆盖配置中的 eval.batch_size，0 表示不覆盖")
     parser.add_argument(
@@ -124,7 +127,8 @@ def main() -> None:
     loader = DataLoader(dataset, **kwargs)
 
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
-    model = OnlineNcdeAligner(
+    ModelClass = OnlineNcdeAligner200 if args.use_200 else OnlineNcdeAligner
+    model = ModelClass(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
         hidden_dim=model_cfg["hidden_dim"],
