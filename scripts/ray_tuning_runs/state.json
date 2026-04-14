@@ -1,0 +1,334 @@
+{
+  "description": "Ray loss 调参状态文件，由 /loop 工作流维护",
+  "config_path": "configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train.yaml",
+  "config_note": "200x200x16 演化路径，alocc2d_mini_wo_mask 快系统 + alocc3d_wo_mask 慢系统",
+  "baseline": {
+    "note": "快系统 baseline（无对齐器），15000 sample 训练，完整验证集评估",
+    "mIoU": 33.60,
+    "mIoU_d": 31.44,
+    "rayiou": {
+      "RayIoU": 0.3986, "RayIoU@1": 0.3351, "RayIoU@2": 0.4073, "RayIoU@4": 0.4535
+    },
+    "binned_ray": {
+      "all": {
+        "total_rays": 436896348,
+        "RayIoU": 0.3986, "RayIoU@1": 0.3351, "RayIoU@2": 0.4073, "RayIoU@4": 0.4535,
+        "mean_signed_err": 1.7269, "mean_abs_err": 3.7490,
+        "closer_ratio": 0.3530, "farther_ratio": 0.3609
+      },
+      "0-10m": {
+        "total_rays": 226279138,
+        "RayIoU": 0.4555, "RayIoU@1": 0.3993, "RayIoU@2": 0.4698, "RayIoU@4": 0.4974,
+        "mean_signed_err": 1.9957, "mean_abs_err": 2.7309,
+        "closer_ratio": 0.2943, "farther_ratio": 0.3394
+      },
+      "10-20m": {
+        "total_rays": 146382107,
+        "RayIoU": 0.3509, "RayIoU@1": 0.2792, "RayIoU@2": 0.3539, "RayIoU@4": 0.4196,
+        "mean_signed_err": 1.6303, "mean_abs_err": 4.0402,
+        "closer_ratio": 0.4202, "farther_ratio": 0.3546
+      },
+      "20-40m": {
+        "total_rays": 58547525,
+        "RayIoU": 0.2414, "RayIoU@1": 0.1801, "RayIoU@2": 0.2431, "RayIoU@4": 0.3011,
+        "mean_signed_err": 1.2430, "mean_abs_err": 6.4479,
+        "closer_ratio": 0.4095, "farther_ratio": 0.4434
+      }
+    },
+    "hit_nohit": {
+      "all": {
+        "total_rays": 608367240,
+        "gt_hit_pred_hit": 370417238, "gt_hit_pred_nohit": 66479110,
+        "gt_nohit_pred_hit": 20004609, "gt_nohit_pred_nohit": 151466283,
+        "pred_hit_rate": 0.6418, "miss_rate": 0.1522, "false_hit_rate": 0.1167
+      },
+      "0-10m": {
+        "total_rays": 262395321,
+        "gt_hit_pred_hit": 203931657, "gt_hit_pred_nohit": 22347481,
+        "gt_nohit_pred_hit": 3517626, "gt_nohit_pred_nohit": 32598557,
+        "pred_hit_rate": 0.7906, "miss_rate": 0.0988, "false_hit_rate": 0.0974
+      },
+      "10-20m": {
+        "total_rays": 197929735,
+        "gt_hit_pred_hit": 122338326, "gt_hit_pred_nohit": 24043781,
+        "gt_nohit_pred_hit": 5124605, "gt_nohit_pred_nohit": 46423023,
+        "pred_hit_rate": 0.6440, "miss_rate": 0.1643, "false_hit_rate": 0.0994
+      }
+    }
+  },
+  "reference_runs": {
+    "note": "15000 sample 训练、完整验证集评估的对照实验，用于判断各 loss 项的方向性效果",
+    "no_ray_loss": {
+      "note": "纯语义 loss，无 ray loss",
+      "params": {"lambda_ray": 0.0},
+      "train_loss_epoch1": {
+        "total": 0.6550, "focal": 0.1872, "aux_lovasz": 0.4679,
+        "note": "无 ray loss 时语义 loss 约 0.65"
+      },
+      "mIoU": 39.71,
+      "mIoU_d": 33.72,
+      "rayiou": {
+        "RayIoU": 0.3946, "RayIoU@1": 0.3317, "RayIoU@2": 0.4022, "RayIoU@4": 0.4499
+      },
+      "binned_ray": {
+        "all": {
+          "RayIoU": 0.3946,
+          "mean_signed_err": 1.5339, "mean_abs_err": 3.4073,
+          "closer_ratio": 0.3687, "farther_ratio": 0.3481
+        },
+        "0-10m": {
+          "RayIoU": 0.4347, "RayIoU@1": 0.3820, "RayIoU@2": 0.4477, "RayIoU@4": 0.4744,
+          "mean_signed_err": 2.3375, "mean_abs_err": 2.9762,
+          "closer_ratio": 0.2694, "farther_ratio": 0.3732
+        },
+        "10-20m": {
+          "RayIoU": 0.3641, "RayIoU@1": 0.2909, "RayIoU@2": 0.3663, "RayIoU@4": 0.4350,
+          "mean_signed_err": 1.3087, "mean_abs_err": 3.4207,
+          "closer_ratio": 0.4434, "farther_ratio": 0.3279
+        },
+        "20-40m": {
+          "RayIoU": 0.2572, "RayIoU@1": 0.1876, "RayIoU@2": 0.2580, "RayIoU@4": 0.3260,
+          "mean_signed_err": -0.4872, "mean_abs_err": 4.6436,
+          "closer_ratio": 0.5434, "farther_ratio": 0.3055
+        }
+      },
+      "hit_nohit": {
+        "all": {
+          "total_rays": 608367240,
+          "gt_hit_pred_hit": 397168234, "gt_hit_pred_nohit": 39728114,
+          "gt_nohit_pred_hit": 30603215, "gt_nohit_pred_nohit": 140867677,
+          "pred_hit_rate": 0.7031, "miss_rate": 0.0909, "false_hit_rate": 0.1785
+        },
+        "0-10m": {
+          "gt_hit_pred_hit": 208768629, "gt_hit_pred_nohit": 17510509,
+          "gt_nohit_pred_hit": 4128319, "gt_nohit_pred_nohit": 31987864,
+          "pred_hit_rate": 0.8114, "miss_rate": 0.0774, "false_hit_rate": 0.1143
+        },
+        "10-20m": {
+          "gt_hit_pred_hit": 132481294, "gt_hit_pred_nohit": 13900813,
+          "gt_nohit_pred_hit": 7763133, "gt_nohit_pred_nohit": 43784495,
+          "pred_hit_rate": 0.7086, "miss_rate": 0.0950, "false_hit_rate": 0.1506
+        }
+      },
+      "analysis": "mIoU 最高(+6.11)但 RayIoU 反而比 baseline 低(-0.004)。0-10m RayIoU 下降 2.08 点，signed_err +0.34 说明推远问题已存在但比有 ray loss 时(+0.56)轻。false_hit_rate 0.1143 比有 ray loss 时(0.1729)低很多。说明语义 loss 本身就导致推远，ray loss (hit+depth) 虽然改善了整体 RayIoU 但在 0-10m 加剧了推远和 false hit。"
+    },
+    "with_hit_and_depth": {
+      "note": "当前最好结果：lambda_ray=0.2, lambda_hit=0.5, lambda_depth=0.2, 无 empty/pre_free, near weight 2.0, mid weight 1.0",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.5, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.2,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "train_loss_epoch1": {
+        "total": 0.9084, "focal": 0.1940, "aux_lovasz": 0.4729,
+        "ray_total_weighted": 0.2415,
+        "ray_hit_raw": 1.7472, "ray_depth_raw": 1.669,
+        "note": "ray_total_weighted = lambda_ray * (lambda_hit*hit + lambda_depth*depth) ≈ 0.24，占总 loss 约 27%"
+      },
+      "mIoU": 38.49,
+      "mIoU_d": 33.34,
+      "rayiou": {
+        "RayIoU": 0.4089, "RayIoU@1": 0.3484, "RayIoU@2": 0.4173, "RayIoU@4": 0.4611
+      },
+      "binned_ray": {
+        "all": {
+          "RayIoU": 0.4089,
+          "mean_signed_err": 1.7962, "mean_abs_err": 3.5926,
+          "closer_ratio": 0.3197, "farther_ratio": 0.3785
+        },
+        "0-10m": {
+          "RayIoU": 0.4495, "RayIoU@1": 0.3999, "RayIoU@2": 0.4615, "RayIoU@4": 0.4870,
+          "mean_signed_err": 2.5592, "mean_abs_err": 3.1095,
+          "closer_ratio": 0.2299, "farther_ratio": 0.3929
+        },
+        "10-20m": {
+          "RayIoU": 0.3769, "RayIoU@1": 0.3072, "RayIoU@2": 0.3817, "RayIoU@4": 0.4419,
+          "mean_signed_err": 1.6678, "mean_abs_err": 3.5976,
+          "closer_ratio": 0.3786, "farther_ratio": 0.3727
+        },
+        "20-40m": {
+          "RayIoU": 0.2685, "RayIoU@1": 0.1986, "RayIoU@2": 0.2702, "RayIoU@4": 0.3368,
+          "mean_signed_err": -0.2999, "mean_abs_err": 5.0093,
+          "closer_ratio": 0.4986, "farther_ratio": 0.3388
+        }
+      },
+      "hit_nohit": {
+        "all": {
+          "pred_hit_rate": 0.7114, "miss_rate": 0.0928, "false_hit_rate": 0.2123
+        },
+        "0-10m": {
+          "pred_hit_rate": 0.8186, "miss_rate": 0.0784, "false_hit_rate": 0.1729
+        },
+        "10-20m": {
+          "pred_hit_rate": 0.7175, "miss_rate": 0.0961, "false_hit_rate": 0.1885
+        }
+      },
+      "analysis": "整体 RayIoU +1.03 点（最好），但 0-10m 仍 -0.60 点。hit+depth loss 相比无 ray loss 进一步加剧了 0-10m 推远(signed_err 2.34→2.56)和 false_hit(0.114→0.173)。远场(10-40m)改善大。核心矛盾：ray loss 整体有效但在 0-10m 有副作用。"
+    },
+    "with_empty": {
+      "note": "hit+empty+depth, 无 pre_free, near weight 2.0",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.5, "lambda_empty": 0.5,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.1,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "train_loss_epoch1": {
+        "total": 1.0161, "focal": 0.2052, "aux_lovasz": 0.4929,
+        "ray_total_weighted": 0.3180,
+        "ray_hit_raw": 1.6014, "ray_empty_raw": 0.3775, "ray_pre_free_raw": 0.0475, "ray_depth_raw": 2.6874,
+        "note": "ray_total_weighted ≈ 0.32，占总 loss 约 31%"
+      },
+      "mIoU": 38.17,
+      "mIoU_d": 32.99,
+      "rayiou": {
+        "RayIoU": 0.4074, "RayIoU@1": 0.3502, "RayIoU@2": 0.4154, "RayIoU@4": 0.4565
+      },
+      "binned_ray": {
+        "all": {
+          "RayIoU": 0.4074,
+          "mean_signed_err": 2.6190, "mean_abs_err": 4.0515,
+          "closer_ratio": 0.2804, "farther_ratio": 0.4174
+        },
+        "0-10m": {
+          "RayIoU": 0.4432, "RayIoU@1": 0.3966, "RayIoU@2": 0.4544, "RayIoU@4": 0.4785,
+          "mean_signed_err": 3.2181, "mean_abs_err": 3.6945,
+          "closer_ratio": 0.2077, "farther_ratio": 0.4178
+        },
+        "10-20m": {
+          "RayIoU": 0.3779, "RayIoU@1": 0.3119, "RayIoU@2": 0.3829, "RayIoU@4": 0.4389,
+          "mean_signed_err": 2.5541, "mean_abs_err": 4.1176,
+          "closer_ratio": 0.3277, "farther_ratio": 0.4223
+        },
+        "20-40m": {
+          "RayIoU": 0.2786, "RayIoU@1": 0.2103, "RayIoU@2": 0.2805, "RayIoU@4": 0.3449,
+          "mean_signed_err": 0.9150, "mean_abs_err": 4.9586,
+          "closer_ratio": 0.4224, "farther_ratio": 0.4051
+        }
+      },
+      "hit_nohit": {
+        "all": {
+          "total_rays": 608367240,
+          "gt_hit_pred_hit": 375198728, "gt_hit_pred_nohit": 61697620,
+          "gt_nohit_pred_hit": 20114624, "gt_nohit_pred_nohit": 151356268,
+          "pred_hit_rate": 0.6498, "miss_rate": 0.1412, "false_hit_rate": 0.1173
+        },
+        "0-10m": {
+          "gt_hit_pred_hit": 199588018, "gt_hit_pred_nohit": 26691120,
+          "gt_nohit_pred_hit": 3335656, "gt_nohit_pred_nohit": 32780527,
+          "pred_hit_rate": 0.7734, "miss_rate": 0.1180, "false_hit_rate": 0.0924
+        },
+        "10-20m": {
+          "gt_hit_pred_hit": 123764349, "gt_hit_pred_nohit": 22617758,
+          "gt_nohit_pred_hit": 3989926, "gt_nohit_pred_nohit": 47557702,
+          "pred_hit_rate": 0.6455, "miss_rate": 0.1545, "false_hit_rate": 0.0774
+        }
+      },
+      "analysis": "empty loss 核心效果：false_hit_rate 几乎不涨了(全局 0.117→0.117, 0-10m 0.097→0.092)，解决了 hit+depth 方案的 false hit 暴涨问题。但代价是：(1) miss_rate 下降幅度小了很多(全局 0.152→0.141 vs hit+depth 的 0.152→0.093)，说明 empty loss 抑制了模型产生新占用的能力；(2) 0-10m signed_err 恶化到 3.22(最严重)，推远问题比纯 hit+depth(2.56)还严重；(3) 0-10m RayIoU -1.23 点，比 hit+depth(-0.60)更差。整体 RayIoU +0.88 点，不如 hit+depth(+1.03)。mIoU 38.17 也略低于 hit+depth(38.49)。结论：empty loss 成功控制了 false hit，但以降低 recall 和加剧近场推远为代价，净效果为负。near_weight=2.0 可能不够，需要调高看是否能改善 0-10m。"
+    },
+    "with_empty_and_pre_free": {
+      "note": "全部 ray loss 项, near weight 5.0。未跑完全部轮次，指标可能偏低但足以说明趋势",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.5, "lambda_empty": 0.75,
+        "lambda_pre_free": 5.0, "lambda_depth": 0.1,
+        "near_weight": 5.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "train_loss_epoch1": {
+        "total": 0.9017, "focal": 0.1998,
+        "ray_total_weighted": 0.2177,
+        "ray_hit_raw": 1.6986, "ray_empty_raw": 0.4588, "ray_depth_raw": 2.2553,
+        "note": "ray_total_weighted ≈ 0.22，占总 loss 约 24%。注意 near_weight=5.0 使近场 ray loss 贡献更大"
+      },
+      "mIoU": 37.19,
+      "mIoU_d": 33.08,
+      "rayiou": {
+        "RayIoU": 0.4025, "RayIoU@1": 0.3455, "RayIoU@2": 0.4108, "RayIoU@4": 0.4514
+      },
+      "binned_ray": {
+        "all": {
+          "RayIoU": 0.4025,
+          "mean_signed_err": 3.4697, "mean_abs_err": 4.5960,
+          "closer_ratio": 0.2395, "farther_ratio": 0.4677
+        },
+        "0-10m": {
+          "RayIoU": 0.4331, "RayIoU@1": 0.3872, "RayIoU@2": 0.4445, "RayIoU@4": 0.4675,
+          "mean_signed_err": 4.0234, "mean_abs_err": 4.3942,
+          "closer_ratio": 0.1685, "farther_ratio": 0.4728
+        },
+        "10-20m": {
+          "RayIoU": 0.3804, "RayIoU@1": 0.3143, "RayIoU@2": 0.3855, "RayIoU@4": 0.4414,
+          "mean_signed_err": 3.3550, "mean_abs_err": 4.5915,
+          "closer_ratio": 0.2871, "farther_ratio": 0.4657
+        },
+        "20-40m": {
+          "RayIoU": 0.2812, "RayIoU@1": 0.2102, "RayIoU@2": 0.2838, "RayIoU@4": 0.3497,
+          "mean_signed_err": 1.9817, "mean_abs_err": 5.1755,
+          "closer_ratio": 0.3779, "farther_ratio": 0.4529
+        }
+      },
+      "hit_nohit": {
+        "all": {
+          "total_rays": 608367240,
+          "gt_hit_pred_hit": 359813767, "gt_hit_pred_nohit": 77082581,
+          "gt_nohit_pred_hit": 15831663, "gt_nohit_pred_nohit": 155639229,
+          "pred_hit_rate": 0.6175, "miss_rate": 0.1764, "false_hit_rate": 0.0923
+        },
+        "0-10m": {
+          "gt_hit_pred_hit": 193042322, "gt_hit_pred_nohit": 33236816,
+          "gt_nohit_pred_hit": 2789979, "gt_nohit_pred_nohit": 33326204,
+          "pred_hit_rate": 0.7463, "miss_rate": 0.1469, "false_hit_rate": 0.0773
+        },
+        "10-20m": {
+          "gt_hit_pred_hit": 118153379, "gt_hit_pred_nohit": 28228728,
+          "gt_nohit_pred_hit": 2959336, "gt_nohit_pred_nohit": 48588292,
+          "pred_hit_rate": 0.6119, "miss_rate": 0.1928, "false_hit_rate": 0.0574
+        }
+      },
+      "analysis": "效果最差。near_weight=5.0 + empty + pre_free 导致模型极度保守：0-10m miss_rate 0.147(最高)、signed_err 4.02(最严重的推远)、RayIoU -2.24 点(最大下降)。mIoU 也最低(37.19)。结论：(1) 高 near_weight 并不能改善 0-10m RayIoU，反而加剧推远——说明问题不是权重不够，而是 hit+empty loss 本身在近场的梯度方向有偏；(2) empty+pre_free 在高 near_weight 下让模型过度抑制近场占用预测；(3) near_weight 应该保持在较低水平(2.0-3.0)，通过改进 loss 项本身而非简单加权来解决 0-10m 问题。"
+    },
+    "cross_experiment_insights": {
+      "note": "四组实验的综合分析，供调参 agent 参考",
+      "0_10m_rayiou_delta_ranking": [
+        {"config": "with_hit_and_depth (near_w=2)", "delta": -0.0060, "best": true},
+        {"config": "with_empty (near_w=2)", "delta": -0.0123},
+        {"config": "no_ray_loss", "delta": -0.0208},
+        {"config": "with_empty_and_pre_free (near_w=5)", "delta": -0.0224, "worst": true}
+      ],
+      "overall_rayiou_delta_ranking": [
+        {"config": "with_hit_and_depth (near_w=2)", "delta": +0.0103, "best": true},
+        {"config": "with_empty (near_w=2)", "delta": +0.0088},
+        {"config": "with_empty_and_pre_free (near_w=5)", "delta": +0.0039},
+        {"config": "no_ray_loss", "delta": -0.0040, "worst": true}
+      ],
+      "key_findings": [
+        "depth loss (lambda_depth=0.2) 是唯一在 with_hit_and_depth 中较高的项，而该组效果最好——depth loss 可能是核心有效项，值得尝试提高到 0.3-0.5 作为主力而非辅助",
+        "hit loss 在近场产生大量 false hit（0-10m false_hit_rate 从 0.097 涨到 0.173），说明 hit loss 的 window-based NLL 在近场可能梯度有偏——鼓励模型在 GT 附近产生占用但不能精确控制位置",
+        "empty loss 成功抑制 false hit 但严重牺牲 recall，净效果为负。小权重(0.1-0.2)可能比 0.5-0.75 更合适",
+        "near_weight 从 2.0 提到 5.0 效果反而更差，说明 0-10m 问题不是权重分配问题而是 loss 设计问题",
+        "所有带 ray loss 的方案都加剧了 0-10m 推远(signed_err 上升)，但降低了 miss_rate——模型倾向于'多预测但预测位置偏远'"
+      ],
+      "tuning_strategy": [
+        "优先方向1：提高 lambda_depth(0.3-0.5)，depth loss 直接惩罚深度偏差，是对抗推远最直接的工具",
+        "优先方向2：纯 hit+depth 方案(无 empty/pre_free)基础上微调，这是目前最好的组合",
+        "探索方向：如果现有 loss 项调参后 0-10m 仍无法改善，agent 应提出新的针对性 loss 方案写入 proposals.md"
+      ]
+    }
+  },
+  "search_space": {
+    "lambda_ray":       {"min": 0.1,  "max": 0.5,  "default": 0.2,  "note": "整体 ray loss 权重"},
+    "lambda_hit":       {"min": 0.3,  "max": 1.0,  "default": 0.5,  "note": "hit window 监督"},
+    "lambda_empty":     {"min": 0.0,  "max": 0.75, "default": 0.0,  "note": "可能有害，优先试 0"},
+    "lambda_pre_free":  {"min": 0.0,  "max": 5.0,  "default": 0.0,  "note": "可能有害，优先试 0"},
+    "lambda_depth":     {"min": 0.05, "max": 0.3,  "default": 0.2,  "note": "depth 辅助项，当前最优 0.2"},
+    "near_weight":      {"min": 2.0,  "max": 6.0,  "default": 4.0,  "note": "0-10m 权重"},
+    "depth_asym_far":   {"min": 1.5,  "max": 4.0,  "default": 2.0,  "note": "pred>GT 惩罚倍率"},
+    "depth_asym_near":  {"min": 0.3,  "max": 1.0,  "default": 1.0,  "note": "pred<GT 惩罚倍率"}
+  },
+  "training_config": {
+    "train_limit": 3000,
+    "val_scene_count": 20,
+    "epochs": 8,
+    "config_path": "configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train.yaml",
+    "note": "子集调参配置，单卡 RTX Pro 6000 约 5h/run"
+  },
+  "runs": []
+}

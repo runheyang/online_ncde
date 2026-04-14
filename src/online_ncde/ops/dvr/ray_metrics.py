@@ -156,7 +156,13 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
     return iou_list
 
 
-def main(sem_pred_list, sem_gt_list, lidar_origin_list):
+def main(sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=False):
+    """计算 RayIoU。
+
+    Args:
+        return_pcds: 若为 True，额外返回未过滤的 per-sample pcd 列表，
+            供 binned_ray_stats 等下游分析使用，避免二次 raycasting。
+    """
     torch.cuda.empty_cache()
 
     # generate lidar rays
@@ -164,6 +170,8 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list):
     lidar_rays = torch.from_numpy(lidar_rays)
 
     pcd_pred_list, pcd_gt_list = [], []
+    # 未过滤的原始 pcd（含 free ray），仅 return_pcds=True 时收集
+    raw_pcd_pred_list, raw_pcd_gt_list = [], []
     pbar = make_pbar(len(sem_pred_list), prefix="[rayiou] ").start()
     for i, (sem_pred, sem_gt, lidar_origins) in enumerate(zip(sem_pred_list, sem_gt_list, lidar_origin_list), 1):
         sem_pred = np.reshape(sem_pred, [200, 200, 16])
@@ -171,6 +179,10 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list):
 
         pcd_pred = process_one_sample(sem_pred, lidar_rays, lidar_origins)
         pcd_gt = process_one_sample(sem_gt, lidar_rays, lidar_origins)
+
+        if return_pcds:
+            raw_pcd_pred_list.append(pcd_pred.copy())
+            raw_pcd_gt_list.append(pcd_gt.copy())
 
         # evalute on non-free rays
         valid_mask = (pcd_gt[:, 0].astype(np.int32) != len(occ_class_names) - 1)
@@ -188,7 +200,7 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list):
     rayiou_0 = np.nanmean(iou_list[0])
     rayiou_1 = np.nanmean(iou_list[1])
     rayiou_2 = np.nanmean(iou_list[2])
-    
+
     table = PrettyTable([
         'Class Names',
         'RayIoU@1', 'RayIoU@2', 'RayIoU@4'
@@ -200,16 +212,19 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list):
             occ_class_names[i],
             iou_list[0][i], iou_list[1][i], iou_list[2][i]
         ], divider=(i == len(occ_class_names) - 2))
-    
+
     table.add_row(['MEAN', rayiou_0, rayiou_1, rayiou_2])
 
     print(table)
 
     torch.cuda.empty_cache()
 
-    return {
+    result = {
         'RayIoU': rayiou,
         'RayIoU@1': rayiou_0,
         'RayIoU@2': rayiou_1,
         'RayIoU@4': rayiou_2,
     }
+    if return_pcds:
+        return result, raw_pcd_pred_list, raw_pcd_gt_list
+    return result

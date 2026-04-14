@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import numbers
 import os
 import random
@@ -68,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rayiou", action="store_true", help="评估时额外计算 RayIoU")
     parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
                         help="RayIoU 所需的 sweep pkl 路径（相对于项目根目录）")
+    # 调参工作流参数
+    parser.add_argument("--epochs", type=int, default=0, help="覆盖 config 中的 epochs（0=不覆盖）")
+    parser.add_argument("--ray-override", type=str, default="",
+                        help="JSON 字符串覆盖 loss.ray 参数，如 '{\"lambda_ray\": 0.3}'")
+    parser.add_argument("--save-metrics-json", action="store_true",
+                        help="eval 结束后将指标（含分箱 RayIoU）保存到 output_dir/metrics.json")
     return parser.parse_args()
 
 
@@ -191,6 +198,19 @@ def main() -> None:
     local_rank, use_ddp = setup_ddp_early()
 
     cfg = load_config_with_base(args.config)
+    # --epochs 覆盖
+    if args.epochs > 0:
+        cfg["train"]["epochs"] = args.epochs
+    # --ray-override：JSON 覆盖 loss.ray 参数
+    if args.ray_override:
+        ray_overrides = json.loads(args.ray_override)
+        if "loss" not in cfg:
+            cfg["loss"] = {}
+        if "ray" not in cfg["loss"]:
+            cfg["loss"]["ray"] = {}
+        cfg["loss"]["ray"].update(ray_overrides)
+        if local_rank == 0:
+            print(f"[ray-override] {ray_overrides}")
     set_seed(args.seed + local_rank)
 
     if torch.cuda.is_available():
@@ -504,6 +524,7 @@ def main() -> None:
 
                 # --- RayIoU ---
                 rayiou_result = None
+                binned_ray_result = None
                 if args.rayiou:
                     from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
                     from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
@@ -530,7 +551,13 @@ def main() -> None:
                         print(f"[rayiou] epoch={epoch} 跳过 {skipped} 个样本（无对应 lidar origin）")
                     print(f"[rayiou] epoch={epoch} {len(sem_pred_list)} 个样本参与计算")
 
-                    rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
+                    # return_pcds=True 以便分箱统计复用 raycasting 结果
+                    need_pcds = args.save_metrics_json
+                    if need_pcds:
+                        rayiou_result, raw_pcd_pred, raw_pcd_gt = calc_rayiou(
+                            sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=True)
+                    else:
+                        rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
                     print(
                         f"[rayiou] epoch={epoch} "
                         f"RayIoU={rayiou_result['RayIoU']:.4f} "
@@ -538,6 +565,21 @@ def main() -> None:
                         f"RayIoU@2={rayiou_result['RayIoU@2']:.4f} "
                         f"RayIoU@4={rayiou_result['RayIoU@4']:.4f}"
                     )
+
+                    # 分箱 ray 统计
+                    if need_pcds:
+                        from online_ncde.ops.dvr.binned_ray_stats import compute_binned_ray_stats
+                        binned_ray_result = compute_binned_ray_stats(raw_pcd_pred, raw_pcd_gt)
+                        for bk in ["0-10m", "10-20m", "20-40m"]:
+                            bs = binned_ray_result[bk]
+                            print(
+                                f"[rayiou-bin] {bk}: "
+                                f"RayIoU={bs['RayIoU']:.4f} "
+                                f"signed_err={bs['mean_signed_err']:+.4f} "
+                                f"miss={bs['miss_rate']:.4f} "
+                                f"false_hit={bs['false_hit_rate']:.4f}"
+                            )
+                        del raw_pcd_pred, raw_pcd_gt
 
                 if run is not None:
                     payload = {"epoch": float(epoch)}
@@ -559,6 +601,31 @@ def main() -> None:
                         for key in ("RayIoU", "RayIoU@1", "RayIoU@2", "RayIoU@4"):
                             payload[f"val/{key}"] = float(rayiou_result[key])
                     run.log(payload, commit=True)
+
+            # 保存指标 JSON（每次 eval 覆盖，最终保留最后 epoch 结果）
+            if args.save_metrics_json and val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
+                metrics_json = {
+                    "epoch": epoch,
+                    "mIoU": float(val_metrics["miou"]),
+                    "mIoU_d": float(val_metrics.get("miou_d", 0.0)),
+                    "loss": float(val_metrics["loss"]),
+                }
+                # ray loss 配置记录
+                if ray_cfg is not None:
+                    metrics_json["ray_config"] = {
+                        k: v for k, v in ray_cfg.items()
+                        if isinstance(v, (int, float, str, bool))
+                    }
+                if rayiou_result is not None:
+                    metrics_json["rayiou"] = {
+                        k: float(v) for k, v in rayiou_result.items()
+                    }
+                if binned_ray_result is not None:
+                    metrics_json["binned_ray"] = binned_ray_result
+                json_path = os.path.join(output_dir, "metrics.json")
+                with open(json_path, "w") as f:
+                    json.dump(metrics_json, f, indent=2, ensure_ascii=False)
+                print(f"[metrics] saved -> {json_path}")
 
             ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
             ckpt_extra = {}
