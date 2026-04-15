@@ -2,6 +2,22 @@
   "description": "Ray loss 调参状态文件，由 /loop 工作流维护",
   "config_path": "configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train.yaml",
   "config_note": "200x200x16 演化路径，alocc2d_mini_wo_mask 快系统 + alocc3d_wo_mask 慢系统",
+  "baseline_20scene": {
+    "note": "快系统 baseline（无对齐器），15000 sample 训练，20 val scene 评估——与 tuning runs 直接可比",
+    "mIoU": 33.72, "mIoU_d": 31.16,
+    "rayiou": {"RayIoU": 0.3829, "RayIoU@1": 0.3209, "RayIoU@2": 0.3932, "RayIoU@4": 0.4346},
+    "binned_ray": {
+      "all": {"total_rays": 57077955, "RayIoU": 0.3829, "signed_err": 1.855, "abs_err": 3.927, "closer_ratio": 0.346, "farther_ratio": 0.373},
+      "0-10m": {"total_rays": 30091159, "RayIoU": 0.4284, "signed_err": 2.157, "abs_err": 2.862, "closer_ratio": 0.288, "farther_ratio": 0.366},
+      "10-20m": {"total_rays": 18470180, "RayIoU": 0.3398, "signed_err": 1.835, "abs_err": 4.350, "closer_ratio": 0.407, "farther_ratio": 0.360},
+      "20-40m": {"total_rays": 7732117, "RayIoU": 0.2381, "signed_err": 1.116, "abs_err": 6.591, "closer_ratio": 0.424, "farther_ratio": 0.422}
+    },
+    "hit_nohit": {
+      "all": {"total_rays": 80982720, "pred_hit_rate": 0.6222, "miss_rate": 0.1600, "false_hit_rate": 0.1022},
+      "0-10m": {"total_rays": 35073313, "pred_hit_rate": 0.7791, "miss_rate": 0.1061, "false_hit_rate": 0.0860},
+      "10-20m": {"total_rays": 25600901, "pred_hit_rate": 0.6128, "miss_rate": 0.1816, "false_hit_rate": 0.0803}
+    }
+  },
   "baseline": {
     "note": "快系统 baseline（无对齐器），15000 sample 训练，完整验证集评估",
     "mIoU": 33.60,
@@ -330,5 +346,168 @@
     "config_path": "configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train.yaml",
     "note": "子集调参配置，单卡 RTX Pro 6000 约 5h/run"
   },
-  "runs": []
+  "runs": [
+    {
+      "id": 1,
+      "status": "completed",
+      "started": "2026-04-14T15:53",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.5, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.4,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "lambda_depth 0.2→0.4 (vs with_hit_and_depth baseline)",
+      "hypothesis": "加强 depth 监督直接惩罚深度偏差，应能改善 0-10m 推远(signed_err)并提升 RayIoU",
+      "log": "scripts/ray_tuning_runs/run_1.log",
+      "output_dir": "outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/20260414_155315_200x200x16",
+      "results": {
+        "mIoU": 36.23, "mIoU_d": 31.66,
+        "rayiou": {"RayIoU": 0.3796, "RayIoU@1": 0.3233, "RayIoU@2": 0.3884, "RayIoU@4": 0.4271},
+        "binned_ray": {
+          "all": {"RayIoU": 0.3796, "signed_err": 2.698, "miss_rate": 0.140, "false_hit": 0.188},
+          "0-10m": {"RayIoU": 0.4099, "signed_err": 3.504, "miss_rate": 0.117, "false_hit": 0.181},
+          "10-20m": {"RayIoU": 0.3561, "signed_err": 2.645, "miss_rate": 0.152, "false_hit": 0.159},
+          "20-40m": {"RayIoU": 0.2555, "signed_err": 0.319, "miss_rate": 0.187, "false_hit": 0.189}
+        }
+      },
+      "analysis": "需要 3000-sample baseline 才能判断效果。绝对值看 0-10m signed_err=3.50 较高，false_hit=0.181。先跑 baseline 再对比"
+    },
+    {
+      "id": 2,
+      "status": "completed",
+      "started": "2026-04-14T19:45",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.5, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.2,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "与 with_hit_and_depth 完全相同参数，作为 3000-sample baseline",
+      "hypothesis": "建立相同训练配置下的对照基准",
+      "log": "scripts/ray_tuning_runs/run_2.log",
+      "output_dir": "outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/20260414_191519_200x200x16",
+      "results": {
+        "mIoU": 36.79, "mIoU_d": 32.17,
+        "rayiou": {"RayIoU": 0.3777, "RayIoU@1": 0.3204, "RayIoU@2": 0.3863, "RayIoU@4": 0.4264},
+        "binned_ray": {
+          "all": {"RayIoU": 0.3777, "signed_err": 2.363, "miss_rate": 0.124, "false_hit": 0.189},
+          "0-10m": {"RayIoU": 0.4086, "signed_err": 3.315, "miss_rate": 0.107, "false_hit": 0.151},
+          "10-20m": {"RayIoU": 0.3538, "signed_err": 2.201, "miss_rate": 0.129, "false_hit": 0.161},
+          "20-40m": {"RayIoU": 0.2511, "signed_err": -0.283, "miss_rate": 0.163, "false_hit": 0.203}
+        }
+      },
+      "analysis": "3000-sample hit+depth 配置。vs Run 1 (depth=0.4): 降 lambda_depth 从 0.4→0.2 让 RayIoU 微降、signed_err/false_hit 略有改善，差异小。整体推远(signed_err 3.31)和 false_hit(0.151) 仍严重，显著高于 no_ray_loss 的 0.086"
+    },
+    {
+      "id": 3,
+      "status": "completed",
+      "started": "2026-04-14T23:40",
+      "params": {
+        "lambda_ray": 0.0, "lambda_hit": 0.0, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.0,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "完全关闭 ray loss，3000-sample no_ray baseline",
+      "hypothesis": "建立公平的 3000-train no-ray-loss 对照",
+      "log": "scripts/ray_tuning_runs/run_3.log",
+      "output_dir": "outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/20260414_223742_200x200x16",
+      "results": {
+        "mIoU": 37.48, "mIoU_d": 31.93,
+        "rayiou": {"RayIoU": 0.3651, "RayIoU@1": 0.3030, "RayIoU@2": 0.3732, "RayIoU@4": 0.4192},
+        "binned_ray": {
+          "all": {"RayIoU": 0.3651, "signed_err": 1.681, "miss_rate": 0.094, "false_hit": 0.165},
+          "0-10m": {"RayIoU": 0.3968, "signed_err": 2.540, "miss_rate": 0.077, "false_hit": 0.095},
+          "10-20m": {"RayIoU": 0.3440, "signed_err": 1.359, "miss_rate": 0.099, "false_hit": 0.146},
+          "20-40m": {"RayIoU": 0.2364, "signed_err": -0.383, "miss_rate": 0.136, "false_hit": 0.187}
+        }
+      },
+      "analysis": "3000-sample 真实基线。vs Run 2 (hit+depth@0.2): ray loss 提升 overall RayIoU +1.26、0-10m RayIoU +1.18，但代价是 0-10m signed_err +0.77(推远)、false_hit +5.6pt、miss +3.0pt、mIoU -0.69。Ray loss 有价值但需抑制副作用"
+    },
+    {
+      "id": 4,
+      "status": "completed",
+      "started": "2026-04-15T03:35",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.5, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.2,
+        "near_weight": 2.0, "depth_asym_far": 4.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "基于 Run 2，depth_asym_far 2.0→4.0",
+      "hypothesis": "加大 pred>GT 的惩罚倍率应改善 0-10m 推远",
+      "log": "scripts/ray_tuning_runs/run_4.log",
+      "output_dir": "outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/20260415_020040_200x200x16",
+      "results": {
+        "mIoU": 36.17,
+        "rayiou": {"RayIoU": 0.3764, "RayIoU@1": 0.3214, "RayIoU@2": 0.3845, "RayIoU@4": 0.4234},
+        "binned_ray": {
+          "all": {"RayIoU": 0.3764, "signed_err": 2.489, "miss_rate": 0.130, "false_hit": 0.192},
+          "0-10m": {"RayIoU": 0.4062, "signed_err": 3.447, "miss_rate": 0.113, "false_hit": 0.162},
+          "10-20m": {"RayIoU": 0.3531, "signed_err": 2.335, "miss_rate": 0.137, "false_hit": 0.164},
+          "20-40m": {"RayIoU": 0.2551, "signed_err": -0.190, "miss_rate": 0.169, "false_hit": 0.202}
+        }
+      },
+      "analysis": "反直觉：depth_asym_far 2→4 未改善推远（signed_err 反而 +0.14），所有指标略差。说明 push-far 不是 depth loss 权重问题，而是 hit loss(window NLL) 主导梯度。hit loss 权重(0.5*0.2=0.1) 是 depth loss(0.2*0.2=0.04) 的 2.5倍。下一步应降 lambda_hit 以减弱 hit loss 压力"
+    },
+    {
+      "id": 5,
+      "status": "completed",
+      "started": "2026-04-15T07:35",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.3, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.2,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "基于 Run 2，lambda_hit 0.5→0.3",
+      "hypothesis": "降低 hit loss 权重减弱 push-far bias",
+      "log": "scripts/ray_tuning_runs/run_5.log",
+      "output_dir": "outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/20260415_052320_200x200x16",
+      "results": {
+        "mIoU": 37.02,
+        "rayiou": {"RayIoU": 0.3789, "RayIoU@1": 0.3194, "RayIoU@2": 0.3879, "RayIoU@4": 0.4293},
+        "binned_ray": {
+          "0-10m": {"RayIoU": 0.4138, "signed_err": 3.157, "miss_rate": 0.109, "false_hit": 0.132},
+          "10-20m": {"RayIoU": 0.3495, "signed_err": 1.928, "miss_rate": 0.128, "false_hit": 0.164},
+          "20-40m": {"RayIoU": 0.2440, "signed_err": -0.751, "miss_rate": 0.151, "false_hit": 0.215}
+        }
+      },
+      "analysis": "★ 目前最佳配置。vs Run 2: overall +0.12、0-10m +0.52、signed_err -0.15（推远减弱）、false_hit -1.9pt、miss 几乎不变。假设验证成功：降 lambda_hit 全面改善。提示继续探索 lambda_hit 下限"
+    },
+    {
+      "id": 6,
+      "status": "completed",
+      "started": "2026-04-15T11:40",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.2, "lambda_empty": 0.0,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.2,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "基于 Run 5，lambda_hit 0.3→0.2",
+      "hypothesis": "进一步降 lambda_hit 测试是否继续改善",
+      "log": "scripts/ray_tuning_runs/run_6.log",
+      "output_dir": "outputs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/20260415_084521_200x200x16",
+      "results": {
+        "mIoU": 37.11,
+        "rayiou": {"RayIoU": 0.3785, "RayIoU@1": 0.3204, "RayIoU@2": 0.3866, "RayIoU@4": 0.4285},
+        "binned_ray": {
+          "0-10m": {"RayIoU": 0.4132, "signed_err": 2.928, "miss_rate": 0.095, "false_hit": 0.150},
+          "10-20m": {"RayIoU": 0.3497, "signed_err": 1.868, "miss_rate": 0.119, "false_hit": 0.167},
+          "20-40m": {"RayIoU": 0.2463, "signed_err": -0.566, "miss_rate": 0.144, "false_hit": 0.212}
+        }
+      },
+      "analysis": "vs Run 5: signed_err 3.16→2.93(改善)、miss 0.109→0.095(改善)、但 false_hit 0.132→0.150(变差)、RayIoU 基本持平。Run 5 是 false_hit 甜蜜点。继续压 lambda_hit 无益于 false_hit，边际效益递减"
+    },
+    {
+      "id": 7,
+      "status": "running",
+      "started": "2026-04-15T15:45",
+      "params": {
+        "lambda_ray": 0.2, "lambda_hit": 0.3, "lambda_empty": 0.1,
+        "lambda_pre_free": 0.0, "lambda_depth": 0.2,
+        "near_weight": 2.0, "depth_asym_far": 2.0, "depth_asym_near": 1.0
+      },
+      "change_from_ref": "基于 Run 5（最佳），添加 lambda_empty=0.1",
+      "hypothesis": "参考 with_empty 实验: empty loss 能有效抑制 false_hit 但会降 recall（0.5 权重下）。用小权重(0.1) 配合 Run 5 已降低的 hit 压力，预期能降 false_hit(0.132→?) 而 miss 保持合理",
+      "log": "scripts/ray_tuning_runs/run_7.log",
+      "results": null
+    }
+  ]
 }
