@@ -43,7 +43,7 @@ from online_ncde.metrics import (  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde_200x200x16 import OnlineNcdeAligner200              # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
+from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
 # --- DVR 相关常量（与 ray_metrics.py 保持一致）---
 _pc_range = [-40, -40, -1.0, 40, 40, 5.4]
@@ -495,7 +495,7 @@ def main() -> None:
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         amp_fp16=bool(eval_cfg.get("amp_fp16", False)),
     ).to(device)
-    load_checkpoint(args.checkpoint, model=model, strict=False)
+    load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
     model.eval()
 
     free_conf_thresh = eval_cfg.get("free_conf_thresh", None)

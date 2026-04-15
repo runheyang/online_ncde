@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from online_ncde.losses import resize_labels_and_mask_to_logits
 from online_ncde.metrics import MetricMiouOcc3D, apply_free_threshold
 from online_ncde.utils.checkpoints import save_checkpoint as _save_checkpoint
+from online_ncde.utils.ema import ModelEMA
 
 try:
     import progressbar
@@ -93,9 +94,11 @@ class Trainer:
         primary_supervision_label: str = "t-1.0",
         stepwise_max_step_index: int | None = None,
         is_main: bool = True,
+        ema: ModelEMA | None = None,
     ) -> None:
         self.model = model
         self.is_main = is_main
+        self.ema = ema
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.device = device
@@ -530,6 +533,8 @@ class Trainer:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
             self.optimizer.step()
+            if self.ema is not None:
+                self.ema.update(self.model)
 
             total_loss += float(loss.item())
             total_focal += float(loss_dict["focal"].item())
@@ -627,6 +632,7 @@ class Trainer:
         self,
         loader: DataLoader,
         collect_predictions: bool = False,
+        use_ema: bool = True,
     ) -> Dict[str, float | list[str] | list[float]]:
         """评估并返回 loss + mIoU。
 
@@ -634,7 +640,22 @@ class Trainer:
             collect_predictions: 为 True 时额外收集每个样本的 dense pred/gt/token，
                 用于后续 RayIoU 等需要完整预测结果的指标计算。
                 结果存于返回字典的 ``"predictions"`` 键。
+            use_ema: 若为 True 且 self.ema 存在，则用 EMA 权重评估。
         """
+        original_model = self.model
+        if use_ema and self.ema is not None:
+            self.model = self.ema.module
+        try:
+            return self._evaluate_impl(loader, collect_predictions)
+        finally:
+            self.model = original_model
+
+    @torch.no_grad()
+    def _evaluate_impl(
+        self,
+        loader: DataLoader,
+        collect_predictions: bool,
+    ) -> Dict[str, float | list[str] | list[float]]:
         self.model.eval()
         total_loss = 0.0
         total_focal = 0.0
@@ -730,4 +751,7 @@ class Trainer:
     def save_checkpoint(self, path: str, epoch: int | None = None, extra: dict | None = None) -> None:
         """保存模型参数及 optimizer 状态（自动解包 DDP）。"""
         raw_model = self.model.module if hasattr(self.model, "module") else self.model
-        _save_checkpoint(path, model=raw_model, optimizer=self.optimizer, epoch=epoch, extra=extra)
+        merged_extra = dict(extra) if extra else {}
+        if self.ema is not None:
+            merged_extra["ema"] = self.ema.state_dict()
+        _save_checkpoint(path, model=raw_model, optimizer=self.optimizer, epoch=epoch, extra=merged_extra or None)

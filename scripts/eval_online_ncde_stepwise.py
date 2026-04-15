@@ -26,7 +26,7 @@ from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde_200x200x16 import OnlineNcdeAligner200              # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
+from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
 try:
     import progressbar
@@ -145,7 +145,7 @@ def main() -> None:
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         amp_fp16=bool(eval_cfg.get("amp_fp16", False)),
     ).to(device)
-    load_checkpoint(args.checkpoint, model=model, strict=False)
+    load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
     model.eval()
 
     nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)

@@ -67,8 +67,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cosine-annealing", action="store_true", help="启用余弦退火学习率调度")
     parser.add_argument("--min-lr", type=float, default=1.0e-5, help="余弦退火最低学习率")
     parser.add_argument("--rayiou", action="store_true", help="评估时额外计算 RayIoU")
-    parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
-                        help="RayIoU 所需的 sweep pkl 路径（相对于项目根目录）")
     # 调参工作流参数
     parser.add_argument("--epochs", type=int, default=0, help="覆盖 config 中的 epochs（0=不覆盖）")
     parser.add_argument("--ray-override", type=str, default="",
@@ -312,15 +310,30 @@ def main() -> None:
 
     # 先加载权重
     start_epoch = 1
+    resumed_payload = None
     if args.resume:
-        payload = load_checkpoint(args.resume, model=model, optimizer=None, strict=False)
-        start_epoch = payload.get("epoch", 0) + 1
+        resumed_payload = load_checkpoint(args.resume, model=model, optimizer=None, strict=False)
+        start_epoch = resumed_payload.get("epoch", 0) + 1
 
     # 初始化进程组（默认 gloo，同节点双卡性能损失小）
     rank, local_rank, world_size = setup_ddp_init(local_rank)
     is_main = rank == 0
     if is_main and args.resume:
         print(f"[resume] 从 epoch={start_epoch} 继续训练")
+
+    # EMA：在 DDP 包装前基于原始权重构建，避免 deepcopy DDP 带来的复杂性
+    ema = None
+    ema_cfg = train_cfg.get("ema", {}) or {}
+    if bool(ema_cfg.get("enabled", True)):
+        from online_ncde.utils.ema import ModelEMA
+        ema_decay = float(ema_cfg.get("decay", 0.999))
+        ema = ModelEMA(model, decay=ema_decay, device=device)
+        if is_main:
+            print(f"[ema] enabled, decay={ema_decay}")
+        if resumed_payload is not None and "ema" in resumed_payload:
+            ema.load_state_dict(resumed_payload["ema"])
+            if is_main:
+                print(f"[ema] resumed num_updates={ema.num_updates}")
 
     # DDP 包装
     if use_ddp:
@@ -386,6 +399,7 @@ def main() -> None:
         primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
         is_main=is_main,
+        ema=ema,
     )
 
     # --- 推导 output_dir：resume 时复用原目录，否则新建时间戳目录 ---
@@ -529,7 +543,8 @@ def main() -> None:
                     from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
                     from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
 
-                    sweep_path = Path(args.sweep_pkl)
+                    sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
+                    sweep_path = Path(sweep_rel)
                     sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
                     if epoch == start_epoch:
                         print(f"[rayiou] sweep pkl: {sweep_pkl}")

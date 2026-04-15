@@ -21,7 +21,7 @@ from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner          # noqa: E402
 from online_ncde_200x200x16 import OnlineNcdeAligner200                      # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
+from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -141,7 +141,7 @@ def main() -> None:
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         amp_fp16=bool(eval_cfg.get("amp_fp16", False)),
     ).to(device)
-    load_checkpoint(args.checkpoint, model=model, strict=False)
+    load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
 
     loss_cfg = cfg["loss"]
     # build_loss 在带 ray_cfg 时需要 pc_range / free_index，保持与 train 脚本一致

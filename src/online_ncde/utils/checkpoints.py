@@ -40,3 +40,24 @@ def load_checkpoint(
     if optimizer is not None and "optimizer" in payload:
         optimizer.load_state_dict(payload["optimizer"])
     return payload
+
+
+def load_checkpoint_for_eval(
+    path: str,
+    model: torch.nn.Module,
+    strict: bool = False,
+) -> Dict[str, Any]:
+    """评估专用：优先加载 EMA 权重，无 EMA 时退回普通权重。
+
+    EMA 权重来自 payload["ema"]["module"]；旧 checkpoint 没有 ema 字段时回退。
+    """
+    payload = torch.load(path, map_location="cpu")
+    ema_blob = payload.get("ema")
+    if isinstance(ema_blob, dict) and "module" in ema_blob:
+        model.load_state_dict(ema_blob["module"], strict=strict)
+        print(f"[ckpt] loaded EMA weights from {path}")
+    else:
+        state = payload.get("model", payload)
+        model.load_state_dict(state, strict=strict)
+        print(f"[ckpt] no EMA found, loaded raw weights from {path}")
+    return payload

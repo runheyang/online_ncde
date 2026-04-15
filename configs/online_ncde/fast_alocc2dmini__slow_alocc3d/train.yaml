@@ -87,6 +87,9 @@ train:
   supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
   supervision_weights: [0.15, 0.20, 0.25, 0.40]
   supervision_weight_normalize: true
+  ema:
+    enabled: true
+    decay: 0.999
 
 dataloader:
   pin_memory: true
@@ -101,6 +104,7 @@ eval:
   log_interval: 500
   log_multistep_losses: true
   amp_fp16: false
+  sweep_pkl: data/nuscenes/nuscenes_infos_val_sweep.pkl
 
 wandb:
   entity: runheyang
