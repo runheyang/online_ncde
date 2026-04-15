@@ -31,9 +31,7 @@ data:
   voxel_size: [0.4, 0.4, 0.4]
   grid_size: [200, 200, 16]
   gt_mask_key: mask_camera
-  slow_noise_std: 0.0
   timestamp_scale: 1.0e-6
-  fast_occ_thresh: 0.25
 
 model:
   feat_dim: 32

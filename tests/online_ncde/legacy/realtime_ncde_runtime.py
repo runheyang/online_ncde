@@ -85,7 +85,6 @@ class RealtimeNcdeRuntime:
             free_index=self.free_index,
             pc_range=tuple(data_cfg["pc_range"]),
             voxel_size=tuple(data_cfg["voxel_size"]),
-            fast_occ_thresh=float(data_cfg.get("fast_occ_thresh", 0.25)),
             decoder_init_scale=float(model_cfg.get("decoder_init_scale", 1.0e-3)),
             use_fast_residual=bool(model_cfg.get("use_fast_residual", True)),
             func_g_inner_dim=int(model_cfg.get("func_g_inner_dim", 32)),

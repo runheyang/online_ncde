@@ -40,7 +40,6 @@ class Occ3DOnlineNcdeDataset(Dataset):
         free_index: int,
         grid_size: Tuple[int, int, int],
         gt_mask_key: str = "mask_camera",
-        slow_noise_std: float = 0.0,
         topk_other_fill_value: float = -8.0,
         topk_free_fill_value: float = 10.0,
         supervision_sidecar_path: str | None = None,
@@ -61,7 +60,6 @@ class Occ3DOnlineNcdeDataset(Dataset):
         self.free_index = int(free_index)
         self.grid_size = tuple(grid_size)
         self.gt_mask_key = gt_mask_key
-        self.slow_noise_std = float(slow_noise_std)
         self.topk_other_fill_value = float(topk_other_fill_value)
         self.topk_free_fill_value = float(topk_free_fill_value)
         self.fast_logits_variant = self._normalize_logits_variant(
@@ -329,9 +327,6 @@ class Occ3DOnlineNcdeDataset(Dataset):
         num_frames = fast_logits.shape[0]
 
         frame_ego2global = torch.from_numpy(info["frame_ego2global"]).float()
-
-        if self.slow_noise_std > 0:
-            slow_logits = slow_logits + torch.randn_like(slow_logits) * self.slow_noise_std
 
         scene_name = info.get("scene_name", "")
         token = info.get("token", "")

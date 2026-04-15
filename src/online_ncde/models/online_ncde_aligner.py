@@ -52,7 +52,6 @@ class OnlineNcdeAligner(nn.Module):
         free_index: int,
         pc_range: Tuple[float, float, float, float, float, float],
         voxel_size: Tuple[float, float, float],
-        fast_occ_thresh: float = 0.25,
         decoder_init_scale: float = 0.0,
         use_fast_residual: bool = True,
         func_g_inner_dim: int = 32,
