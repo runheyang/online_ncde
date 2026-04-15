@@ -67,10 +67,10 @@ loss:
     lambda_ray: 0.2
     # 第一版：补 empty/no-hit 监督，depth 降为辅助项。
     # ray_total = lambda_hit * hit + lambda_empty * empty + lambda_pre_free * pre_free + lambda_depth * depth
-    lambda_hit: 0.5
-    lambda_empty: 0.75
-    lambda_pre_free: 5.0
-    lambda_depth: 0.1
+    lambda_hit: 0.3
+    lambda_empty: 0.0
+    lambda_pre_free: 0.0
+    lambda_depth: 0.2
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4
@@ -80,7 +80,7 @@ loss:
     # gt_dist >= mid_max_m 的 ray 直接丢弃（对齐 RayIoU 的口径）
     near_max_m: 10.0
     mid_max_m: 20.0
-    near_weight: 4.0
+    near_weight: 2.0
     mid_weight: 1.0
     # 非对称 depth loss：pred 比 GT 远乘 far，比 GT 近乘 near（鼓励保守预测）
     depth_asym_far: 2.0
