@@ -1,5 +1,11 @@
 # Ray Loss 调参 Loop 工作流
 
+## 版本上下文（重要，每轮都要记住）
+- **v1 (Run 1-7, 无 EMA)**：已归档，绝对数值弃用；方向性结论保留在 `SUMMARY.md`（hit loss 是 push-far 主因、depth_asym_far 无效、empty loss 的 tradeoff 等）
+- **v2 (Run 8+, 启用 EMA)**：当前阶段。**不要直接拿 v2 结果与 v1 数字做对比**，需先跑 v2 自己的 no-ray baseline
+- 新 run 的 log 路径：`scripts/ray_tuning_runs/v2_with_ema/logs/run_N.log`
+- state.json 里 v2 run 必须带 `"ema": true`
+
 ## 使用方法
 
 在项目根目录下运行：
@@ -41,8 +47,9 @@
        --config configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train.yaml \
        --train-limit 3000 --val-scene-count 20 --epochs 8 --rayiou --save-metrics-json \
        --ray-override '"'"'{"lambda_ray": 0.2, ...}'"'"' \
-       > scripts/ray_tuning_runs/run_NNN.log 2>&1 &"'
+       > scripts/ray_tuning_runs/v2_with_ema/logs/run_NNN.log 2>&1 &"'
    ```
+   注意：v2 run 的 log 放在 `v2_with_ema/logs/`；EMA 默认由 config 开启（`train.ema.enabled=true`），无需 CLI 参数。
 7. 将 run 信息（参数、output_dir、启动时间）写入 state.json
 8. 等待下次迭代（约 3.5 小时后）
 
