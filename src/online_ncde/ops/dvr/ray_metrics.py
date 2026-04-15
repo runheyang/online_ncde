@@ -172,7 +172,8 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=False):
     pcd_pred_list, pcd_gt_list = [], []
     # 未过滤的原始 pcd（含 free ray），仅 return_pcds=True 时收集
     raw_pcd_pred_list, raw_pcd_gt_list = [], []
-    pbar = make_pbar(len(sem_pred_list), prefix="[rayiou] ").start()
+    _pb = make_pbar(len(sem_pred_list), prefix="[rayiou] ")
+    pbar = _pb.start() if _pb is not None else None
     for i, (sem_pred, sem_gt, lidar_origins) in enumerate(zip(sem_pred_list, sem_gt_list, lidar_origin_list), 1):
         sem_pred = np.reshape(sem_pred, [200, 200, 16])
         sem_gt = np.reshape(sem_gt, [200, 200, 16])
@@ -192,8 +193,10 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=False):
         assert pcd_pred.shape == pcd_gt.shape
         pcd_pred_list.append(pcd_pred)
         pcd_gt_list.append(pcd_gt)
-        pbar.update(i)
-    pbar.finish()
+        if pbar is not None:
+            pbar.update(i)
+    if pbar is not None:
+        pbar.finish()
 
     iou_list = calc_metrics(pcd_pred_list, pcd_gt_list)
     rayiou = np.nanmean(iou_list)

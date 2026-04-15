@@ -99,7 +99,7 @@ train:
   warmup_start_lr: 1.0e-5
   weight_decay: 1.0e-2
   clip_norm: 5.0
-  log_interval: 10
+  log_interval: 1000
   device: cuda
   supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
   supervision_weights: [0.15, 0.20, 0.25, 0.40]
@@ -116,7 +116,7 @@ eval:
   num_workers: 16
   device: cuda
   free_conf_thresh: null
-  log_interval: 20
+  log_interval: 500
   log_multistep_losses: true
   amp_fp16: false
 

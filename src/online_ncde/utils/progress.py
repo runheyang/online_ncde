@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 import progressbar
 
@@ -25,8 +26,14 @@ class IterSpeed(progressbar.widgets.WidgetBase):
         return self.fmt.format(value / elapsed)
 
 
-def make_pbar(max_value: int, prefix: str = "") -> progressbar.ProgressBar:
-    """创建带 it/s 显示的 ProgressBar。"""
+def make_pbar(max_value: int, prefix: str = "") -> progressbar.ProgressBar | None:
+    """创建带 it/s 显示的 ProgressBar。
+
+    非终端（重定向到文件）时返回 None，让调用者走 fallback 的间隔打印，
+    避免每步一行的垃圾日志。
+    """
+    if not sys.stderr.isatty():
+        return None
     widgets = [
         prefix,
         progressbar.SimpleProgress(), " ",

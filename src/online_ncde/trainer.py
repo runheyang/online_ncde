@@ -517,7 +517,8 @@ class Trainer:
         total_sup_count: Dict[str, int] = {}
 
         total_steps = len(loader)
-        pbar = make_pbar(total_steps, prefix=f"[train][epoch={epoch}] ").start() if (make_pbar is not None and self.is_main) else None
+        _pb = make_pbar(total_steps, prefix=f"[train][epoch={epoch}] ") if (make_pbar is not None and self.is_main) else None
+        pbar = _pb.start() if _pb is not None else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             outputs, loss_dict, sup_loss_batch, sup_count_batch, _, _, _ = (
@@ -648,7 +649,8 @@ class Trainer:
         )
 
         total_steps = len(loader)
-        pbar = make_pbar(total_steps, prefix="[eval] ").start() if (make_pbar is not None and self.is_main) else None
+        _pb = make_pbar(total_steps, prefix="[eval] ") if (make_pbar is not None and self.is_main) else None
+        pbar = _pb.start() if _pb is not None else None
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             _, loss_dict, sup_loss_batch, sup_count_batch, logits, eval_labels, eval_masks = (

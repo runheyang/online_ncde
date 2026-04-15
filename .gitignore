@@ -8,6 +8,9 @@
 /wandb
 /docs
 
+# Ray 调参 run 日志（结构化结果已由 state.json 承载）
+scripts/ray_tuning_runs/run_*.log
+
 # 本地配置
 .vscode/
 .cursor/
