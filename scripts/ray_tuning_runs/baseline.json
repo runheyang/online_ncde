@@ -1,0 +1,66 @@
+{
+  "note": "快系统 baseline（无对齐器），15000 sample 训练，20 val scene 评估——与 tuning runs 直接可比",
+  "config_path": "configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/train.yaml",
+  "mIoU": 33.72,
+  "mIoU_d": 31.16,
+  "rayiou": {
+    "RayIoU": 0.3829,
+    "RayIoU@1": 0.3209,
+    "RayIoU@2": 0.3932,
+    "RayIoU@4": 0.4346
+  },
+  "binned_ray": {
+    "all": {
+      "total_rays": 57077955,
+      "RayIoU": 0.3829,
+      "signed_err": 1.855,
+      "abs_err": 3.927,
+      "closer_ratio": 0.346,
+      "farther_ratio": 0.373
+    },
+    "0-10m": {
+      "total_rays": 30091159,
+      "RayIoU": 0.4284,
+      "signed_err": 2.157,
+      "abs_err": 2.862,
+      "closer_ratio": 0.288,
+      "farther_ratio": 0.366
+    },
+    "10-20m": {
+      "total_rays": 18470180,
+      "RayIoU": 0.3398,
+      "signed_err": 1.835,
+      "abs_err": 4.35,
+      "closer_ratio": 0.407,
+      "farther_ratio": 0.36
+    },
+    "20-40m": {
+      "total_rays": 7732117,
+      "RayIoU": 0.2381,
+      "signed_err": 1.116,
+      "abs_err": 6.591,
+      "closer_ratio": 0.424,
+      "farther_ratio": 0.422
+    }
+  },
+  "hit_nohit": {
+    "all": {
+      "total_rays": 80982720,
+      "pred_hit_rate": 0.6222,
+      "miss_rate": 0.16,
+      "false_hit_rate": 0.1022
+    },
+    "0-10m": {
+      "total_rays": 35073313,
+      "pred_hit_rate": 0.7791,
+      "miss_rate": 0.1061,
+      "false_hit_rate": 0.086
+    },
+    "10-20m": {
+      "total_rays": 25600901,
+      "pred_hit_rate": 0.6128,
+      "miss_rate": 0.1816,
+      "false_hit_rate": 0.0803
+    }
+  }
+}
