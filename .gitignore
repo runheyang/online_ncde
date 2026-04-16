@@ -9,7 +9,7 @@
 /docs
 
 # Ray 调参 run 日志 & 本地 state（纯实验产物，不纳入版本控制）
-scripts/ray_tuning_runs/**/*.log
+scripts/ray_tuning_runs/*/
 scripts/ray_tuning_runs/state.json
 
 # 本地配置
