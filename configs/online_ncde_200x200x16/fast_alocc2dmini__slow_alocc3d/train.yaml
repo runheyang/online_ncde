@@ -8,3 +8,5 @@ model:
 
 train:
   num_workers: 12
+  # L_kl = λ * mean(m_occ.clamp(min=0) * KL(aligned || fast.detach()))，conf-加权 trust region
+  lambda_fast_kl: 0.0

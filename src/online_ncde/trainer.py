@@ -95,6 +95,7 @@ class Trainer:
         stepwise_max_step_index: int | None = None,
         is_main: bool = True,
         ema: ModelEMA | None = None,
+        lambda_fast_kl: float = 0.0,
     ) -> None:
         self.model = model
         self.is_main = is_main
@@ -139,6 +140,10 @@ class Trainer:
         self.stepwise_max_step_index = (
             None if resolved_step_max is None else int(resolved_step_max)
         )
+        self.lambda_fast_kl = float(lambda_fast_kl)
+        _underlying = getattr(self.model, "module", self.model)
+        if hasattr(_underlying, "_fast_kl_active"):
+            _underlying._fast_kl_active = self.lambda_fast_kl > 0.0
 
     @staticmethod
     def _require_multistep_supervision(sample: Dict[str, Any], context: str) -> None:
@@ -510,6 +515,7 @@ class Trainer:
         total_focal = 0.0
         total_aux = 0.0
         total_delta = 0.0
+        total_fast_kl = 0.0
         total_ray = 0.0
         total_ray_hit = 0.0
         total_ray_empty = 0.0
@@ -528,6 +534,10 @@ class Trainer:
                 self._run_stepwise_and_compute_loss(sample=sample, for_eval=False)
             )
             loss = cast(torch.Tensor, loss_dict["total"])
+            fast_kl_tensor = outputs.get("fast_kl", None)
+            if isinstance(fast_kl_tensor, torch.Tensor):
+                total_fast_kl += float(fast_kl_tensor.detach().item())
+                loss = loss + self.lambda_fast_kl * fast_kl_tensor
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -573,6 +583,7 @@ class Trainer:
             total_focal,
             total_aux,
             total_delta,
+            total_fast_kl,
             total_ray,
             total_ray_hit,
             total_ray_empty,
@@ -586,6 +597,7 @@ class Trainer:
             total_focal,
             total_aux,
             total_delta,
+            total_fast_kl,
             total_ray,
             total_ray_hit,
             total_ray_empty,
@@ -616,6 +628,8 @@ class Trainer:
             "aux": total_aux / denom,
             "delta_scene_abs_mean": total_delta / denom,
         }
+        if self.lambda_fast_kl > 0.0:
+            metrics["fast_kl"] = total_fast_kl / denom
         if total_ray_sup_count > 0:
             metrics["ray"] = total_ray / denom
             metrics["ray_hit"] = total_ray_hit / denom

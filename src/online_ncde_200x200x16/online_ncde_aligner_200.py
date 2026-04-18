@@ -14,6 +14,7 @@ from typing import Dict, Tuple, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # 复用原始 online_ncde 的共享组件
 from online_ncde.data.ego_warp_list import (
@@ -30,6 +31,15 @@ from online_ncde.models.solver_heun import HeunSolver
 # 200x200x16 专用编解码器
 from online_ncde_200x200x16.decoder import DenseDecoder200
 from online_ncde_200x200x16.encoder import DenseEncoder200
+
+
+def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
+    """m_occ = max_{c != free}(logit[c]) - logit[free]，Fast-KL 的 conf 权重来源。"""
+    masked = fast_logits.clone()
+    masked.narrow(-4, free_index, 1).fill_(float("-inf"))
+    max_non_free = masked.amax(dim=-4, keepdim=True)
+    free_logit = fast_logits.narrow(-4, free_index, 1)
+    return max_non_free - free_logit
 
 
 class OnlineNcdeAligner200(nn.Module):
@@ -103,6 +113,9 @@ class OnlineNcdeAligner200(nn.Module):
             init_scale=decoder_init_scale,
         )
 
+        # Trainer 根据 lambda_fast_kl 注入；False 时 forward 跳过 KL 计算。
+        self._fast_kl_active: bool = False
+
     def _encode_fast(self, fast_logits: torch.Tensor) -> torch.Tensor:
         """编码快系统序列，输出 dense (T, C_f, X, Y, Z)。"""
         return self.fast_encoder(fast_logits)
@@ -117,6 +130,29 @@ class OnlineNcdeAligner200(nn.Module):
         z_tensor = z_tensor.permute(0, 1, 4, 3, 2).contiguous()  # (1, C, Z, Y, X)
         out_dense = self.decoder(z_tensor)
         return out_dense.permute(0, 1, 4, 3, 2).contiguous()[0]
+
+    def _compute_fast_kl_step(
+        self,
+        fast_logits_t: torch.Tensor,    # (C, X, Y, Z) raw fast logits at step t (detached by caller)
+        aligned_logits: torch.Tensor,   # (C, X, Y, Z)
+    ) -> torch.Tensor:
+        """Conf-weighted KL(aligned || fast)：fast 自信判占用处把 aligned 拉回 fast。
+
+        用 m_occ.clamp(min=0) 做权重 —— 只惩罚"fast 自信判占用"处偏离，保留
+        "fast 自信判空"处 aligner 自由填补（aligner 真推演的主要价值场景）。
+        """
+        # 显式 .float() 避免 AMP autocast 下 fp16 输入导致 kl_div 混算
+        aligned_f = aligned_logits.float()
+        fast_f = fast_logits_t.float()
+        w = _compute_m_occ(fast_f, self.free_index).clamp(min=0.0)
+        log_p_fast = F.log_softmax(fast_f, dim=0)
+        log_p_aligned = F.log_softmax(aligned_f, dim=0)
+        # F.kl_div(log_q, log_p, log_target=True) = Σ exp(log_p) (log_p - log_q) = KL(P || Q)
+        # P=aligned, Q=fast：input=log_p_fast, target=log_p_aligned
+        kl_per_voxel = F.kl_div(
+            log_p_fast, log_p_aligned, log_target=True, reduction="none"
+        ).sum(dim=0, keepdim=True)
+        return (w * kl_per_voxel).mean()
 
     def _forward_single(
         self,
@@ -249,7 +285,10 @@ class OnlineNcdeAligner200(nn.Module):
             Z_dense = slow_feat
 
         delta_mag_values: list[float] = []
+        fast_kl_accum: torch.Tensor | None = None
+        fast_kl_step_count = 0
         step_logits_list: list[torch.Tensor] = []
+        compute_fast_kl = self._fast_kl_active and self.use_fast_residual
 
         for k in range(rollout_steps):
             transform = compute_transform_prev_to_curr(
@@ -298,6 +337,14 @@ class OnlineNcdeAligner200(nn.Module):
                 logits_now = logits_delta
             step_logits_list.append(logits_now.float())
 
+            if compute_fast_kl:
+                kl_step = self._compute_fast_kl_step(
+                    fast_logits_t=fast_logits[k + 1].detach(),
+                    aligned_logits=logits_now,
+                )
+                fast_kl_accum = kl_step if fast_kl_accum is None else fast_kl_accum + kl_step
+                fast_kl_step_count += 1
+
             delta_mag_values.append(delta_scene.abs().mean().item())
 
         if step_logits_list:
@@ -311,11 +358,14 @@ class OnlineNcdeAligner200(nn.Module):
         diagnostics = {
             "delta_scene_abs_mean": torch.tensor(avg_delta, device=fast_logits.device),
         }
-        return {
+        out: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
             "step_logits": step_logits,
             "step_indices": step_indices,
             "diagnostics": {k: v.float() for k, v in diagnostics.items()},
         }
+        if fast_kl_accum is not None and fast_kl_step_count > 0:
+            out["fast_kl"] = fast_kl_accum / fast_kl_step_count
+        return out
 
     def _forward_single_stepwise_eval(
         self,
@@ -643,6 +693,7 @@ class OnlineNcdeAligner200(nn.Module):
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         step_logits_list: list[torch.Tensor] = []
         diag_list: list[dict[str, torch.Tensor]] = []
+        fast_kl_list: list[torch.Tensor] = []
         step_indices: torch.Tensor | None = None
         with amp_ctx:
             for b in range(fast_logits.shape[0]):
@@ -665,12 +716,17 @@ class OnlineNcdeAligner200(nn.Module):
 
                 step_logits_list.append(sample_step_logits)
                 diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+                if "fast_kl" in out:
+                    fast_kl_list.append(cast(torch.Tensor, out["fast_kl"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
         step_logits = torch.stack(step_logits_list, dim=0)
-        return {
+        result: Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]] = {
             "step_logits": step_logits,
             "step_indices": step_indices,
             "diagnostics": diag_list,
         }
+        if fast_kl_list:
+            result["fast_kl"] = torch.stack(fast_kl_list).mean()
+        return result

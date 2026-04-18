@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=0, help="覆盖 config 中的 epochs（0=不覆盖）")
     parser.add_argument("--ray-override", type=str, default="",
                         help="JSON 字符串覆盖 loss.ray 参数，如 '{\"lambda_ray\": 0.3}'")
+    parser.add_argument("--lambda-fast-kl", type=float, default=None,
+                        help="覆盖 train.lambda_fast_kl（conf-weighted KL-to-fast 正则权重）")
     parser.add_argument("--save-metrics-json", action="store_true",
                         help="eval 结束后将指标（含分箱 RayIoU）保存到 output_dir/metrics.json")
     return parser.parse_args()
@@ -208,6 +210,13 @@ def main() -> None:
         cfg["loss"]["ray"].update(ray_overrides)
         if local_rank == 0:
             print(f"[ray-override] {ray_overrides}")
+    # --lambda-fast-kl：覆盖 train.lambda_fast_kl
+    if args.lambda_fast_kl is not None:
+        if "train" not in cfg:
+            cfg["train"] = {}
+        cfg["train"]["lambda_fast_kl"] = float(args.lambda_fast_kl)
+        if local_rank == 0:
+            print(f"[lambda-fast-kl] override = {args.lambda_fast_kl}")
     set_seed(args.seed + local_rank)
 
     if torch.cuda.is_available():
@@ -392,6 +401,7 @@ def main() -> None:
         supervision_labels=list(train_cfg.get("supervision_labels", ["t-1.5", "t-1.0", "t-0.5", "t"])),
         supervision_weights=list(train_cfg.get("supervision_weights", [0.15, 0.20, 0.25, 0.40])),
         supervision_weight_normalize=bool(train_cfg.get("supervision_weight_normalize", True)),
+        lambda_fast_kl=float(train_cfg.get("lambda_fast_kl", 0.0)),
         log_multistep_losses=bool(eval_cfg.get("log_multistep_losses", True)),
         rollout_mode=str(train_cfg.get("rollout_mode", "full")),
         primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
@@ -489,12 +499,16 @@ def main() -> None:
                     f" ray_pre_free={float(train_metrics.get('ray_pre_free', 0.0)):.4f}"
                     f" ray_depth={float(train_metrics['ray_depth']):.4f}"
                 )
+            fast_kl_text = ""
+            if "fast_kl" in train_metrics:
+                fast_kl_text = f" fast_kl={float(train_metrics['fast_kl']):.4f}"
             print(
                 f"[train] epoch={epoch} "
                 f"loss={train_metrics['loss']:.4f} "
                 f"focal={train_metrics['focal']:.4f} "
                 f"aux={train_metrics['aux']:.4f} "
                 f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"{fast_kl_text}"
                 f"{ray_total_text}"
                 f"{train_sup_text}"
             )
@@ -623,6 +637,11 @@ def main() -> None:
                     "mIoU_d": float(val_metrics.get("miou_d", 0.0)),
                     "loss": float(val_metrics["loss"]),
                 }
+                # Fast-KL 诊断
+                if "fast_kl" in train_metrics:
+                    metrics_json["fast_kl"] = {
+                        "train": float(train_metrics["fast_kl"]),
+                    }
                 # ray loss 配置记录
                 if ray_cfg is not None:
                     metrics_json["ray_config"] = {
