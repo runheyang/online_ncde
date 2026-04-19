@@ -51,7 +51,7 @@ loss:
     lambda_hit: 0.3
     lambda_empty: 0.0
     lambda_pre_free: 0.0
-    lambda_depth: 0.1
+    lambda_depth: 0.0
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4
