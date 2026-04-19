@@ -73,6 +73,10 @@ def parse_args() -> argparse.Namespace:
                         help="JSON 字符串覆盖 loss.ray 参数，如 '{\"lambda_ray\": 0.3}'")
     parser.add_argument("--lambda-fast-kl", type=float, default=None,
                         help="覆盖 train.lambda_fast_kl（conf-weighted KL-to-fast 正则权重）")
+    parser.add_argument("--lambda-lovasz", type=float, default=None,
+                        help="覆盖 loss.lambda_lovasz（Lovasz IoU surrogate 权重，默认 1.0）")
+    parser.add_argument("--lambda-focal", type=float, default=None,
+                        help="覆盖 loss.lambda_focal（Focal loss 权重，默认 1.0）")
     parser.add_argument("--save-metrics-json", action="store_true",
                         help="eval 结束后将指标（含分箱 RayIoU）保存到 output_dir/metrics.json")
     return parser.parse_args()
@@ -217,6 +221,20 @@ def main() -> None:
         cfg["train"]["lambda_fast_kl"] = float(args.lambda_fast_kl)
         if local_rank == 0:
             print(f"[lambda-fast-kl] override = {args.lambda_fast_kl}")
+    # --lambda-lovasz：覆盖 loss.lambda_lovasz
+    if args.lambda_lovasz is not None:
+        if "loss" not in cfg:
+            cfg["loss"] = {}
+        cfg["loss"]["lambda_lovasz"] = float(args.lambda_lovasz)
+        if local_rank == 0:
+            print(f"[lambda-lovasz] override = {args.lambda_lovasz}")
+    # --lambda-focal：覆盖 loss.lambda_focal
+    if args.lambda_focal is not None:
+        if "loss" not in cfg:
+            cfg["loss"] = {}
+        cfg["loss"]["lambda_focal"] = float(args.lambda_focal)
+        if local_rank == 0:
+            print(f"[lambda-focal] override = {args.lambda_focal}")
     set_seed(args.seed + local_rank)
 
     if torch.cuda.is_available():

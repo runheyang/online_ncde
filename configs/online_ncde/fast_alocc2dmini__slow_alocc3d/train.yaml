@@ -51,7 +51,7 @@ loss:
     lambda_hit: 0.3
     lambda_empty: 0.0
     lambda_pre_free: 0.0
-    lambda_depth: 0.2
+    lambda_depth: 0.1
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4
@@ -63,12 +63,9 @@ loss:
     mid_max_m: 20.0
     near_weight: 2.0
     mid_weight: 1.0
-    # 非对称 depth loss：pred 比 GT 远乘 far，比 GT 近乘 near（鼓励保守预测）
     depth_asym_far: 2.0
     depth_asym_near: 1.0
     smooth_l1_beta: 1.0
-    # DVR 出射距离 → center 语义的偏置补偿。null 走默认 0.5 * step_m。
-    # 测试/已 center 化 GT 显式传 0.0
     gt_dist_bias_m: null
 
 train:
@@ -88,6 +85,8 @@ train:
   ema:
     enabled: true
     decay: 0.999
+  # L_kl = λ * mean(m_occ.clamp(min=0) * KL(aligned || fast.detach()))，conf-加权 trust region
+  lambda_fast_kl: 3.0
 
 dataloader:
   pin_memory: true
