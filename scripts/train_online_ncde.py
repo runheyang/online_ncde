@@ -129,6 +129,7 @@ def build_dataset(
         logits_loader=logits_loader,
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split=ray_sidecar_split,
+        fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
     )
 
 

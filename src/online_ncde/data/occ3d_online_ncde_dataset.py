@@ -50,6 +50,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
         logits_loader: LogitsLoader | None = None,
         ray_sidecar_dir: str | None = None,
         ray_sidecar_split: str | None = None,
+        fast_frame_stride: int = 1,
     ) -> None:
         self.root_path = root_path
         self.info_path = resolve_path(root_path, info_path)
@@ -75,6 +76,11 @@ class Occ3DOnlineNcdeDataset(Dataset):
         )
         self.full_topk_k = int(full_topk_k)
         self.logits_loader = logits_loader
+        self.fast_frame_stride = int(fast_frame_stride)
+        if self.fast_frame_stride < 1:
+            raise ValueError(
+                f"fast_frame_stride 必须 >= 1，当前为 {fast_frame_stride!r}"
+            )
         self.supervision_labels = ["t-1.5", "t-1.0", "t-0.5", "t"]
         self.supervision_by_token: Dict[str, Dict[str, Any]] | None = None
         # ray sidecar 延后到 supervision_labels 定版后再构造，方便做顺序校验
@@ -290,6 +296,29 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 label_cache[path] = load_labels_npz(path)
             return label_cache[path]
 
+        # stride>1 时抽帧：用切片而非 fancy index，numpy 数组零拷贝（view）。
+        # 要求 (num_frames-1) 是 stride 的倍数，保证 supervision_step_indices 整除对齐。
+        stride = self.fast_frame_stride
+        if stride > 1:
+            frame_paths_src = info.get("frame_rel_paths", None)
+            if not frame_paths_src:
+                raise KeyError(
+                    "fast_frame_stride > 1 需要 info 里有 frame_rel_paths，"
+                    "当前 info 不含该字段（走的是旧格式？）"
+                )
+            num_full_frames = len(frame_paths_src)
+            if num_full_frames < 2 or (num_full_frames - 1) % stride != 0:
+                raise ValueError(
+                    f"fast_frame_stride={stride} 与 num_frames={num_full_frames} 不整除，"
+                    "无法对齐 supervision_step_indices。"
+                )
+            info_view: Dict[str, Any] = dict(info)
+            info_view["frame_rel_paths"] = frame_paths_src[::stride]
+            for key in ("frame_ego2global", "frame_timestamps", "frame_dt"):
+                if key in info_view:
+                    info_view[key] = info[key][::stride]
+            info = info_view
+
         if self.logits_loader is not None:
             # 新路径：通过注入的 LogitsLoader 加载（如 ALOCC dense top-k）
             fast_logits = self.logits_loader.load_fast_logits(info, device)
@@ -364,6 +393,16 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 gt_rel = str(sidecar_rel_paths[sup_i]) if sup_i < len(sidecar_rel_paths) else ""
                 if step_idx < 0 or not gt_rel:
                     continue
+                if self.fast_frame_stride > 1:
+                    # 抽帧后 aligner 的 step_indices 为 arange(1, T_sub)，
+                    # 原始 [3,6,9,12] 需要按 stride 重映射到 [1,2,3,4]。
+                    if step_idx % self.fast_frame_stride != 0:
+                        raise ValueError(
+                            f"supervision_step_indices={step_idx} 不是 "
+                            f"fast_frame_stride={self.fast_frame_stride} 的整数倍，"
+                            "无法对齐到抽帧后的 rollout step。"
+                        )
+                    step_idx = step_idx // self.fast_frame_stride
                 gt_path = gt_rel if os.path.isabs(gt_rel) else os.path.join(self.gt_root, gt_rel)
                 if not os.path.exists(gt_path):
                     continue

@@ -103,6 +103,7 @@ def main() -> None:
         logits_loader=logits_loader,
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split="val",
+        fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
     )
     num_workers = int(eval_cfg.get("num_workers", 4))
     kwargs = dict(
