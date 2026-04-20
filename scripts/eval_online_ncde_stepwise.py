@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
+from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
 from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
@@ -90,6 +91,9 @@ def main() -> None:
     if not fast_logits_root or not slow_logit_root:
         raise KeyError("data.fast_logits_root 和 data.slow_logit_root 为必填项。")
 
+    # 按 data.logits_format 构造 LogitsLoader（alocc/composite/opus_sparse_full 等走新路径）
+    logits_loader = build_logits_loader(data_cfg, root_path)
+
     dataset = Occ3DOnlineNcdeDataset(
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
         root_path=root_path,
@@ -106,6 +110,8 @@ def main() -> None:
         slow_logit_variant=data_cfg.get("slow_logit_variant", "topk"),
         full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
         full_topk_k=data_cfg.get("full_topk_k", 3),
+        logits_loader=logits_loader,
+        fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
     )
     if args.limit > 0:
         keep = min(args.limit, len(dataset))
@@ -168,10 +174,20 @@ def main() -> None:
 
     step_time_sum = defaultdict(float)
     step_time_count = defaultdict(int)
+    # 分段计时：warp / solver / decode
+    step_warp_sum = defaultdict(float)
+    step_solver_sum = defaultdict(float)
+    step_decode_sum = defaultdict(float)
     keyframe_time_sum = 0.0
     keyframe_time_count = 0
+    keyframe_warp_sum = 0.0
+    keyframe_solver_sum = 0.0
+    keyframe_decode_sum = 0.0
     all_time_sum = 0.0
     all_time_count = 0
+    all_warp_sum = 0.0
+    all_solver_sum = 0.0
+    all_decode_sum = 0.0
     missing_gt_count = 0
     no_scene_count = 0
     no_frame_tokens_count = 0
@@ -192,17 +208,32 @@ def main() -> None:
             )
             step_logits = cast(torch.Tensor, outputs["step_logits"])  # (B, S, C, X, Y, Z)
             step_time_ms = cast(torch.Tensor, outputs["step_time_ms"])  # (B, S)
+            step_warp_ms = cast(torch.Tensor, outputs["step_warp_ms"])  # (B, S)
+            step_solver_ms = cast(torch.Tensor, outputs["step_solver_ms"])  # (B, S)
+            step_decode_ms = cast(torch.Tensor, outputs["step_decode_ms"])  # (B, S)
             step_indices = cast(torch.Tensor, outputs["step_indices"])  # (S,)
             step_indices_list = [int(v) for v in step_indices.detach().cpu().tolist()]
 
             meta_list = cast(list[dict[str, Any]], sample["meta"])
             for b, meta in enumerate(meta_list):
                 step_times_list = [float(v) for v in step_time_ms[b].detach().cpu().tolist()]
+                step_warp_list = [float(v) for v in step_warp_ms[b].detach().cpu().tolist()]
+                step_solver_list = [float(v) for v in step_solver_ms[b].detach().cpu().tolist()]
+                step_decode_list = [float(v) for v in step_decode_ms[b].detach().cpu().tolist()]
                 for local_step_idx, step_idx in enumerate(step_indices_list):
                     t_ms = step_times_list[local_step_idx]
+                    w_ms = step_warp_list[local_step_idx]
+                    s_ms = step_solver_list[local_step_idx]
+                    d_ms = step_decode_list[local_step_idx]
                     step_time_sum[step_idx] += t_ms
+                    step_warp_sum[step_idx] += w_ms
+                    step_solver_sum[step_idx] += s_ms
+                    step_decode_sum[step_idx] += d_ms
                     step_time_count[step_idx] += 1
                     all_time_sum += t_ms
+                    all_warp_sum += w_ms
+                    all_solver_sum += s_ms
+                    all_decode_sum += d_ms
                     all_time_count += 1
 
                 scene_name = str(meta.get("scene_name", ""))
@@ -255,6 +286,9 @@ def main() -> None:
                     )
                     t_ms = step_times_list[local_step_idx]
                     keyframe_time_sum += t_ms
+                    keyframe_warp_sum += step_warp_list[local_step_idx]
+                    keyframe_solver_sum += step_solver_list[local_step_idx]
+                    keyframe_decode_sum += step_decode_list[local_step_idx]
                     keyframe_time_count += 1
 
             if progressbar is None and (batch_idx % log_interval == 0 or batch_idx == total_steps):
@@ -264,15 +298,42 @@ def main() -> None:
         step_idx: _safe_avg(step_time_sum[step_idx], step_time_count[step_idx])
         for step_idx in sorted(step_time_count.keys())
     }
+    step_warp_avg = {
+        step_idx: _safe_avg(step_warp_sum[step_idx], step_time_count[step_idx])
+        for step_idx in sorted(step_time_count.keys())
+    }
+    step_solver_avg = {
+        step_idx: _safe_avg(step_solver_sum[step_idx], step_time_count[step_idx])
+        for step_idx in sorted(step_time_count.keys())
+    }
+    step_decode_avg = {
+        step_idx: _safe_avg(step_decode_sum[step_idx], step_time_count[step_idx])
+        for step_idx in sorted(step_time_count.keys())
+    }
     avg_all_step_time_ms = _safe_avg(all_time_sum, all_time_count)
+    avg_all_warp_ms = _safe_avg(all_warp_sum, all_time_count)
+    avg_all_solver_ms = _safe_avg(all_solver_sum, all_time_count)
+    avg_all_decode_ms = _safe_avg(all_decode_sum, all_time_count)
     avg_keyframe_step_time_ms = _safe_avg(keyframe_time_sum, keyframe_time_count)
+    avg_keyframe_warp_ms = _safe_avg(keyframe_warp_sum, keyframe_time_count)
+    avg_keyframe_solver_ms = _safe_avg(keyframe_solver_sum, keyframe_time_count)
+    avg_keyframe_decode_ms = _safe_avg(keyframe_decode_sum, keyframe_time_count)
 
     print(f"[timing] avg_all_steps_ms={avg_all_step_time_ms:.4f} steps={all_time_count}")
+    print(
+        f"[timing]   warp={avg_all_warp_ms:.4f} "
+        f"solver={avg_all_solver_ms:.4f} decode={avg_all_decode_ms:.4f}"
+    )
     print(f"[timing] avg_keyframe_steps_ms={avg_keyframe_step_time_ms:.4f} key_steps={keyframe_time_count}")
+    print(
+        f"[timing]   warp={avg_keyframe_warp_ms:.4f} "
+        f"solver={avg_keyframe_solver_ms:.4f} decode={avg_keyframe_decode_ms:.4f}"
+    )
     for step_idx in sorted(step_time_avg.keys()):
         print(
             f"[timing] step={step_idx} avg_ms={step_time_avg[step_idx]:.4f} "
-            f"count={step_time_count[step_idx]}"
+            f"warp={step_warp_avg[step_idx]:.4f} solver={step_solver_avg[step_idx]:.4f} "
+            f"decode={step_decode_avg[step_idx]:.4f} count={step_time_count[step_idx]}"
         )
 
     per_step_results: dict[str, Any] = {}
@@ -286,6 +347,9 @@ def main() -> None:
                 "per_class_iou": [],
                 "class_names": class_names,
                 "avg_time_ms": float(step_time_avg[step_idx]),
+                "avg_warp_ms": float(step_warp_avg[step_idx]),
+                "avg_solver_ms": float(step_solver_avg[step_idx]),
+                "avg_decode_ms": float(step_decode_avg[step_idx]),
                 "num_step_preds": int(step_time_count[step_idx]),
             }
             continue
@@ -305,6 +369,9 @@ def main() -> None:
             "per_class_iou": [float(v) for v in step_per_class],
             "class_names": class_names,
             "avg_time_ms": float(step_time_avg[step_idx]),
+            "avg_warp_ms": float(step_warp_avg[step_idx]),
+            "avg_solver_ms": float(step_solver_avg[step_idx]),
+            "avg_decode_ms": float(step_decode_avg[step_idx]),
             "num_step_preds": int(step_time_count[step_idx]),
         }
 
@@ -328,8 +395,17 @@ def main() -> None:
         payload = {
             "timing": {
                 "avg_all_steps_ms": _to_json_number(avg_all_step_time_ms),
+                "avg_all_warp_ms": _to_json_number(avg_all_warp_ms),
+                "avg_all_solver_ms": _to_json_number(avg_all_solver_ms),
+                "avg_all_decode_ms": _to_json_number(avg_all_decode_ms),
                 "avg_keyframe_steps_ms": _to_json_number(avg_keyframe_step_time_ms),
+                "avg_keyframe_warp_ms": _to_json_number(avg_keyframe_warp_ms),
+                "avg_keyframe_solver_ms": _to_json_number(avg_keyframe_solver_ms),
+                "avg_keyframe_decode_ms": _to_json_number(avg_keyframe_decode_ms),
                 "per_step_avg_ms": {k: _to_json_number(v) for k, v in step_time_avg.items()},
+                "per_step_warp_ms": {k: _to_json_number(v) for k, v in step_warp_avg.items()},
+                "per_step_solver_ms": {k: _to_json_number(v) for k, v in step_solver_avg.items()},
+                "per_step_decode_ms": {k: _to_json_number(v) for k, v in step_decode_avg.items()},
                 "per_step_count": {str(k): int(v) for k, v in step_time_count.items()},
             },
             "keyframe_per_step": per_step_results,

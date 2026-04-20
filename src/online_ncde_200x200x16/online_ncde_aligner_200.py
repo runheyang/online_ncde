@@ -416,18 +416,24 @@ class OnlineNcdeAligner200(nn.Module):
         delta_mag_values: list[float] = []
 
         step_logits_list: list[torch.Tensor] = []
-        step_time_ms_values: list[float] = []
-        step_time_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        # 分三段统计：warp(ego-warp/grid_sample) / solver(build_delta + self.solver.step) / decode(解码+残差)
+        step_warp_ms_values: list[float] = []
+        step_solver_ms_values: list[float] = []
+        step_decode_ms_values: list[float] = []
+        step_time_events: list[tuple[torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event]] = []
         use_cuda_timing = fast_logits.is_cuda
 
         for k in range(num_frames - 1):
             if use_cuda_timing:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
+                ev_t0 = torch.cuda.Event(enable_timing=True)
+                ev_t1 = torch.cuda.Event(enable_timing=True)
+                ev_t2 = torch.cuda.Event(enable_timing=True)
+                ev_t3 = torch.cuda.Event(enable_timing=True)
+                ev_t0.record()
             else:
-                start_time = time.perf_counter()
+                tp0 = time.perf_counter()
 
+            # ---- warp 段 ----
             transform = compute_transform_prev_to_curr(
                 pose_prev_ego2global=frame_ego2global[k],
                 pose_curr_ego2global=frame_ego2global[k + 1],
@@ -452,8 +458,14 @@ class OnlineNcdeAligner200(nn.Module):
                 padding_mode="border",
                 prebuilt_grid=grid,
             )
-            f_t = fast_feat[k + 1]
 
+            if use_cuda_timing:
+                ev_t1.record()
+            else:
+                tp1 = time.perf_counter()
+
+            # ---- solver 段 ----
+            f_t = fast_feat[k + 1]
             delta_info = build_scene_delta_ctrl(
                 fast_curr=f_t,
                 fast_prev_adv=f_prev_adv,
@@ -467,6 +479,12 @@ class OnlineNcdeAligner200(nn.Module):
                 delta_ctrl=delta_info["delta_ctrl"],
             )
 
+            if use_cuda_timing:
+                ev_t2.record()
+            else:
+                tp2 = time.perf_counter()
+
+            # ---- decode 段 ----
             logits_delta = self._decode_dense_state(Z_dense)
             if self.use_fast_residual:
                 logits_now = logits_delta + fast_logits[k + 1]
@@ -477,14 +495,23 @@ class OnlineNcdeAligner200(nn.Module):
             delta_mag_values.append(delta_scene.abs().mean().item())
 
             if use_cuda_timing:
-                end_event.record()
-                step_time_events.append((start_event, end_event))
+                ev_t3.record()
+                step_time_events.append((ev_t0, ev_t1, ev_t2, ev_t3))
             else:
-                step_time_ms_values.append((time.perf_counter() - start_time) * 1000.0)
+                tp3 = time.perf_counter()
+                step_warp_ms_values.append((tp1 - tp0) * 1000.0)
+                step_solver_ms_values.append((tp2 - tp1) * 1000.0)
+                step_decode_ms_values.append((tp3 - tp2) * 1000.0)
 
         if use_cuda_timing:
             torch.cuda.synchronize(device=fast_logits.device)
-            step_time_ms_values = [s.elapsed_time(e) for s, e in step_time_events]
+            step_warp_ms_values = [t0.elapsed_time(t1) for t0, t1, _, _ in step_time_events]
+            step_solver_ms_values = [t1.elapsed_time(t2) for _, t1, t2, _ in step_time_events]
+            step_decode_ms_values = [t2.elapsed_time(t3) for _, _, t2, t3 in step_time_events]
+        step_time_ms_values = [
+            w + s + d
+            for w, s, d in zip(step_warp_ms_values, step_solver_ms_values, step_decode_ms_values)
+        ]
 
         if step_logits_list:
             step_logits = torch.stack(step_logits_list, dim=0)
@@ -495,6 +522,9 @@ class OnlineNcdeAligner200(nn.Module):
 
         step_indices = torch.arange(1, num_frames, device=fast_logits.device, dtype=torch.long)
         step_time_ms = torch.tensor(step_time_ms_values, device=fast_logits.device, dtype=torch.float32)
+        step_warp_ms = torch.tensor(step_warp_ms_values, device=fast_logits.device, dtype=torch.float32)
+        step_solver_ms = torch.tensor(step_solver_ms_values, device=fast_logits.device, dtype=torch.float32)
+        step_decode_ms = torch.tensor(step_decode_ms_values, device=fast_logits.device, dtype=torch.float32)
         avg_delta = sum(delta_mag_values) / max(len(delta_mag_values), 1)
         diagnostics = {
             "delta_scene_abs_mean": torch.tensor(avg_delta, device=fast_logits.device),
@@ -502,6 +532,9 @@ class OnlineNcdeAligner200(nn.Module):
         return {
             "step_logits": step_logits,
             "step_time_ms": step_time_ms,
+            "step_warp_ms": step_warp_ms,
+            "step_solver_ms": step_solver_ms,
+            "step_decode_ms": step_decode_ms,
             "step_indices": step_indices,
             "diagnostics": {k: v.float() for k, v in diagnostics.items()},
         }
@@ -527,6 +560,9 @@ class OnlineNcdeAligner200(nn.Module):
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         step_logits_list: list[torch.Tensor] = []
         step_time_list: list[torch.Tensor] = []
+        step_warp_list: list[torch.Tensor] = []
+        step_solver_list: list[torch.Tensor] = []
+        step_decode_list: list[torch.Tensor] = []
         diag_list: list[dict[str, torch.Tensor]] = []
         step_indices: torch.Tensor | None = None
         with amp_ctx:
@@ -540,6 +576,9 @@ class OnlineNcdeAligner200(nn.Module):
                 )
                 sample_step_logits = cast(torch.Tensor, out["step_logits"])
                 sample_step_time = cast(torch.Tensor, out["step_time_ms"])
+                sample_step_warp = cast(torch.Tensor, out["step_warp_ms"])
+                sample_step_solver = cast(torch.Tensor, out["step_solver_ms"])
+                sample_step_decode = cast(torch.Tensor, out["step_decode_ms"])
                 sample_step_indices = cast(torch.Tensor, out["step_indices"])
                 if step_indices is None:
                     step_indices = sample_step_indices
@@ -550,15 +589,24 @@ class OnlineNcdeAligner200(nn.Module):
 
                 step_logits_list.append(sample_step_logits)
                 step_time_list.append(sample_step_time)
+                step_warp_list.append(sample_step_warp)
+                step_solver_list.append(sample_step_solver)
+                step_decode_list.append(sample_step_decode)
                 diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
         step_logits = torch.stack(step_logits_list, dim=0)
         step_time_ms = torch.stack(step_time_list, dim=0)
+        step_warp_ms = torch.stack(step_warp_list, dim=0)
+        step_solver_ms = torch.stack(step_solver_list, dim=0)
+        step_decode_ms = torch.stack(step_decode_list, dim=0)
         return {
             "step_logits": step_logits,
             "step_time_ms": step_time_ms,
+            "step_warp_ms": step_warp_ms,
+            "step_solver_ms": step_solver_ms,
+            "step_decode_ms": step_decode_ms,
             "step_indices": step_indices,
             "diagnostics": diag_list,
         }
@@ -656,6 +704,9 @@ class OnlineNcdeAligner200(nn.Module):
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         step_logits_list: list[torch.Tensor] = []
         step_time_list: list[torch.Tensor] = []
+        step_warp_list: list[torch.Tensor] = []
+        step_solver_list: list[torch.Tensor] = []
+        step_decode_list: list[torch.Tensor] = []
         diag_list: list[dict[str, torch.Tensor]] = []
         step_indices: torch.Tensor | None = None
         with amp_ctx:
@@ -669,6 +720,9 @@ class OnlineNcdeAligner200(nn.Module):
                 )
                 sample_step_logits = cast(torch.Tensor, out["step_logits"])
                 sample_step_time = cast(torch.Tensor, out["step_time_ms"])
+                sample_step_warp = cast(torch.Tensor, out["step_warp_ms"])
+                sample_step_solver = cast(torch.Tensor, out["step_solver_ms"])
+                sample_step_decode = cast(torch.Tensor, out["step_decode_ms"])
                 sample_step_indices = cast(torch.Tensor, out["step_indices"])
                 if step_indices is None:
                     step_indices = sample_step_indices
@@ -679,15 +733,24 @@ class OnlineNcdeAligner200(nn.Module):
 
                 step_logits_list.append(sample_step_logits)
                 step_time_list.append(sample_step_time)
+                step_warp_list.append(sample_step_warp)
+                step_solver_list.append(sample_step_solver)
+                step_decode_list.append(sample_step_decode)
                 diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
         step_logits = torch.stack(step_logits_list, dim=0)
         step_time_ms = torch.stack(step_time_list, dim=0)
+        step_warp_ms = torch.stack(step_warp_list, dim=0)
+        step_solver_ms = torch.stack(step_solver_list, dim=0)
+        step_decode_ms = torch.stack(step_decode_list, dim=0)
         return {
             "step_logits": step_logits,
             "step_time_ms": step_time_ms,
+            "step_warp_ms": step_warp_ms,
+            "step_solver_ms": step_solver_ms,
+            "step_decode_ms": step_decode_ms,
             "step_indices": step_indices,
             "diagnostics": diag_list,
         }
