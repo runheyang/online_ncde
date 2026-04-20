@@ -455,6 +455,7 @@ def main() -> None:
         full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
         full_topk_k=data_cfg.get("full_topk_k", 3),
         logits_loader=logits_loader,
+        fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
     )
     if args.limit > 0:
         from torch.utils.data import Subset
