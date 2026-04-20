@@ -129,10 +129,7 @@ class AloccDenseTopkLoader(LogitsLoader):
 
     def _resolve(self, logits_root: str, rel_path: str) -> str:
         """拼接完整路径。"""
-        full = resolve_path(self.root_path, os.path.join(logits_root, rel_path))
-        if not os.path.exists(full):
-            raise FileNotFoundError(f"ALOCC logits 文件不存在: {full}")
-        return full
+        return resolve_path(self.root_path, os.path.join(logits_root, rel_path))
 
     def load_fast_logits(
         self,
@@ -224,10 +221,7 @@ class OpusSparseFullLoader(LogitsLoader):
         """拼接完整路径。"""
         if not rel_path:
             raise ValueError("rel_path 为空，无法定位 logits 文件")
-        full = resolve_path(self.root_path, os.path.join(logits_root, rel_path))
-        if not os.path.isfile(full):
-            raise FileNotFoundError(f"OPUS sparse full logits 文件不存在: {full}")
-        return full
+        return resolve_path(self.root_path, os.path.join(logits_root, rel_path))
 
     def load_fast_logits(
         self,
@@ -251,3 +245,28 @@ class OpusSparseFullLoader(LogitsLoader):
         rel_path = info["slow_logit_path"]
         full_path = self._resolve(self.slow_logit_root, rel_path)
         return self._decode_frame(full_path, device)
+
+
+class CompositeLogitsLoader(LogitsLoader):
+    """组合 loader：fast/slow 使用不同格式的子 loader。
+
+    例如 fast=opus_sparse_full + slow=alocc_dense_topk。
+    """
+
+    def __init__(self, fast_loader: LogitsLoader, slow_loader: LogitsLoader) -> None:
+        self.fast_loader = fast_loader
+        self.slow_loader = slow_loader
+
+    def load_fast_logits(
+        self,
+        info: Dict[str, Any],
+        device: torch.device,
+    ) -> torch.Tensor:
+        return self.fast_loader.load_fast_logits(info, device)
+
+    def load_slow_logits(
+        self,
+        info: Dict[str, Any],
+        device: torch.device,
+    ) -> torch.Tensor:
+        return self.slow_loader.load_slow_logits(info, device)

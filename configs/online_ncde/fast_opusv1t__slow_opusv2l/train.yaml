@@ -2,28 +2,28 @@
 
 data:
   # --- 新路径：逐帧 full logits + canonical_infos ---
-  # logits_format: opus_sparse_full
-  # info_path: configs/online_ncde/canonical_infos_train.pkl
-  # val_info_path: configs/online_ncde/canonical_infos_val.pkl
-  # fast_logits_root: data/logits_opusv1t_full
-  # slow_logit_root: data/logits_opusv2l_full
-  # opus_full_topk_k: 3
-  # opus_other_fill_value: -5.0
-  # opus_free_fill_value: 5.0
+  logits_format: opus_sparse_full
+  info_path: configs/online_ncde/canonical_infos_train.pkl
+  val_info_path: configs/online_ncde/canonical_infos_val.pkl
+  fast_logits_root: data/logits_opusv1t_full
+  slow_logit_root: data/logits_opusv2l_full
+  opus_full_topk_k: 3
+  opus_other_fill_value: -5.0
+  opus_free_fill_value: 5.0
   # --- 旧路径（注释保留，切回时取消注释并删除上方新路径配置） ---
-  info_path: configs/online_ncde/ncde_align_infos_train.pkl
-  val_info_path: configs/online_ncde/ncde_align_infos_val.pkl
-  train_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_train_sup4_sidecar.pkl
-  val_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_val_sup4_sidecar.pkl
-  # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
-  ray_sidecar_dir: data/online_ncde_ray_sidecar
-  fast_logits_root: data/logits_opusv1t
-  slow_logit_root: data/logits_opusv2l
-  fast_logits_variant: topk
-  slow_logit_variant: topk
-  full_logits_clamp_min: null
-  topk_other_fill_value: -5.0
-  topk_free_fill_value: 5.0
+  # info_path: configs/online_ncde/ncde_align_infos_train.pkl
+  # val_info_path: configs/online_ncde/ncde_align_infos_val.pkl
+  # train_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_train_sup4_sidecar.pkl
+  # val_supervision_sidecar_path: configs/online_ncde/ncde_align_infos_val_sup4_sidecar.pkl
+  # # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
+  # ray_sidecar_dir: data/online_ncde_ray_sidecar
+  # fast_logits_root: data/logits_opusv1t
+  # slow_logit_root: data/logits_opusv2l
+  # fast_logits_variant: topk
+  # slow_logit_variant: topk
+  # full_logits_clamp_min: null
+  # topk_other_fill_value: -5.0
+  # topk_free_fill_value: 5.0
   gt_root: data/nuscenes/gts
   num_classes: 18
   free_index: 17
@@ -63,12 +63,12 @@ loss:
   ray:
     # SegAndRayLoss 外层权重：total = seg_total + lambda_ray * ray_total
     lambda_ray: 0.2
-    # 第一版：补 empty/no-hit 监督，depth 降为辅助项。
+    # 对齐 fast_alocc2dmini__slow_alocc3d：仅启用 hit，其余 ray 子项关闭。
     # ray_total = lambda_hit * hit + lambda_empty * empty + lambda_pre_free * pre_free + lambda_depth * depth
     lambda_hit: 0.3
     lambda_empty: 0.0
     lambda_pre_free: 0.0
-    lambda_depth: 0.2
+    lambda_depth: 0.0
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4
@@ -106,6 +106,8 @@ train:
   ema:
     enabled: true
     decay: 0.999
+  # L_kl = λ * mean(m_occ.clamp(min=0) * KL(aligned || fast.detach()))，conf-加权 trust region
+  lambda_fast_kl: 3.0
 
 dataloader:
   pin_memory: true
