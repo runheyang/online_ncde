@@ -80,6 +80,8 @@ def parse_args() -> argparse.Namespace:
                         help="覆盖 loss.lambda_focal（Focal loss 权重，默认 1.0）")
     parser.add_argument("--save-metrics-json", action="store_true",
                         help="eval 结束后将指标（含分箱 RayIoU）保存到 output_dir/metrics.json")
+    parser.add_argument("--solver", choices=["heun", "euler"], default="heun",
+                        help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
     return parser.parse_args()
 
 
@@ -333,6 +335,7 @@ def main() -> None:
         func_g_body_dilations=tuple(model_cfg.get("func_g_body_dilations", [1, 2, 3])),
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
+        solver_variant=args.solver,
     ).to(device)
 
     # 先加载权重
@@ -345,6 +348,11 @@ def main() -> None:
     # 初始化进程组（默认 gloo，同节点双卡性能损失小）
     rank, local_rank, world_size = setup_ddp_init(local_rank)
     is_main = rank == 0
+    if is_main:
+        if args.solver == "euler":
+            print(f"[solver] {args.solver} (next-fast only, 单次 func_g 求值)")
+        else:
+            print(f"[solver] {args.solver}")
     if is_main and args.resume:
         print(f"[resume] 从 epoch={start_epoch} 继续训练")
 

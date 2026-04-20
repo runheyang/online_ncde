@@ -28,9 +28,10 @@ from online_ncde.models.func_g import FuncG
 from online_ncde.models.heads import CtrlProjector
 from online_ncde.models.solver_heun import HeunSolver
 
-# 200x200x16 专用编解码器
+# 200x200x16 专用编解码器 / 求解器
 from online_ncde_200x200x16.decoder import DenseDecoder200
 from online_ncde_200x200x16.encoder import DenseEncoder200
+from online_ncde_200x200x16.solver_euler import EulerNextFastSolver
 
 
 def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
@@ -66,6 +67,7 @@ class OnlineNcdeAligner200(nn.Module):
         func_g_gn_groups: int = 8,
         timestamp_scale: float = 1.0e-6,
         amp_fp16: bool = False,
+        solver_variant: str = "heun",
     ) -> None:
         super().__init__()
         self.amp_fp16 = bool(amp_fp16)
@@ -106,7 +108,17 @@ class OnlineNcdeAligner200(nn.Module):
             body_dilations=func_g_body_dilations,
             gn_groups=func_g_gn_groups,
         )
-        self.solver = HeunSolver(func_g=self.func_g, ctrl_proj=self.ctrl_proj)
+        solver_variant_lower = str(solver_variant).lower()
+        if solver_variant_lower == "heun":
+            self.solver = HeunSolver(func_g=self.func_g, ctrl_proj=self.ctrl_proj)
+        elif solver_variant_lower == "euler":
+            # Euler + next-fast：func_g 仅喂 f_t，单次求值
+            self.solver = EulerNextFastSolver(func_g=self.func_g, ctrl_proj=self.ctrl_proj)
+        else:
+            raise ValueError(
+                f"未知的 solver_variant: {solver_variant!r}，可选: 'heun', 'euler'"
+            )
+        self.solver_variant = solver_variant_lower
         self.decoder = DenseDecoder200(
             in_channels=hidden_dim,
             out_channels=num_classes,
