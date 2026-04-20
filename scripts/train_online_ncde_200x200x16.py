@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
     parser.add_argument("--wandb", action="store_true", help="启用 wandb")
+    parser.add_argument("--wandb-new-run", action="store_true", help="忽略 checkpoint 里的 wandb_run_id，强制新建 run")
     parser.add_argument("--cosine-annealing", action="store_true", help="启用余弦退火学习率调度")
     parser.add_argument("--min-lr", type=float, default=1.0e-5, help="余弦退火最低学习率")
     parser.add_argument("--rayiou", action="store_true", help="评估时额外计算 RayIoU")
@@ -437,6 +438,8 @@ def main() -> None:
         # 从 checkpoint 中读取 wandb_run_id 用于续接
         _ckpt_payload = torch.load(args.resume, map_location="cpu")
         resumed_wandb_id = _ckpt_payload.get("wandb_run_id", None)
+        if args.wandb_new_run:
+            resumed_wandb_id = None
         del _ckpt_payload
     else:
         config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
@@ -476,7 +479,7 @@ def main() -> None:
         if resumed_wandb_id:
             # 续接之前的 run
             wandb_kwargs["id"] = resumed_wandb_id
-            wandb_kwargs["resume"] = "must"
+            wandb_kwargs["resume"] = "allow"
         else:
             wandb_kwargs["name"] = wandb_cfg.get("name", "") or datetime.now().strftime("%Y%m%d_%H%M%S")
         run = wandb.init(**wandb_kwargs)
