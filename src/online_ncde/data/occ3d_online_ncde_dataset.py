@@ -11,14 +11,6 @@ from torch.utils.data import Dataset
 
 from online_ncde.config import resolve_path
 from online_ncde.data.labels_io import load_labels_npz
-from online_ncde.data.logits_io import (
-    decode_single_frame_sparse_full,
-    decode_single_frame_sparse_topk,
-    decode_sparse_full,
-    decode_sparse_topk,
-    load_logits_npz,
-    sparse_full_to_topk,
-)
 from online_ncde.data.logits_loader import LogitsLoader
 from online_ncde.data.ray_sidecar import RaySidecar
 
@@ -33,48 +25,25 @@ class Occ3DOnlineNcdeDataset(Dataset):
         self,
         info_path: str,
         root_path: str,
-        fast_logits_root: str,
-        slow_logit_root: str,
         gt_root: str,
         num_classes: int,
         free_index: int,
         grid_size: Tuple[int, int, int],
+        logits_loader: LogitsLoader,
         gt_mask_key: str = "mask_camera",
-        topk_other_fill_value: float = -8.0,
-        topk_free_fill_value: float = 10.0,
-        supervision_sidecar_path: str | None = None,
-        fast_logits_variant: str = "topk",
-        slow_logit_variant: str = "topk",
-        full_logits_clamp_min: float | None = None,
-        full_topk_k: int = 3,
-        logits_loader: LogitsLoader | None = None,
         ray_sidecar_dir: str | None = None,
         ray_sidecar_split: str | None = None,
         fast_frame_stride: int = 1,
     ) -> None:
         self.root_path = root_path
         self.info_path = resolve_path(root_path, info_path)
-        self.fast_logits_root = fast_logits_root
-        self.slow_logit_root = slow_logit_root
         self.gt_root = resolve_path(root_path, gt_root)
         self.num_classes = int(num_classes)
         self.free_index = int(free_index)
         self.grid_size = tuple(grid_size)
         self.gt_mask_key = gt_mask_key
-        self.topk_other_fill_value = float(topk_other_fill_value)
-        self.topk_free_fill_value = float(topk_free_fill_value)
-        self.fast_logits_variant = self._normalize_logits_variant(
-            fast_logits_variant,
-            field_name="fast_logits_variant",
-        )
-        self.slow_logit_variant = self._normalize_logits_variant(
-            slow_logit_variant,
-            field_name="slow_logit_variant",
-        )
-        self.full_logits_clamp_min = (
-            None if full_logits_clamp_min is None else float(full_logits_clamp_min)
-        )
-        self.full_topk_k = int(full_topk_k)
+        if logits_loader is None:
+            raise ValueError("logits_loader 为必填项，需通过 build_logits_loader 构造。")
         self.logits_loader = logits_loader
         self.fast_frame_stride = int(fast_frame_stride)
         if self.fast_frame_stride < 1:
@@ -93,28 +62,8 @@ class Occ3DOnlineNcdeDataset(Dataset):
         infos = payload["infos"] if isinstance(payload, dict) else payload
         self.infos: List[Dict[str, Any]] = [info for info in infos if info.get("valid", True)]
 
-        if supervision_sidecar_path:
-            sidecar_path = resolve_path(root_path, supervision_sidecar_path)
-            if not os.path.exists(sidecar_path):
-                raise FileNotFoundError(f"监督 sidecar 不存在: {sidecar_path}")
-            with open(sidecar_path, "rb") as f:
-                sidecar = pickle.load(f)
-            metadata = sidecar.get("metadata", {}) if isinstance(sidecar, dict) else {}
-            labels = metadata.get("supervision_labels", self.supervision_labels)
-            if isinstance(labels, list) and labels:
-                self.supervision_labels = [str(x) for x in labels]
-            entries = sidecar.get("entries", []) if isinstance(sidecar, dict) else []
-            if not isinstance(entries, list):
-                raise TypeError(f"sidecar.entries 类型异常: {type(entries)}")
-            self.supervision_by_token = {}
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                token = str(entry.get("token", ""))
-                if token:
-                    self.supervision_by_token[token] = entry
-        elif self.infos and "supervision_mask" in self.infos[0]:
-            # canonical pkl 直接包含多帧监督字段，无需 sidecar
+        if self.infos and "supervision_mask" in self.infos[0]:
+            # canonical pkl 直接包含多帧监督字段
             metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
             labels = metadata.get("supervision_labels", self.supervision_labels)
             if isinstance(labels, list) and labels:
@@ -143,148 +92,6 @@ class Occ3DOnlineNcdeDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.infos)
-
-    def _resolve_logits_path(
-        self,
-        root_rel: str,
-        info: Dict[str, Any],
-        info_key: str,
-        variant: str,
-        default_name: str,
-    ) -> str:
-        """
-        统一路径拼接规则：
-        root_path + 对应 logits_root + pkl 中相对路径字段。
-        当 pkl 缺少相对路径时，回退到 scene/token/default_name。
-        """
-        rel_path = str(info.get(info_key, ""))
-        if rel_path:
-            rel_path = self._rewrite_rel_path_for_variant(
-                rel_path=rel_path,
-                variant=variant,
-                default_name=default_name,
-            )
-            full_path = resolve_path(self.root_path, os.path.join(root_rel, rel_path))
-        else:
-            scene_name = str(info.get("scene_name", ""))
-            token = str(info.get("token", ""))
-            if not scene_name or not token:
-                raise FileNotFoundError(
-                    f"{info_key} 为空，且 info 缺少 scene_name/token，无法读取 logits 文件。"
-                )
-            full_path = resolve_path(
-                self.root_path,
-                os.path.join(root_rel, scene_name, token, default_name),
-            )
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"logits 文件不存在: {full_path}")
-        return full_path
-
-    @staticmethod
-    def _normalize_logits_variant(variant: str, field_name: str) -> str:
-        value = str(variant).strip().lower()
-        if value not in {"topk", "full", "full_topk"}:
-            raise ValueError(f"{field_name} 仅支持 topk/full/full_topk，当前为 {variant!r}")
-        return value
-
-    @staticmethod
-    def _rewrite_rel_path_for_variant(rel_path: str, variant: str, default_name: str) -> str:
-        if variant not in ("full", "full_topk"):
-            return rel_path
-        rel_dir, _ = os.path.split(rel_path)
-        return os.path.join(rel_dir, default_name) if rel_dir else default_name
-
-    @staticmethod
-    def _validate_npz_keys(path: str, logits_npz: Dict[str, Any], required_keys: List[str]) -> None:
-        missing = [key for key in required_keys if key not in logits_npz]
-        if missing:
-            raise KeyError(f"{path} 缺少字段 {missing}，实际字段为 {sorted(logits_npz.keys())}")
-
-    def _decode_logits(
-        self,
-        path: str,
-        npz: Dict[str, Any],
-        variant: str,
-        multi_frame: bool,
-        device: torch.device,
-    ) -> torch.Tensor:
-        """统一解码 topk/full 格式的 logits。
-
-        multi_frame=True  → 返回 (T, C, X, Y, Z)，需要 frame_splits
-        multi_frame=False → 返回 (C, X, Y, Z)，单帧
-        """
-        common = dict(
-            grid_size=self.grid_size,
-            num_classes=self.num_classes,
-            free_index=self.free_index,
-            other_fill_value=self.topk_other_fill_value,
-            free_fill_value=self.topk_free_fill_value,
-            device=device,
-            dtype=torch.float32,
-        )
-        if variant in ("full", "full_topk"):
-            required = ["sparse_coords", "sparse_values"]
-            if multi_frame:
-                required.append("frame_splits")
-            self._validate_npz_keys(path, npz, required)
-
-            if variant == "full_topk":
-                topk_values, topk_indices = sparse_full_to_topk(
-                    sparse_values=npz["sparse_values"],
-                    num_classes=self.num_classes,
-                    free_index=self.free_index,
-                    k=self.full_topk_k,
-                )
-                if multi_frame:
-                    return decode_sparse_topk(
-                        sparse_coords=npz["sparse_coords"],
-                        sparse_topk_values=topk_values,
-                        sparse_topk_indices=topk_indices,
-                        frame_splits=npz["frame_splits"],
-                        **common,
-                    )
-                return decode_single_frame_sparse_topk(
-                    sparse_coords=npz["sparse_coords"],
-                    sparse_topk_values=topk_values,
-                    sparse_topk_indices=topk_indices,
-                    **common,
-                )
-
-            if multi_frame:
-                decoded = decode_sparse_full(
-                    sparse_coords=npz["sparse_coords"],
-                    sparse_values=npz["sparse_values"],
-                    frame_splits=npz["frame_splits"],
-                    **common,
-                )
-            else:
-                decoded = decode_single_frame_sparse_full(
-                    sparse_coords=npz["sparse_coords"],
-                    sparse_values=npz["sparse_values"],
-                    **common,
-                )
-            if self.full_logits_clamp_min is not None:
-                decoded = decoded.clamp_min(self.full_logits_clamp_min)
-            return decoded
-        else:
-            required = ["sparse_coords", "sparse_topk_values", "sparse_topk_indices"]
-            if multi_frame:
-                required.append("frame_splits")
-            self._validate_npz_keys(path, npz, required)
-            if multi_frame:
-                return decode_sparse_topk(
-                    sparse_coords=npz["sparse_coords"],
-                    sparse_topk_values=npz["sparse_topk_values"],
-                    sparse_topk_indices=npz["sparse_topk_indices"],
-                    frame_splits=npz["frame_splits"],
-                    **common,
-                )
-            return decode_single_frame_sparse_topk(
-                sparse_coords=npz["sparse_coords"],
-                sparse_topk_values=npz["sparse_topk_values"],
-                sparse_topk_indices=npz["sparse_topk_indices"],
-                **common,
-            )
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         info = self.infos[idx]
@@ -319,40 +126,8 @@ class Occ3DOnlineNcdeDataset(Dataset):
                     info_view[key] = info[key][::stride]
             info = info_view
 
-        if self.logits_loader is not None:
-            # 新路径：通过注入的 LogitsLoader 加载（如 ALOCC dense top-k）
-            fast_logits = self.logits_loader.load_fast_logits(info, device)
-            slow_logits = self.logits_loader.load_slow_logits(info, device)
-        else:
-            # 旧路径：OPUS 稀疏格式内联解码
-            fast_logits_path = self._resolve_logits_path(
-                root_rel=self.fast_logits_root,
-                info=info,
-                info_key="logits_path",
-                variant=self.fast_logits_variant,
-                default_name="logits_full.npz" if self.fast_logits_variant in ("full", "full_topk") else "logits.npz",
-            )
-            fast_logits = self._decode_logits(
-                path=fast_logits_path,
-                npz=load_logits_npz(fast_logits_path),
-                variant=self.fast_logits_variant,
-                multi_frame=True,
-                device=device,
-            )
-            slow_logits_path = self._resolve_logits_path(
-                root_rel=self.slow_logit_root,
-                info=info,
-                info_key="slow_logit_path",
-                variant=self.slow_logit_variant,
-                default_name="slow_logit_full.npz" if self.slow_logit_variant in ("full", "full_topk") else "slow_logit.npz",
-            )
-            slow_logits = self._decode_logits(
-                path=slow_logits_path,
-                npz=load_logits_npz(slow_logits_path),
-                variant=self.slow_logit_variant,
-                multi_frame=False,
-                device=device,
-            )
+        fast_logits = self.logits_loader.load_fast_logits(info, device)
+        slow_logits = self.logits_loader.load_slow_logits(info, device)
         num_frames = fast_logits.shape[0]
 
         frame_ego2global = torch.from_numpy(info["frame_ego2global"]).float()
@@ -372,25 +147,25 @@ class Occ3DOnlineNcdeDataset(Dataset):
         sup_step_indices = None
         sup_valid_mask = None
         if self.supervision_by_token is not None:
-            sidecar_entry = self.supervision_by_token.get(token, None)
-            if sidecar_entry is None:
-                raise KeyError(f"sidecar 缺少 token={token} 的监督条目。")
+            sup_entry = self.supervision_by_token.get(token, None)
+            if sup_entry is None:
+                raise KeyError(f"canonical pkl 缺少 token={token} 的监督条目。")
             num_sup = len(self.supervision_labels)
             sup_labels = torch.zeros((num_sup, *self.grid_size), dtype=torch.long)
             sup_masks = torch.zeros((num_sup, *self.grid_size), dtype=torch.float32)
             sup_step_indices = torch.full((num_sup,), -1, dtype=torch.long)
             sup_valid_mask = torch.zeros((num_sup,), dtype=torch.float32)
 
-            sidecar_mask = sidecar_entry.get("supervision_mask", [0] * num_sup)
-            sidecar_steps = sidecar_entry.get("supervision_step_indices", [-1] * num_sup)
-            sidecar_rel_paths = sidecar_entry.get("supervision_gt_rel_paths", [""] * num_sup)
+            sup_mask_list = sup_entry.get("supervision_mask", [0] * num_sup)
+            sup_steps = sup_entry.get("supervision_step_indices", [-1] * num_sup)
+            sup_rel_paths = sup_entry.get("supervision_gt_rel_paths", [""] * num_sup)
 
             for sup_i in range(num_sup):
-                valid = int(sidecar_mask[sup_i]) if sup_i < len(sidecar_mask) else 0
+                valid = int(sup_mask_list[sup_i]) if sup_i < len(sup_mask_list) else 0
                 if valid <= 0:
                     continue
-                step_idx = int(sidecar_steps[sup_i]) if sup_i < len(sidecar_steps) else -1
-                gt_rel = str(sidecar_rel_paths[sup_i]) if sup_i < len(sidecar_rel_paths) else ""
+                step_idx = int(sup_steps[sup_i]) if sup_i < len(sup_steps) else -1
+                gt_rel = str(sup_rel_paths[sup_i]) if sup_i < len(sup_rel_paths) else ""
                 if step_idx < 0 or not gt_rel:
                     continue
                 if self.fast_frame_stride > 1:
@@ -480,8 +255,6 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 "frame_tokens": info.get("frame_tokens", []),
                 "logits_path": info.get("logits_path", ""),
                 "slow_logit_path": info.get("slow_logit_path", ""),
-                "fast_logits_variant": self.fast_logits_variant,
-                "slow_logit_variant": self.slow_logit_variant,
                 "supervision_labels": self.supervision_labels,
             },
         }

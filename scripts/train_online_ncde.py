@@ -102,30 +102,18 @@ def build_dataset(
     info_path: str,
     data_cfg: dict,
     root_path: str,
-    fast_logits_root: str,
-    slow_logit_root: str,
-    supervision_sidecar_path: str | None = None,
-    logits_loader=None,
+    logits_loader,
     ray_sidecar_split: str | None = None,
 ) -> Occ3DOnlineNcdeDataset:
     """根据 data_cfg 构造 Occ3DOnlineNcdeDataset。"""
     return Occ3DOnlineNcdeDataset(
         info_path=info_path,
         root_path=root_path,
-        fast_logits_root=fast_logits_root,
-        slow_logit_root=slow_logit_root,
         gt_root=data_cfg["gt_root"],
         num_classes=data_cfg["num_classes"],
         free_index=data_cfg["free_index"],
         grid_size=tuple(data_cfg["grid_size"]),
         gt_mask_key=data_cfg["gt_mask_key"],
-        topk_other_fill_value=data_cfg.get("topk_other_fill_value", -5.0),
-        topk_free_fill_value=data_cfg.get("topk_free_fill_value", 5.0),
-        supervision_sidecar_path=supervision_sidecar_path,
-        fast_logits_variant=data_cfg.get("fast_logits_variant", "topk"),
-        slow_logit_variant=data_cfg.get("slow_logit_variant", "topk"),
-        full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
-        full_topk_k=data_cfg.get("full_topk_k", 3),
         logits_loader=logits_loader,
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split=ray_sidecar_split,
@@ -158,21 +146,12 @@ def main() -> None:
     eval_cfg = cfg.get("eval", {})
     loader_cfg = cfg.get("dataloader", {})
     wandb_cfg = cfg.get("wandb", {})
-    fast_logits_root = data_cfg.get("fast_logits_root", data_cfg.get("logits_root", ""))
-    slow_logit_root = data_cfg.get("slow_logit_root", "")
-    if not fast_logits_root or not slow_logit_root:
-        raise KeyError("data.fast_logits_root 和 data.slow_logit_root 为必填项。")
-    train_sidecar_path = data_cfg.get("train_supervision_sidecar_path", "")
-    val_sidecar_path = data_cfg.get("val_supervision_sidecar_path", "")
     logits_loader = build_logits_loader(data_cfg, root_path)
 
     train_dataset = build_dataset(
         info_path=data_cfg["info_path"],
         data_cfg=data_cfg,
         root_path=root_path,
-        fast_logits_root=fast_logits_root,
-        slow_logit_root=slow_logit_root,
-        supervision_sidecar_path=train_sidecar_path if train_sidecar_path else None,
         logits_loader=logits_loader,
         ray_sidecar_split="train",
     )
@@ -198,9 +177,6 @@ def main() -> None:
             info_path=val_info_path,
             data_cfg=data_cfg,
             root_path=root_path,
-            fast_logits_root=fast_logits_root,
-            slow_logit_root=slow_logit_root,
-            supervision_sidecar_path=val_sidecar_path if val_sidecar_path else None,
             logits_loader=logits_loader,
             ray_sidecar_split="val",
         )

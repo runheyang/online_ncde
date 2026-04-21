@@ -15,16 +15,11 @@ from online_ncde.data.logits_loader import (
 def build_logits_loader(
     data_cfg: Dict[str, Any],
     root_path: str,
-) -> LogitsLoader | None:
-    """根据 data.logits_format 构造 LogitsLoader。
-
-    返回 None 表示走旧的 OPUS 内联解码路径。
-    """
+) -> LogitsLoader:
+    """根据 data.logits_format 构造 LogitsLoader。"""
     logits_format = str(data_cfg.get("logits_format", "")).strip().lower()
-
-    if not logits_format or logits_format == "opus":
-        # 未指定或显式指定 opus → 走旧路径
-        return None
+    if not logits_format:
+        raise KeyError("data.logits_format 为必填项。")
 
     if logits_format == "alocc_dense_topk":
         fast_logits_root = data_cfg.get("fast_logits_root", "")

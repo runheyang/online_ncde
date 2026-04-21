@@ -156,9 +156,8 @@ class Trainer:
             return
         raise RuntimeError(
             f"[{context}] sample 缺少多帧监督字段 {missing}；"
-            "Trainer 现已强制走多帧路径，请在 data 配置里补上 "
-            "train_supervision_sidecar_path / val_supervision_sidecar_path，"
-            "或使用 canonical 带 sup_* 的 info pkl。"
+            "请使用带 supervision_mask / supervision_step_indices 等字段的 "
+            "canonical info pkl。"
         )
 
     def _pack_diag(self, diag_list: list[dict[str, torch.Tensor]]) -> Dict[str, float]:

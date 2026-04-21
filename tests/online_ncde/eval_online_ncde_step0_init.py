@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
+from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
 from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
@@ -157,23 +158,17 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     root_path = cfg["root_path"]
 
-    fast_logits_root = data_cfg.get("fast_logits_root", data_cfg.get("logits_root", ""))
-    slow_logit_root = data_cfg.get("slow_logit_root", "")
-    if not fast_logits_root or not slow_logit_root:
-        raise KeyError("data.fast_logits_root and data.slow_logit_root are required")
+    logits_loader = build_logits_loader(data_cfg, root_path)
 
     base_dataset = Occ3DOnlineNcdeDataset(
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
         root_path=root_path,
-        fast_logits_root=fast_logits_root,
-        slow_logit_root=slow_logit_root,
         gt_root=data_cfg["gt_root"],
         num_classes=data_cfg["num_classes"],
         free_index=data_cfg["free_index"],
         grid_size=tuple(data_cfg["grid_size"]),
         gt_mask_key=data_cfg["gt_mask_key"],
-        topk_other_fill_value=data_cfg.get("topk_other_fill_value", -5.0),
-        topk_free_fill_value=data_cfg.get("topk_free_fill_value", 5.0),
+        logits_loader=logits_loader,
     )
     dataset = FilteredOnlineNcdeDataset(base_dataset=base_dataset)
     if args.limit > 0:

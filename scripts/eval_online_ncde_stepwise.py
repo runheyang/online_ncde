@@ -86,30 +86,17 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     root_path = cfg["root_path"]
 
-    fast_logits_root = data_cfg.get("fast_logits_root", data_cfg.get("logits_root", ""))
-    slow_logit_root = data_cfg.get("slow_logit_root", "")
-    if not fast_logits_root or not slow_logit_root:
-        raise KeyError("data.fast_logits_root 和 data.slow_logit_root 为必填项。")
-
-    # 按 data.logits_format 构造 LogitsLoader（alocc/composite/opus_sparse_full 等走新路径）
+    # 按 data.logits_format 构造 LogitsLoader
     logits_loader = build_logits_loader(data_cfg, root_path)
 
     dataset = Occ3DOnlineNcdeDataset(
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
         root_path=root_path,
-        fast_logits_root=fast_logits_root,
-        slow_logit_root=slow_logit_root,
         gt_root=data_cfg["gt_root"],
         num_classes=data_cfg["num_classes"],
         free_index=data_cfg["free_index"],
         grid_size=tuple(data_cfg["grid_size"]),
         gt_mask_key=data_cfg["gt_mask_key"],
-        topk_other_fill_value=data_cfg.get("topk_other_fill_value", -5.0),
-        topk_free_fill_value=data_cfg.get("topk_free_fill_value", 5.0),
-        fast_logits_variant=data_cfg.get("fast_logits_variant", "topk"),
-        slow_logit_variant=data_cfg.get("slow_logit_variant", "topk"),
-        full_logits_clamp_min=data_cfg.get("full_logits_clamp_min", None),
-        full_topk_k=data_cfg.get("full_topk_k", 3),
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
     )
