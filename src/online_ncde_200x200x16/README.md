@@ -28,7 +28,7 @@
 
 ```bash
 python scripts/train_online_ncde_200x200x16.py \
-    --config configs/online_ncde_200x200x16/fast_opusv1t__slow_opusv2l/train.yaml
+    --config configs/online_ncde_200x200x16/fast_opusv1t__slow_opusv2l/base.yaml
 ```
 
 ### 配置

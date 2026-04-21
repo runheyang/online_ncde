@@ -91,11 +91,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--opus-config", required=True, help="OPUS 配置路径")
     parser.add_argument("--opus-weights", required=True, help="OPUS 权重路径")
-    parser.add_argument(
-        "--ncde-config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/eval.yaml"),
-        help="online_ncde 配置路径",
-    )
+    parser.add_argument("--ncde-config", required=True, help="online_ncde 配置路径")
     parser.add_argument(
         "--ncde-checkpoint",
         default="",

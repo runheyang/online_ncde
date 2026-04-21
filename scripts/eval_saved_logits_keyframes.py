@@ -34,11 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate saved logits.npz on all keyframe steps in saved list."
     )
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/eval.yaml"),
-        help="配置文件路径",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument(
         "--saved-list",
         required=True,

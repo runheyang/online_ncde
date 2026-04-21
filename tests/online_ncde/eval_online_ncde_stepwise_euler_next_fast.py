@@ -40,11 +40,7 @@ except Exception:  # pragma: no cover
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/eval.yaml"),
-        help="配置文件路径",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument("--checkpoint", required=True, help="模型权重路径")
     parser.add_argument("--limit", type=int, default=0, help="仅评估前 N 个样本，0 表示全量")
     parser.add_argument("--batch-size", type=int, default=0, help="覆盖配置中的 eval.batch_size，0 表示不覆盖")

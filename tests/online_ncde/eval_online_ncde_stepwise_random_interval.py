@@ -216,7 +216,7 @@ def parse_args() -> argparse.Namespace:
         description="Unified stepwise evaluation for online NCDE",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--config", default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/eval.yaml"), help="config path")
+    parser.add_argument("--config", required=True, help="config path")
     parser.add_argument("--checkpoint", required=True, help="checkpoint path")
     parser.add_argument("--limit", type=int, default=0, help="evaluate first N valid samples, 0 for all")
     parser.add_argument("--batch-size", type=int, default=0, help="override eval.batch_size, 0 keeps config")

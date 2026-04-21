@@ -24,11 +24,7 @@ HARD_VOXEL_THRESHOLD = 100
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="离线统计 hard 过采样样本。")
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/train.yaml"),
-        help="配置文件路径（用于读取 root_path/data.info_path/data.gt_root）。",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径（用于读取 root_path/data.info_path/data.gt_root）。")
     parser.add_argument(
         "--output",
         default=str(ROOT / "configs/online_ncde/hard_oversample_train_stats.json"),

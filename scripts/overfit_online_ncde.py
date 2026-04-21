@@ -67,11 +67,7 @@ def compute_overfit_miou_from_hist(hist: np.ndarray, free_index: int) -> dict[st
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/train.yaml"),
-        help="配置文件路径",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument("--sample-count", type=int, default=10, help="过拟合样本数")
     parser.add_argument("--epochs", type=int, default=300, help="过拟合轮数")
     parser.add_argument("--seed", type=int, default=0, help="随机种子")

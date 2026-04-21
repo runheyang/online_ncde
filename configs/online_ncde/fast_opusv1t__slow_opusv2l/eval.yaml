@@ -1,3 +1,0 @@
-# Eval config for fast=opusv1t, slow=opusv2l.
-# 薄壳：全部字段继承同目录 train.yaml；如需 eval 专属覆盖在下方追加。
-base_config: ./train.yaml

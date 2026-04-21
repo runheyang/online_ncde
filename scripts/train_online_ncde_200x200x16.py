@@ -48,11 +48,7 @@ except Exception:  # pragma: no cover
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde_200x200x16/fast_opusv1t__slow_opusv2l/train.yaml"),
-        help="配置文件路径",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument("--resume", default="", help="恢复训练权重")
     parser.add_argument("--train-limit", type=int, default=0, help="训练样本上限（0=全量）")
     parser.add_argument("--eval-every", type=int, default=1, help="每隔多少 epoch 评估一次")

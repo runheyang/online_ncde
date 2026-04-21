@@ -43,11 +43,7 @@ except Exception:  # pragma: no cover
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/train.yaml"),
-        help="配置文件路径",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument("--resume", default="", help="恢复训练权重")
     parser.add_argument("--train-limit", type=int, default=0, help="训练样本上限（0=全量）")
     parser.add_argument("--eval-every", type=int, default=1, help="每隔多少 epoch 评估一次")
@@ -300,7 +296,7 @@ def main() -> None:
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("val/*", step_metric="epoch")
 
-    # 从 config 路径推导输出目录：configs/X/Y/train.yaml → outputs/X/Y/{timestamp}_100x100x16
+    # 从 config 路径推导输出目录：configs/X/Y/base.yaml → outputs/X/Y/{timestamp}_100x100x16
     config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
     output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

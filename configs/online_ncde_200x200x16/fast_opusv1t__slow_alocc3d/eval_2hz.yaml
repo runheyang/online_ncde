@@ -1,2 +1,0 @@
-# 200x200x16 + 2Hz 评估：继承同目录 train_2hz.yaml。
-base_config: ./train_2hz.yaml

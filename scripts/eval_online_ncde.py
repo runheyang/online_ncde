@@ -26,11 +26,7 @@ from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/eval.yaml"),
-        help="配置文件路径",
-    )
+    parser.add_argument("--config", required=True, help="配置文件路径")
     parser.add_argument("--checkpoint", required=True, help="模型权重路径")
     parser.add_argument("--200x200x16", dest="use_200", action="store_true",
                         help="使用 200x200x16 分辨率模型结构")

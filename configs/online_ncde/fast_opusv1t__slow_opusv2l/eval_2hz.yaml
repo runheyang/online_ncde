@@ -1,2 +1,0 @@
-# 2Hz 评估：继承 train_2hz.yaml（stride=3），与 eval.yaml 同样的"薄壳"用法。
-base_config: ./train_2hz.yaml

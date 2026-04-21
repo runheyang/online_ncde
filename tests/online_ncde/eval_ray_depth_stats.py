@@ -404,10 +404,7 @@ def resolve_sweep_pkl(sweep_pkl_arg: str, cfg: dict) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="按 ray 统计 first-hit 深度误差，诊断 RayIoU 下降")
-    parser.add_argument(
-        "--config",
-        default=str(ROOT / "configs/online_ncde/fast_opusv1t__slow_opusv2l/eval.yaml"),
-    )
+    parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
                         help="sweep pkl 路径（相对于项目根目录）")

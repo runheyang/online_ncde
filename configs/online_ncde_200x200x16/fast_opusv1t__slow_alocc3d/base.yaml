@@ -1,6 +1,6 @@
 # Online NCDE 200x200x16 全分辨率变体配置。
 # 继承原始 100x100x16 配置，覆盖 func_g 感受野与 num_workers。
-base_config: ../../online_ncde/fast_alocc2dmini__slow_opusv2l/train.yaml
+base_config: ../../online_ncde/fast_opusv1t__slow_alocc3d/base.yaml
 
 model:
   # 200x200x16 全分辨率下扩大 func_g 感受野
