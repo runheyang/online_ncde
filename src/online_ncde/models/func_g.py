@@ -37,7 +37,7 @@ class FuncG(nn.Module):
 
     默认结构（对应推荐方案）：
       - Stem : 1x1 Conv 64 -> 32
-      - Body : 3 层 3x3 Conv 32 -> 32，dilation=[1,2,3]，带 residual
+      - Body : 3 层 3x3 Conv 32 -> 32，dilation 由 body_dilations 指定，带 residual
       - Head : 1x1 Conv 32 -> 32 + tanh
     """
 

@@ -54,9 +54,9 @@ ssh -p 14661 root@connect.westd.seetacloud.com 'cat ~/autodl-tmp/online_ncde/<ou
 ssh -p 14661 root@connect.westd.seetacloud.com \
   'bash -lc "source /root/miniconda3/etc/profile.d/conda.sh && conda activate neural_ode && \
   cd ~/autodl-tmp/online_ncde && \
-  nohup torchrun --nproc_per_node=2 scripts/train_online_ncde_200x200x16.py \
-    --config configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/base.yaml \
-    --train-limit 3000 --val-scene-count 20 --epochs 8 --rayiou --save-metrics-json \
+  nohup torchrun --nproc_per_node=2 scripts/train_online_ncde.py \
+    --config configs/online_ncde/fast_alocc2dmini__slow_alocc3d/base.yaml \
+    --train-limit 3000 --val-scene-count 20 --epochs 8 --save-metrics-json \
     --ray-override '"'"'{参数 JSON}'"'"' \
     [--lambda-fast-kl <float>] \
     > scripts/ray_tuning_runs/<stage>/logs/run_N.log 2>&1 &"'

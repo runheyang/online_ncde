@@ -1,6 +1,6 @@
 {
   "note": "快系统 baseline（无对齐器），15000 sample 训练，20 val scene 评估——与 tuning runs 直接可比",
-  "config_path": "configs/online_ncde_200x200x16/fast_alocc2dmini__slow_alocc3d/base.yaml",
+  "config_path": "configs/online_ncde/fast_alocc2dmini__slow_alocc3d/base.yaml",
   "mIoU": 33.72,
   "mIoU_d": 31.16,
   "rayiou": {

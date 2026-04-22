@@ -343,7 +343,7 @@ class Trainer:
         }, per_step_loss, per_step_count
 
     def _forward_stepwise(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        # OnlineNcdeAligner200 统一用 mode 参数，原版用独立方法
+        # 统一通过 forward(mode=...) 调用逐步训练路径
         model = self.model.module if hasattr(self.model, "module") else self.model
         kwargs = dict(
             fast_logits=sample["fast_logits"],

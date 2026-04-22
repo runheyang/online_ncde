@@ -42,7 +42,6 @@ from online_ncde.metrics import (  # noqa: E402
     apply_free_threshold,
 )
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
-from online_ncde_200x200x16 import OnlineNcdeAligner200              # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
@@ -409,8 +408,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
                         help="sweep pkl 路径（相对于项目根目录）")
-    parser.add_argument("--200x200x16", dest="use_200", action="store_true",
-                        help="使用 200x200x16 分辨率模型结构")
     parser.add_argument(
         "--val-scene-count",
         type=int,
@@ -489,8 +486,7 @@ def main() -> None:
 
     # --- 模型 ---
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
-    ModelClass = OnlineNcdeAligner200 if args.use_200 else OnlineNcdeAligner
-    model = ModelClass(
+    model = OnlineNcdeAligner(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
         hidden_dim=model_cfg["hidden_dim"],

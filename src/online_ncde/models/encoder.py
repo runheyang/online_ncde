@@ -1,4 +1,4 @@
-"""Dense 编码器。"""
+"""全分辨率编码器（不下采样）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from online_ncde.utils.nn import resolve_group_norm_groups
 
 
 class DenseEncoder(nn.Module):
-    """单层 stride=(1,2,2) 下采样编码器。"""
+    """单层 3x3x3 卷积编码器，stride=(1,1,1)，保持 200x200x16 分辨率。"""
 
     def __init__(self, in_channels: int, out_channels: int, gn_groups: int = 8) -> None:
         super().__init__()
@@ -20,7 +20,7 @@ class DenseEncoder(nn.Module):
             in_channels,
             out_channels,
             kernel_size=3,
-            stride=(1, 2, 2),
+            stride=(1, 1, 1),
             padding=1,
             bias=False,
         )
@@ -30,7 +30,7 @@ class DenseEncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         输入: (B, C, X, Y, Z)
-        输出: (B, C_out, X/2, Y/2, Z)
+        输出: (B, C_out, X, Y, Z)  — 空间尺寸不变
         Conv3d 约定的空间维为 (D, H, W)，这里把 Z 放到 D。
         """
         x = x.permute(0, 1, 4, 3, 2).contiguous()

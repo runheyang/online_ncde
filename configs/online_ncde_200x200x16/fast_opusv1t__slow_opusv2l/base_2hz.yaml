@@ -1,7 +1,0 @@
-# 200x200x16 全分辨率 + 2Hz 推演：
-#   - 继承同目录 base.yaml（已经叠加了 func_g_body_dilations [1,3,5] 等 200x200 差异）
-#   - 仅覆盖 data.fast_frame_stride，使 fast logits 按 stride=3 抽帧（6Hz→2Hz）
-base_config: ./base.yaml
-
-data:
-  fast_frame_stride: 3
