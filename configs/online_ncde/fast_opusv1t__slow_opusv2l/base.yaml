@@ -6,8 +6,8 @@ data:
   val_info_path: configs/online_ncde/canonical_infos_val.pkl
   # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
   ray_sidecar_dir: data/online_ncde_ray_sidecar
-  # fast_logits_root: data/logits_opusv1t_full_postprocess
-  fast_logits_root: data/logits_opusv1t_full
+  fast_logits_root: data/logits_opusv1t_full_postprocess
+  # fast_logits_root: data/logits_opusv1t_full
   slow_logit_root: data/logits_opusv2l_full
   opus_full_topk_k: 3
   opus_other_fill_value: -5.0

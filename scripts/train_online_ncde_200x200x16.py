@@ -78,6 +78,8 @@ def parse_args() -> argparse.Namespace:
                         help="eval 结束后将指标（含分箱 RayIoU）保存到 output_dir/metrics.json")
     parser.add_argument("--solver", choices=["heun", "euler"], default="heun",
                         help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
+    parser.add_argument("--fast-logits-root", type=str, default=None,
+                        help="覆盖 data.fast_logits_root（如 data/logits_opusv1t_full 或 data/logits_opusv1t_full_postprocess）")
     return parser.parse_args()
 
 
@@ -223,6 +225,13 @@ def main() -> None:
         cfg["loss"]["lambda_focal"] = float(args.lambda_focal)
         if local_rank == 0:
             print(f"[lambda-focal] override = {args.lambda_focal}")
+    # --fast-logits-root：覆盖 data.fast_logits_root
+    if args.fast_logits_root is not None:
+        if "data" not in cfg:
+            cfg["data"] = {}
+        cfg["data"]["fast_logits_root"] = str(args.fast_logits_root)
+        if local_rank == 0:
+            print(f"[fast-logits-root] override = {args.fast_logits_root}")
     set_seed(args.seed + local_rank)
 
     if torch.cuda.is_available():

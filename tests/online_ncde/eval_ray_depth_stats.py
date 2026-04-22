@@ -19,6 +19,7 @@ import argparse
 import copy
 import math
 import pickle
+import random
 import sys
 import time
 from pathlib import Path
@@ -410,6 +411,12 @@ def parse_args() -> argparse.Namespace:
                         help="sweep pkl 路径（相对于项目根目录）")
     parser.add_argument("--200x200x16", dest="use_200", action="store_true",
                         help="使用 200x200x16 分辨率模型结构")
+    parser.add_argument(
+        "--val-scene-count",
+        type=int,
+        default=0,
+        help="仅评估按 seed=0 打乱后前 N 个 scene 的样本（0=使用全部 scene）",
+    )
     parser.add_argument("--limit", type=int, default=0)
     return parser.parse_args()
 
@@ -442,6 +449,24 @@ def main() -> None:
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
     )
+    if args.val_scene_count > 0:
+        from torch.utils.data import Subset
+        scene_names = [info.get("scene_name", "") for info in dataset.infos]
+        unique_scenes = sorted({name for name in scene_names if name})
+        if not unique_scenes:
+            raise ValueError("未找到有效 scene_name，无法按 scene 划分评估集")
+        rng = random.Random(0)
+        rng.shuffle(unique_scenes)
+        val_scene_count = min(args.val_scene_count, len(unique_scenes))
+        val_scene_set = set(unique_scenes[:val_scene_count])
+        val_indices = [i for i, name in enumerate(scene_names) if name in val_scene_set]
+        if not val_indices:
+            raise ValueError("验证集 scene 为空，请检查 --val-scene-count 或数据")
+        dataset = Subset(dataset, val_indices)
+        print(f"[eval] --val-scene-count={args.val_scene_count}，"
+              f"选中 {val_scene_count}/{len(unique_scenes)} 个 scene，"
+              f"共 {len(dataset)} 个样本")
+
     if args.limit > 0:
         from torch.utils.data import Subset
         dataset = Subset(dataset, list(range(min(args.limit, len(dataset)))))
