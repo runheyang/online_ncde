@@ -26,12 +26,12 @@ from online_ncde.data.scene_delta import build_scene_delta_ctrl
 from online_ncde.data.time_series import compute_segment_dt, cumulative_tau
 from online_ncde.models.func_g import FuncG
 from online_ncde.models.heads import CtrlProjector
+from online_ncde.models.solver_euler import EulerNextFastSolver
 from online_ncde.models.solver_heun import HeunSolver
 
-# 200x200x16 专用编解码器 / 求解器
+# 200x200x16 专用编解码器
 from online_ncde_200x200x16.decoder import DenseDecoder200
 from online_ncde_200x200x16.encoder import DenseEncoder200
-from online_ncde_200x200x16.solver_euler import EulerNextFastSolver
 
 
 def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:

@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cosine-annealing", action="store_true", help="启用余弦退火学习率调度")
     parser.add_argument("--min-lr", type=float, default=1.0e-5, help="余弦退火最低学习率")
     parser.add_argument("--rayiou", action="store_true", help="评估时额外计算 RayIoU")
+    parser.add_argument("--solver", choices=["heun", "euler"], default="heun",
+                        help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
     return parser.parse_args()
 
 
@@ -217,7 +219,12 @@ def main() -> None:
         func_g_body_dilations=tuple(model_cfg.get("func_g_body_dilations", [1, 2, 3])),
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
+        solver_variant=args.solver,
     ).to(device)
+    if args.solver == "euler":
+        print(f"[solver] {args.solver} (next-fast only, 单次 func_g 求值)")
+    else:
+        print(f"[solver] {args.solver}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

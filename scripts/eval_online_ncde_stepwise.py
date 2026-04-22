@@ -59,6 +59,8 @@ def parse_args() -> argparse.Namespace:
         help="sweep pkl 路径（用于限定 val sample token 范围）",
     )
     parser.add_argument("--dump-json", default="", help="可选：将统计结果写入 json")
+    parser.add_argument("--solver", choices=["heun", "euler"], default="heun",
+                        help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
     return parser.parse_args()
 
 
@@ -131,7 +133,12 @@ def main() -> None:
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         amp_fp16=bool(eval_cfg.get("amp_fp16", False)),
+        solver_variant=args.solver,
     ).to(device)
+    if args.solver == "euler":
+        print(f"[solver] {args.solver} (next-fast only, 单次 func_g 求值)")
+    else:
+        print(f"[solver] {args.solver}")
     load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
     model.eval()
 
