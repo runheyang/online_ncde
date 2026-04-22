@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""评估 Online NCDE（支持 mIoU 和 RayIoU）。"""
+"""评估 Online NCDE（同时计算 mIoU 和 RayIoU）。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, help="模型权重路径")
     parser.add_argument("--200x200x16", dest="use_200", action="store_true",
                         help="使用 200x200x16 分辨率模型结构")
-    parser.add_argument("--rayiou", action="store_true", help="额外计算 RayIoU")
     parser.add_argument("--limit", type=int, default=None,
                         help="只使用前 N 条样本进行评估")
     parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
@@ -151,8 +150,8 @@ def main() -> None:
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
     )
 
-    # 单次推理：mIoU + 可选收集 predictions
-    metrics = trainer.evaluate(loader, collect_predictions=args.rayiou)
+    # 单次推理：mIoU + 收集 predictions 用于 RayIoU
+    metrics = trainer.evaluate(loader, collect_predictions=True)
 
     # --- mIoU 结果 ---
     print(
@@ -169,38 +168,37 @@ def main() -> None:
             print(f"{name}: {float(value):.2f}")
 
     # --- RayIoU ---
-    if args.rayiou:
-        print("\n[rayiou] 加载 lidar origins...")
-        sweep_pkl = resolve_sweep_pkl(args, cfg)
-        print(f"[rayiou] sweep pkl: {sweep_pkl}")
+    print("\n[rayiou] 加载 lidar origins...")
+    sweep_pkl = resolve_sweep_pkl(args, cfg)
+    print(f"[rayiou] sweep pkl: {sweep_pkl}")
 
-        from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-        origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
-        print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
+    from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+    origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
+    print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
 
-        from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+    from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
 
-        predictions = metrics["predictions"]
-        sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
-        skipped = 0
-        for item in predictions:
-            token = item["token"]
-            if token not in origins_by_token:
-                skipped += 1
-                continue
-            sem_pred_list.append(item["pred"])
-            sem_gt_list.append(item["gt"])
-            lidar_origin_list.append(origins_by_token[token])
+    predictions = metrics["predictions"]
+    sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
+    skipped = 0
+    for item in predictions:
+        token = item["token"]
+        if token not in origins_by_token:
+            skipped += 1
+            continue
+        sem_pred_list.append(item["pred"])
+        sem_gt_list.append(item["gt"])
+        lidar_origin_list.append(origins_by_token[token])
 
-        if skipped:
-            print(f"[rayiou] 跳过 {skipped} 个样本（无对应 lidar origin）")
-        print(f"[rayiou] {len(sem_pred_list)} 个样本参与计算")
+    if skipped:
+        print(f"[rayiou] 跳过 {skipped} 个样本（无对应 lidar origin）")
+    print(f"[rayiou] {len(sem_pred_list)} 个样本参与计算")
 
-        rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
-        print(f"\n[rayiou] RayIoU={rayiou_result['RayIoU']:.4f}")
-        print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
-        print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
-        print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
+    rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
+    print(f"\n[rayiou] RayIoU={rayiou_result['RayIoU']:.4f}")
+    print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
+    print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
+    print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
 
 
 if __name__ == "__main__":
