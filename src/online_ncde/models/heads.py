@@ -21,9 +21,9 @@ class CtrlProjector(nn.Module):
         if delta_ctrl.dim() == 4:
             is_4d = True
             delta_ctrl = delta_ctrl.unsqueeze(0)
-            
+
         out = self.conv(delta_ctrl)
-        
+
         if is_4d:
             out = out.squeeze(0)
         return out

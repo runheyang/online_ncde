@@ -20,6 +20,9 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
+
+# 输入形状固定，开启 benchmark 让 cuDNN 自动选 conv 算法
+torch.backends.cudnn.benchmark = True
 from torch.utils.data.distributed import DistributedSampler
 
 # 使用 file_system 共享策略，避免低 ulimit 下多 epoch 重建 DataLoader 导致 fd 耗尽

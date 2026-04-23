@@ -15,6 +15,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+# 输入形状固定，开启 benchmark 让 cuDNN 自动选 conv 算法
+torch.backends.cudnn.benchmark = True
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
