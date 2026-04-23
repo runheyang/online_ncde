@@ -6,8 +6,8 @@ data:
   val_info_path: configs/online_ncde/canonical_infos_val.pkl
   # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
   ray_sidecar_dir: data/online_ncde_ray_sidecar
-  fast_logits_root: data/logits_opusv1t_full_postprocess
-  # fast_logits_root: data/logits_opusv1t_full
+  # fast_logits_root: data/logits_opusv1t_full_postprocess
+  fast_logits_root: data/logits_opusv1t_full
   slow_logit_root: data/logits_opusv2l_full
   opus_full_topk_k: 3
   opus_other_fill_value: -5.0
@@ -37,6 +37,11 @@ model:
   func_g_inner_dim: 24
   func_g_body_dilations: [1, 3, 5]
   func_g_gn_groups: 8
+  # 距离加权 fast-KL：体素 XY 距 ego 中心 < full_m 权重=1，> zero_m 权重=0，中间线性衰减。
+  # 让 KL 在近场强锚定 fast，在远场放开让 aligner 自由推演
+  # 两个都置 null 或 full_m >= zero_m 时关闭距离 mask。
+  fast_kl_full_m: 10.0
+  fast_kl_zero_m: 20.0
 
 loss:
   gamma: 2.0

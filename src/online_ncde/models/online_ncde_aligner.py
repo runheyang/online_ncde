@@ -60,6 +60,8 @@ class OnlineNcdeAligner(nn.Module):
         timestamp_scale: float = 1.0e-6,
         amp_fp16: bool = False,
         solver_variant: str = "heun",
+        fast_kl_full_m: float | None = None,
+        fast_kl_zero_m: float | None = None,
     ) -> None:
         super().__init__()
         self.amp_fp16 = bool(amp_fp16)
@@ -120,6 +122,35 @@ class OnlineNcdeAligner(nn.Module):
         # Trainer 根据 lambda_fast_kl 注入；False 时 forward 跳过 KL 计算。
         self._fast_kl_active: bool = False
 
+        # 距离加权 fast-KL：按体素 XY 到 ego 中心距离线性衰减
+        # full_m 内 w=1，zero_m 外 w=0，中间线性。两个都为 None 或不满足 full<zero 则关闭。
+        self._kl_distance_mask_active: bool = False
+        self._kl_distance_cfg: Tuple[float, float] | None = None
+        if (
+            fast_kl_full_m is not None
+            and fast_kl_zero_m is not None
+            and float(fast_kl_full_m) < float(fast_kl_zero_m)
+        ):
+            vx = float(self.voxel_size[0])
+            vy = float(self.voxel_size[1])
+            xmin = float(self.pc_range[0])
+            ymin = float(self.pc_range[1])
+            grid_x = int(round((self.pc_range[3] - self.pc_range[0]) / vx))
+            grid_y = int(round((self.pc_range[4] - self.pc_range[1]) / vy))
+            xs = (torch.arange(grid_x, dtype=torch.float32) + 0.5) * vx + xmin
+            ys = (torch.arange(grid_y, dtype=torch.float32) + 0.5) * vy + ymin
+            xx, yy = torch.meshgrid(xs, ys, indexing="ij")  # (X, Y)
+            d_xy = torch.sqrt(xx * xx + yy * yy)
+            full_m = float(fast_kl_full_m)
+            zero_m = float(fast_kl_zero_m)
+            w_dist = torch.clamp(
+                1.0 - (d_xy - full_m) / (zero_m - full_m),
+                min=0.0, max=1.0,
+            ).view(1, grid_x, grid_y, 1)  # broadcast 到 (C, X, Y, Z)
+            self.register_buffer("kl_distance_weight", w_dist, persistent=False)
+            self._kl_distance_mask_active = True
+            self._kl_distance_cfg = (full_m, zero_m)
+
     def _encode_fast(self, fast_logits: torch.Tensor) -> torch.Tensor:
         """编码快系统序列，输出 dense (T, C_f, X, Y, Z)。"""
         return self.fast_encoder(fast_logits)
@@ -149,6 +180,9 @@ class OnlineNcdeAligner(nn.Module):
         aligned_f = aligned_logits.float()
         fast_f = fast_logits_t.float()
         w = _compute_m_occ(fast_f, self.free_index).clamp(min=0.0)
+        if self._kl_distance_mask_active:
+            # (1, X, Y, 1) broadcast 到 (1, X, Y, Z)，随距离线性衰减
+            w = w * self.kl_distance_weight
         log_p_fast = F.log_softmax(fast_f, dim=0)
         log_p_aligned = F.log_softmax(aligned_f, dim=0)
         # F.kl_div(log_q, log_p, log_target=True) = Σ exp(log_p) (log_p - log_q) = KL(P || Q)

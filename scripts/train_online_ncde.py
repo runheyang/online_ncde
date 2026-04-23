@@ -79,6 +79,10 @@ def parse_args() -> argparse.Namespace:
                         help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
     parser.add_argument("--fast-logits-root", type=str, default=None,
                         help="覆盖 data.fast_logits_root（如 data/logits_opusv1t_full 或 data/logits_opusv1t_full_postprocess）")
+    parser.add_argument("--fast-kl-full-m", type=float, default=None,
+                        help="距离加权 KL：体素 XY 距 ego < full_m 时 KL 权重=1（需与 --fast-kl-zero-m 同时给）")
+    parser.add_argument("--fast-kl-zero-m", type=float, default=None,
+                        help="距离加权 KL：体素 XY 距 ego > zero_m 时 KL 权重=0，full_m 到 zero_m 线性衰减")
     return parser.parse_args()
 
 
@@ -231,6 +235,17 @@ def main() -> None:
         cfg["data"]["fast_logits_root"] = str(args.fast_logits_root)
         if local_rank == 0:
             print(f"[fast-logits-root] override = {args.fast_logits_root}")
+    # --fast-kl-full-m / --fast-kl-zero-m：覆盖 model.fast_kl_full_m / model.fast_kl_zero_m
+    if args.fast_kl_full_m is not None:
+        if "model" not in cfg:
+            cfg["model"] = {}
+        cfg["model"]["fast_kl_full_m"] = float(args.fast_kl_full_m)
+    if args.fast_kl_zero_m is not None:
+        if "model" not in cfg:
+            cfg["model"] = {}
+        cfg["model"]["fast_kl_zero_m"] = float(args.fast_kl_zero_m)
+    if (args.fast_kl_full_m is not None or args.fast_kl_zero_m is not None) and local_rank == 0:
+        print(f"[fast-kl-dist-mask] full_m={args.fast_kl_full_m} zero_m={args.fast_kl_zero_m}")
     set_seed(args.seed + local_rank)
 
     if torch.cuda.is_available():
@@ -315,6 +330,8 @@ def main() -> None:
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         solver_variant=args.solver,
+        fast_kl_full_m=model_cfg.get("fast_kl_full_m", None),
+        fast_kl_zero_m=model_cfg.get("fast_kl_zero_m", None),
     ).to(device)
 
     # 先加载权重
