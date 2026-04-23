@@ -55,8 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--val-scene-count",
         type=int,
-        default=40,
-        help="验证集使用的 scene 数量（按 seed=0 打乱后取前 N）",
+        default=0,
+        help="验证集使用的 scene 数量（按 seed=0 打乱后取前 N；0=全量评估，不做 subset）",
     )
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
     parser.add_argument("--wandb", action="store_true", help="启用 wandb")
@@ -75,8 +75,8 @@ def parse_args() -> argparse.Namespace:
                         help="覆盖 loss.lambda_focal（Focal loss 权重，默认 1.0）")
     parser.add_argument("--save-metrics-json", action="store_true",
                         help="eval 结束后将指标（含分箱 RayIoU）保存到 output_dir/metrics.json")
-    parser.add_argument("--solver", choices=["heun", "euler"], default="heun",
-                        help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
+    parser.add_argument("--solver", choices=["heun", "euler"], default="euler",
+                        help="ODE 求解器：euler（默认，Euler + next-fast 单次求值）或 heun")
     parser.add_argument("--fast-logits-root", type=str, default=None,
                         help="覆盖 data.fast_logits_root（如 data/logits_opusv1t_full 或 data/logits_opusv1t_full_postprocess）")
     parser.add_argument("--fast-kl-full-m", type=float, default=None,
@@ -286,18 +286,20 @@ def main() -> None:
             logits_loader=logits_loader,
             ray_sidecar_split="val",
         )
-        scene_names = [info.get("scene_name", "") for info in val_dataset.infos]
-        unique_scenes = sorted({name for name in scene_names if name})
-        if not unique_scenes:
-            raise ValueError("未找到有效 scene_name，无法按 scene 划分验证集")
-        rng = random.Random(0)
-        rng.shuffle(unique_scenes)
-        val_scene_count = min(args.val_scene_count, len(unique_scenes))
-        val_scene_set = set(unique_scenes[:val_scene_count])
-        val_indices = [i for i, name in enumerate(scene_names) if name in val_scene_set]
-        if not val_indices:
-            raise ValueError("验证集 scene 为空，请检查 val_scene_count 或数据")
-        val_dataset = Subset(val_dataset, val_indices)
+        # val_scene_count=0 时走全量评估，不做 Subset
+        if args.val_scene_count > 0:
+            scene_names = [info.get("scene_name", "") for info in val_dataset.infos]
+            unique_scenes = sorted({name for name in scene_names if name})
+            if not unique_scenes:
+                raise ValueError("未找到有效 scene_name，无法按 scene 划分验证集")
+            rng = random.Random(0)
+            rng.shuffle(unique_scenes)
+            val_scene_count = min(args.val_scene_count, len(unique_scenes))
+            val_scene_set = set(unique_scenes[:val_scene_count])
+            val_indices = [i for i, name in enumerate(scene_names) if name in val_scene_set]
+            if not val_indices:
+                raise ValueError("验证集 scene 为空，请检查 val_scene_count 或数据")
+            val_dataset = Subset(val_dataset, val_indices)
 
         val_workers = int(eval_cfg.get("num_workers", num_workers))
         val_loader_kwargs = dict(

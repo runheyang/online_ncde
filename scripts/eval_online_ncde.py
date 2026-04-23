@@ -31,8 +31,8 @@ def parse_args() -> argparse.Namespace:
                         help="只使用前 N 条样本进行评估")
     parser.add_argument("--sweep-pkl", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
                         help="sweep pkl 路径（相对于项目根目录）")
-    parser.add_argument("--solver", choices=["heun", "euler"], default="heun",
-                        help="ODE 求解器：heun（默认）或 euler（Euler + next-fast 单次求值）")
+    parser.add_argument("--solver", choices=["heun", "euler"], default="euler",
+                        help="ODE 求解器：euler（默认，Euler + next-fast 单次求值）或 heun")
     return parser.parse_args()
 
 
