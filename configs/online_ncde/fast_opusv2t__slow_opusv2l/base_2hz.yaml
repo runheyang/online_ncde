@@ -1,0 +1,7 @@
+# 2Hz 推演：fast logits 按 stride=3 抽帧（6Hz→2Hz），对齐 keyframe_step_indices。
+# 其余字段全部继承同目录 base.yaml；仅在下方覆盖差异项。
+base_config: ./base.yaml
+
+data:
+  # 每 3 帧取 1 帧，13 帧 → 5 帧；supervision_step_indices 自动重映射到 [1,2,3,4]。
+  fast_frame_stride: 3

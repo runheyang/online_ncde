@@ -1,0 +1,119 @@
+# Canonical config for fast=opusv2t, slow=opusv2l.
+
+data:
+  logits_format: opus_sparse_full
+  info_path: configs/online_ncde/canonical_infos_train_full.pkl
+  val_info_path: configs/online_ncde/canonical_infos_val_full.pkl
+  # 训练/训练内评估过滤短历史样本（history_completeness<4）。独立评估脚本
+  # 可加 --include-short-history 覆盖为 0，评估全集含短历史。
+  min_history_completeness: 4
+  # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
+  ray_sidecar_dir: data/online_ncde_ray_sidecar
+  fast_logits_root: data/logits_opusv2t_50e_full
+  slow_logit_root: data/logits_opusv2l_full
+  opus_full_topk_k: 3
+  opus_other_fill_value: -5.0
+  opus_free_fill_value: 5.0
+  gt_root: data/nuscenes/gts
+  num_classes: 18
+  free_index: 17
+  pc_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
+  voxel_size: [0.4, 0.4, 0.4]
+  grid_size: [200, 200, 16]
+  gt_mask_key: mask_camera
+  timestamp_scale: 1.0e-6
+
+model:
+  feat_dim: 32
+  hidden_dim: 32
+  encoder_in_channels: 18
+  # Hidden state resolution is 200x200x16 (full resolution, no XY downsampling).
+  # true: residual paradigm (output adds fast logits, initial state is slow-fast0)
+  # false: non-residual paradigm (output is decoder only, initial state is slow)
+  use_fast_residual: true
+  decoder_init_scale: 1.0e-6
+  # FuncG-Heavy32x3:
+  #   Stem: 1x1 Conv 64->32
+  #   Body: 3x3 Conv 32->32, dilation=[1,3,5], residual
+  #   Head: 1x1 Conv 32->32 + tanh
+  func_g_inner_dim: 24
+  func_g_body_dilations: [1, 3, 5]
+  func_g_gn_groups: 8
+
+loss:
+  gamma: 2.0
+  lambda_focal: 1.0
+  lambda_lovasz: 1.0
+  # focal 全区域监督：mask 内 ×3.0，mask 外 ×1.0；lovasz 仍只算 mask 内。
+  # 设为 null 或删除此行则回退到原始 train with mask 行为。
+  focal_mask_weight: 5.0
+  class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
+  # Ray first-hit + depth loss（RayLoss）。pc_range / free_index 由 train 脚本
+  # 从 data 配置注入；下列参数均可注释掉走 RayLoss 默认值。
+  ray:
+    # SegAndRayLoss 外层权重：total = seg_total + lambda_ray * ray_total
+    lambda_ray: 0.2
+    # 对齐 fast_alocc2dmini__slow_alocc3d：仅启用 hit，其余 ray 子项关闭。
+    # ray_total = lambda_hit * hit + lambda_empty * empty + lambda_pre_free * pre_free + lambda_depth * depth
+    lambda_hit: 0.3
+    lambda_empty: 0.0
+    lambda_pre_free: 0.0
+    lambda_depth: 0.0
+    # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
+    num_samples: 50
+    step_m: 0.4
+    # L_hit 窗口半宽（单位：step_m）。δ=1 → ±0.4m 内的 q 求和作为命中概率
+    window_voxels: 1
+    # 近/中场切分：gt_dist < near_max_m 用 near_weight，其余用 mid_weight；
+    # gt_dist >= mid_max_m 的 ray 直接丢弃（对齐 RayIoU 的口径）
+    near_max_m: 10.0
+    mid_max_m: 20.0
+    near_weight: 2.0
+    mid_weight: 1.0
+    # 非对称 depth loss：pred 比 GT 远乘 far，比 GT 近乘 near（鼓励保守预测）
+    depth_asym_far: 2.0
+    depth_asym_near: 1.0
+    smooth_l1_beta: 1.0
+    # DVR 出射距离 → center 语义的偏置补偿。null 走默认 0.5 * step_m。
+    # 测试/已 center 化 GT 显式传 0.0
+    gt_dist_bias_m: null
+
+train:
+  batch_size: 1
+  num_workers: 12
+  epochs: 20
+  lr: 1.0e-4
+  warmup_epochs: 1
+  warmup_start_lr: 1.0e-5
+  weight_decay: 1.0e-2
+  clip_norm: 5.0
+  log_interval: 1000
+  device: cuda
+  supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
+  supervision_weights: [0.15, 0.20, 0.25, 0.40]
+  supervision_weight_normalize: true
+  ema:
+    enabled: true
+    decay: 0.999
+  # L_kl = λ * mean(m_occ.clamp(min=0) * KL(aligned || fast.detach()))，conf-加权 trust region
+  lambda_fast_kl: 3.0
+
+dataloader:
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: false
+
+eval:
+  batch_size: 1
+  num_workers: 16
+  device: cuda
+  free_conf_thresh: null
+  log_interval: 500
+  log_multistep_losses: true
+  amp_fp16: false
+  sweep_pkl: data/nuscenes/nuscenes_infos_val_sweep.pkl
+
+wandb:
+  entity: runheyang
+  project: neural-ode
+  name: ""
