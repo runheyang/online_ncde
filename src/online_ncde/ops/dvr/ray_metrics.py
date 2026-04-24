@@ -119,6 +119,93 @@ def process_one_sample(sem_pred, lidar_rays, output_origin):
     return pred_pcds_t.numpy()
 
 
+class RayIouAccumulator:
+    """RayIoU 流式累积器：逐样本 raycast 后累加三个整数计数器。
+
+    与 `main()` 的批量计算结果逐 bit 相等（整数加法顺序无关），但内存开销
+    仅为 O(类别数 × 阈值数) 的小计数器，适合 stepwise 评估给每个 step 维护
+    一个独立累积器、样本处理完立即丢弃 dense 预测。
+    """
+
+    def __init__(self, thresholds=(1, 2, 4)):
+        self.thresholds = list(thresholds)
+        self.gt_cnt = np.zeros(len(occ_class_names))
+        self.pred_cnt = np.zeros(len(occ_class_names))
+        self.tp_cnt = np.zeros((len(self.thresholds), len(occ_class_names)))
+        self._lidar_rays = torch.from_numpy(generate_lidar_rays())
+        self.num_samples = 0
+
+    def add_sample(self, sem_pred, sem_gt, lidar_origins) -> None:
+        """喂入一个样本：dense (X,Y,Z) 预测 + GT + lidar origins。
+
+        内部完成 raycast、free-ray 过滤与计数累加，不保留 pcd。
+        """
+        sem_pred = np.reshape(sem_pred, [200, 200, 16])
+        sem_gt = np.reshape(sem_gt, [200, 200, 16])
+        pcd_pred = process_one_sample(sem_pred, self._lidar_rays, lidar_origins)
+        pcd_gt = process_one_sample(sem_gt, self._lidar_rays, lidar_origins)
+        # 与 main() 一致：只在 GT 非 free 的 ray 上评估
+        valid = (pcd_gt[:, 0].astype(np.int32) != len(occ_class_names) - 1)
+        self._update_counts(pcd_pred[valid], pcd_gt[valid])
+        self.num_samples += 1
+
+    def _update_counts(self, pcd_pred, pcd_gt) -> None:
+        """累加当前样本（已过滤）的 TP/GT/Pred 计数。逻辑与 calc_metrics 内层等价。"""
+        depth_pred = pcd_pred[:, 1]
+        depth_gt = pcd_gt[:, 1]
+        l1_error = np.abs(depth_pred - depth_gt)
+        for j, threshold in enumerate(self.thresholds):
+            tp_dist_mask = (l1_error < threshold)
+            for i, _cls in enumerate(occ_class_names):
+                cls_mask_pred = (pcd_pred[:, 0] == i)
+                cls_mask_gt = (pcd_gt[:, 0] == i)
+                if j == 0:
+                    self.gt_cnt[i] += cls_mask_gt.sum()
+                    self.pred_cnt[i] += cls_mask_pred.sum()
+                tp_cls = cls_mask_gt & cls_mask_pred
+                tp_mask = np.logical_and(tp_cls, tp_dist_mask)
+                self.tp_cnt[j][i] += tp_mask.sum()
+
+    def finalize(self, print_table: bool = False) -> dict:
+        """结算并返回 RayIoU；num_samples=0 时所有指标填 NaN。"""
+        if self.num_samples == 0:
+            nan = float("nan")
+            return {
+                "RayIoU": nan, "RayIoU@1": nan, "RayIoU@2": nan, "RayIoU@4": nan,
+                "per_class_iou": [], "class_names": occ_class_names[:-1],
+                "num_samples": 0,
+            }
+        iou_list = []
+        for j in range(len(self.thresholds)):
+            denom = self.gt_cnt + self.pred_cnt - self.tp_cnt[j]
+            iou_list.append((self.tp_cnt[j] / denom)[:-1])
+        rayiou_0 = float(np.nanmean(iou_list[0]))
+        rayiou_1 = float(np.nanmean(iou_list[1]))
+        rayiou_2 = float(np.nanmean(iou_list[2]))
+        rayiou = float(np.nanmean(iou_list))
+
+        if print_table:
+            table = PrettyTable(["Class Names", "RayIoU@1", "RayIoU@2", "RayIoU@4"])
+            table.float_format = ".3"
+            for i in range(len(occ_class_names) - 1):
+                table.add_row(
+                    [occ_class_names[i], iou_list[0][i], iou_list[1][i], iou_list[2][i]],
+                    divider=(i == len(occ_class_names) - 2),
+                )
+            table.add_row(["MEAN", rayiou_0, rayiou_1, rayiou_2])
+            print(table)
+
+        return {
+            "RayIoU": rayiou,
+            "RayIoU@1": rayiou_0,
+            "RayIoU@2": rayiou_1,
+            "RayIoU@4": rayiou_2,
+            "per_class_iou": [iou_list[j].tolist() for j in range(len(self.thresholds))],
+            "class_names": occ_class_names[:-1],
+            "num_samples": int(self.num_samples),
+        }
+
+
 def calc_metrics(pcd_pred_list, pcd_gt_list):
     thresholds = [1, 2, 4]
 

@@ -134,6 +134,10 @@ class Occ3DOnlineNcdeDataset(Dataset):
             for key in ("frame_ego2global", "frame_timestamps", "frame_dt"):
                 if key in info_view:
                     info_view[key] = info[key][::stride]
+            # frame_tokens 是 list[str]，也要按 stride 抽帧，让 meta 里的 token
+            # 索引与 aligner 的 step_indices（抽帧后坐标）保持一致。
+            if "frame_tokens" in info_view:
+                info_view["frame_tokens"] = list(info["frame_tokens"])[::stride]
             # rollout_start_step 在抽帧后也要重映射，要求与 stride 整除
             if "rollout_start_step" in info_view:
                 rss = int(info_view["rollout_start_step"])

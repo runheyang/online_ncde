@@ -439,13 +439,14 @@ class OnlineNcdeAligner(nn.Module):
             step_indices = torch.tensor(
                 [num_frames - 1], device=fast_logits.device, dtype=torch.long
             )
-            zero = torch.zeros((0,), device=fast_logits.device, dtype=torch.float32)
+            # 直出 slow，无 solver/warp/decode 开销；占位 0 ms 以对齐 step 维度
+            zero_step = torch.zeros((1,), device=fast_logits.device, dtype=torch.float32)
             return {
                 "step_logits": step_logits,
-                "step_time_ms": zero,
-                "step_warp_ms": zero,
-                "step_solver_ms": zero,
-                "step_decode_ms": zero,
+                "step_time_ms": zero_step,
+                "step_warp_ms": zero_step,
+                "step_solver_ms": zero_step,
+                "step_decode_ms": zero_step,
                 "step_indices": step_indices,
                 "diagnostics": {
                     "delta_scene_abs_mean": torch.tensor(0.0, device=fast_logits.device),
@@ -611,70 +612,19 @@ class OnlineNcdeAligner(nn.Module):
         frame_ego2global: torch.Tensor,
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
+        rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        """评估接口：返回每个循环步的 logits 与耗时（批处理包装）。"""
-        if fast_logits.dim() == 5:
-            fast_logits = fast_logits.unsqueeze(0)
-            slow_logits = slow_logits.unsqueeze(0)
-            frame_ego2global = frame_ego2global.unsqueeze(0)
-            if frame_timestamps is not None:
-                frame_timestamps = frame_timestamps.unsqueeze(0)
-            if frame_dt is not None:
-                frame_dt = frame_dt.unsqueeze(0)
+        """评估接口：返回每个循环步的 logits 与耗时（批处理包装）。
 
-        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
-        step_logits_list: list[torch.Tensor] = []
-        step_time_list: list[torch.Tensor] = []
-        step_warp_list: list[torch.Tensor] = []
-        step_solver_list: list[torch.Tensor] = []
-        step_decode_list: list[torch.Tensor] = []
-        diag_list: list[dict[str, torch.Tensor]] = []
-        step_indices: torch.Tensor | None = None
-        with amp_ctx:
-            for b in range(fast_logits.shape[0]):
-                out = self._forward_single_stepwise_eval(
-                    fast_logits=fast_logits[b],
-                    slow_logits=slow_logits[b],
-                    frame_ego2global=frame_ego2global[b],
-                    frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
-                    frame_dt=frame_dt[b] if frame_dt is not None else None,
-                )
-                sample_step_logits = cast(torch.Tensor, out["step_logits"])
-                sample_step_time = cast(torch.Tensor, out["step_time_ms"])
-                sample_step_warp = cast(torch.Tensor, out["step_warp_ms"])
-                sample_step_solver = cast(torch.Tensor, out["step_solver_ms"])
-                sample_step_decode = cast(torch.Tensor, out["step_decode_ms"])
-                sample_step_indices = cast(torch.Tensor, out["step_indices"])
-                if step_indices is None:
-                    step_indices = sample_step_indices
-                elif sample_step_indices.shape != step_indices.shape:
-                    raise ValueError(
-                        f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
-                    )
-
-                step_logits_list.append(sample_step_logits)
-                step_time_list.append(sample_step_time)
-                step_warp_list.append(sample_step_warp)
-                step_solver_list.append(sample_step_solver)
-                step_decode_list.append(sample_step_decode)
-                diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
-
-        if step_indices is None:
-            step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
-        step_logits = torch.stack(step_logits_list, dim=0)
-        step_time_ms = torch.stack(step_time_list, dim=0)
-        step_warp_ms = torch.stack(step_warp_list, dim=0)
-        step_solver_ms = torch.stack(step_solver_list, dim=0)
-        step_decode_ms = torch.stack(step_decode_list, dim=0)
-        return {
-            "step_logits": step_logits,
-            "step_time_ms": step_time_ms,
-            "step_warp_ms": step_warp_ms,
-            "step_solver_ms": step_solver_ms,
-            "step_decode_ms": step_decode_ms,
-            "step_indices": step_indices,
-            "diagnostics": diag_list,
-        }
+        rollout_start_step：(B,) long tensor，短历史样本的 pad 长度；默认全 0。
+        """
+        fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt = (
+            self._unsqueeze_inputs(fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt)
+        )
+        return self._forward_batched_stepwise_eval(
+            fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt,
+            rollout_start_step=rollout_start_step,
+        )
 
     def _unsqueeze_inputs(
         self,

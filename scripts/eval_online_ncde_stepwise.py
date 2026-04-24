@@ -28,6 +28,8 @@ from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
+from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
+from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
@@ -62,9 +64,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solver", choices=["heun", "euler"], default="euler",
                         help="ODE 求解器：euler（默认，Euler + next-fast 单次求值）或 heun")
     parser.add_argument(
-        "--include-short-history",
+        "--exclude-short-history",
         action="store_true",
-        help="覆盖 config 的 min_history_completeness，强制为 0，评估覆盖短历史样本。",
+        help="只评估满足 config.min_history_completeness（通常 4）的完整历史样本；"
+             "默认包含全部短历史样本（min_history_completeness=0）。",
+    )
+    parser.add_argument(
+        "--val-info-path",
+        default="",
+        help="覆盖 config 的 data.val_info_path（空则沿用 config）。用于跨窗口评估，"
+             "例如用 2s 训练权重在 5s canonical pkl 上推理。",
+    )
+    parser.add_argument(
+        "--no-rayiou",
+        action="store_true",
+        help="跳过 RayIoU 评估（只算 mIoU，速度更快）。默认同步评估 per-step 与 all RayIoU。",
     )
     return parser.parse_args()
 
@@ -92,13 +106,16 @@ def main() -> None:
     # 按 data.logits_format 构造 LogitsLoader
     logits_loader = build_logits_loader(data_cfg, root_path)
 
-    # 默认沿用 config 的 min_history_completeness（通常 4）。
-    # --include-short-history 强制 0，评估覆盖 h<4 样本。
-    min_hc = 0 if args.include_short_history else int(data_cfg.get("min_history_completeness", 4))
+    # 默认 min_history_completeness=0，含全部短历史样本（h=0 走 aligner 退化分支）。
+    # --exclude-short-history 才回退到 config 的阈值（通常 4）过滤短历史。
+    min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval] min_history_completeness={min_hc}"
-          + ("  (--include-short-history 强制为 0)" if args.include_short_history else ""))
+          + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
+    info_path = args.val_info_path if args.val_info_path else data_cfg.get("val_info_path", data_cfg["info_path"])
+    if args.val_info_path:
+        print(f"[eval] --val-info-path 覆盖 data.val_info_path -> {info_path}")
     dataset = Occ3DOnlineNcdeDataset(
-        info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
+        info_path=info_path,
         root_path=root_path,
         gt_root=data_cfg["gt_root"],
         num_classes=data_cfg["num_classes"],
@@ -172,6 +189,18 @@ def main() -> None:
         use_lidar_mask=False,
     )
 
+    # RayIoU：每个 step 独立累积器 + 跨 step 合并累积器（内部只存计数，内存可忽略）
+    enable_rayiou = not args.no_rayiou
+    per_step_ray: dict[int, RayIouAccumulator] = {}
+    ray_acc_all: RayIouAccumulator | None = None
+    origins_by_token: dict[str, Any] = {}
+    missing_origin_count = 0
+    if enable_rayiou:
+        print(f"[rayiou] 加载 lidar origins: {sweep_info_path}")
+        origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)
+        print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
+        ray_acc_all = RayIouAccumulator()
+
     step_time_sum = defaultdict(float)
     step_time_count = defaultdict(int)
     # 分段计时：warp / solver / decode
@@ -205,6 +234,7 @@ def main() -> None:
                 frame_ego2global=sample["frame_ego2global"],
                 frame_timestamps=sample.get("frame_timestamps", None),
                 frame_dt=sample.get("frame_dt", None),
+                rollout_start_step=sample.get("rollout_start_step", None),
             )
             step_logits = cast(torch.Tensor, outputs["step_logits"])  # (B, S, C, X, Y, Z)
             step_time_ms = cast(torch.Tensor, outputs["step_time_ms"])  # (B, S)
@@ -284,6 +314,17 @@ def main() -> None:
                         mask_lidar=None,
                         mask_camera=gt_mask,
                     )
+                    # RayIoU：复用本步已有的 preds / gt_semantics，立即 raycast + 累加，
+                    # 不额外保留 dense 预测，内存开销与 mIoU 累加器相同量级。
+                    if enable_rayiou:
+                        origin = origins_by_token.get(gt_token, None)
+                        if origin is None:
+                            missing_origin_count += 1
+                        else:
+                            ray_acc = per_step_ray.setdefault(step_idx, RayIouAccumulator())
+                            ray_acc.add_sample(preds, gt_semantics, origin)
+                            assert ray_acc_all is not None  # enable_rayiou 下一定存在
+                            ray_acc_all.add_sample(preds, gt_semantics, origin)
                     t_ms = step_times_list[local_step_idx]
                     keyframe_time_sum += t_ms
                     keyframe_warp_sum += step_warp_list[local_step_idx]
@@ -351,6 +392,7 @@ def main() -> None:
                 "avg_solver_ms": float(step_solver_avg[step_idx]),
                 "avg_decode_ms": float(step_decode_avg[step_idx]),
                 "num_step_preds": int(step_time_count[step_idx]),
+                "rayiou": None,
             }
             continue
 
@@ -363,6 +405,21 @@ def main() -> None:
         for name, value in zip(class_names, step_per_class):
             print(f"  {name}: {float(value):.2f}")
 
+        step_rayiou_result: dict[str, Any] | None = None
+        if enable_rayiou:
+            ray_acc = per_step_ray.get(step_idx, None)
+            if ray_acc is not None and ray_acc.num_samples > 0:
+                step_rayiou_result = ray_acc.finalize(print_table=False)
+                print(
+                    f"[rayiou][step={step_idx}] num={step_rayiou_result['num_samples']} "
+                    f"RayIoU={step_rayiou_result['RayIoU']:.4f} "
+                    f"@1={step_rayiou_result['RayIoU@1']:.4f} "
+                    f"@2={step_rayiou_result['RayIoU@2']:.4f} "
+                    f"@4={step_rayiou_result['RayIoU@4']:.4f}"
+                )
+            else:
+                print(f"[rayiou][step={step_idx}] no samples")
+
         per_step_results[str(step_idx)] = {
             "num_keyframes": int(metric.cnt),
             "miou": float(step_miou),
@@ -373,6 +430,7 @@ def main() -> None:
             "avg_solver_ms": float(step_solver_avg[step_idx]),
             "avg_decode_ms": float(step_decode_avg[step_idx]),
             "num_step_preds": int(step_time_count[step_idx]),
+            "rayiou": step_rayiou_result,
         }
 
     if metric_all.cnt > 0:
@@ -386,9 +444,24 @@ def main() -> None:
         all_per_class = []
         print("[keyframe][all] no samples")
 
+    all_rayiou_result: dict[str, Any] | None = None
+    if enable_rayiou and ray_acc_all is not None:
+        if ray_acc_all.num_samples > 0:
+            all_rayiou_result = ray_acc_all.finalize(print_table=True)
+            print(
+                f"[rayiou][all] num={all_rayiou_result['num_samples']} "
+                f"RayIoU={all_rayiou_result['RayIoU']:.4f} "
+                f"@1={all_rayiou_result['RayIoU@1']:.4f} "
+                f"@2={all_rayiou_result['RayIoU@2']:.4f} "
+                f"@4={all_rayiou_result['RayIoU@4']:.4f}"
+            )
+        else:
+            print("[rayiou][all] no samples")
+
     print(
         f"[meta] missing_gt={missing_gt_count} "
-        f"no_scene={no_scene_count} no_frame_tokens={no_frame_tokens_count}"
+        f"no_scene={no_scene_count} no_frame_tokens={no_frame_tokens_count} "
+        f"missing_origin={missing_origin_count}"
     )
 
     if args.dump_json:
@@ -414,12 +487,15 @@ def main() -> None:
                 "miou": _to_json_number(all_miou),
                 "per_class_iou": [float(v) for v in all_per_class],
                 "class_names": class_names,
+                "rayiou": all_rayiou_result,
             },
             "meta": {
                 "missing_gt_count": int(missing_gt_count),
                 "no_scene_count": int(no_scene_count),
                 "no_frame_tokens_count": int(no_frame_tokens_count),
+                "missing_origin_count": int(missing_origin_count),
                 "num_batches": int(total_steps),
+                "rayiou_enabled": bool(enable_rayiou),
             },
         }
         out_path = Path(args.dump_json)

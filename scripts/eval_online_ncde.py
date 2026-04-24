@@ -37,11 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--solver", choices=["heun", "euler"], default="euler",
                         help="ODE 求解器：euler（默认，Euler + next-fast 单次求值）或 heun")
     parser.add_argument(
-        "--include-short-history",
+        "--exclude-short-history",
         action="store_true",
         help=(
-            "覆盖 config 的 min_history_completeness，强制为 0，"
-            "让评估覆盖短历史样本（h<4）。"
+            "只评估满足 config.min_history_completeness（通常 4）的完整历史样本；"
+            "默认包含全部短历史样本（min_history_completeness=0，h=0 走 aligner 退化分支）。"
         ),
     )
     return parser.parse_args()
@@ -77,11 +77,11 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     logits_loader = build_logits_loader(data_cfg, cfg["root_path"])
 
-    # 默认沿用 config 的 min_history_completeness（通常 4，过滤短历史）。
-    # --include-short-history 强制为 0：覆盖全集含 h<4 样本，h=0 走 aligner 退化分支。
-    min_hc = 0 if args.include_short_history else int(data_cfg.get("min_history_completeness", 4))
+    # 默认 min_history_completeness=0，含全部短历史样本（h=0 走 aligner 退化分支）。
+    # --exclude-short-history 才回退到 config 的阈值（通常 4）过滤短历史。
+    min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval] min_history_completeness={min_hc}"
-          + ("  (--include-short-history 强制为 0)" if args.include_short_history else ""))
+          + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
     dataset = Occ3DOnlineNcdeDataset(
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
         root_path=cfg["root_path"],
