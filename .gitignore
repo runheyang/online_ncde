@@ -1,5 +1,5 @@
 # 训练产生的大目录
-/checkpoints
+/ckpts
 /outputs
 /models
 /third_party
