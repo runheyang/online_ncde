@@ -53,6 +53,8 @@ def online_ncde_collate(batch):
         "ray_origin": _stack_or_none(batch, "ray_origin"),
         "ray_origin_mask": _stack_or_none(batch, "ray_origin_mask"),
         "ray_sup_valid": _stack_or_none(batch, "ray_sup_valid"),
+        "rollout_start_step": _stack_or_none(batch, "rollout_start_step"),
+        "history_completeness": _stack_or_none(batch, "history_completeness"),
         "meta": [item.get("meta", {}) for item in batch],
     }
 
@@ -352,9 +354,18 @@ class Trainer:
             frame_timestamps=sample.get("frame_timestamps", None),
             frame_dt=sample.get("frame_dt", None),
         )
+        # rollout_start_step：短历史 pad 长度，训练侧默认全 0（过滤过的）
+        rss = sample.get("rollout_start_step", None)
         if hasattr(model, "forward_stepwise_train"):
-            return model.forward_stepwise_train(**kwargs, max_step_index=self.stepwise_max_step_index)
-        return self.model(**kwargs, mode="stepwise_train", max_step_index=self.stepwise_max_step_index)
+            return model.forward_stepwise_train(
+                **kwargs, max_step_index=self.stepwise_max_step_index
+            )
+        return self.model(
+            **kwargs,
+            mode="stepwise_train",
+            max_step_index=self.stepwise_max_step_index,
+            rollout_start_step=rss,
+        )
 
     def _select_primary_supervision_batch(
         self,
@@ -398,10 +409,12 @@ class Trainer:
         step_indices: torch.Tensor,
         sample: Dict[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # 兜底：若 step_logits 为空（短历史 h=0 理应已由 aligner 返回 slow_logits，
+        # 但保留一道兜底），用 slow_logits 作为当前时刻的对齐输出，而非 fast 末帧。
         logits = (
             step_logits[:, -1]
             if step_logits.shape[1] > 0
-            else cast(torch.Tensor, sample["fast_logits"])[:, -1]
+            else cast(torch.Tensor, sample["slow_logits"])
         )
         eval_labels = cast(torch.Tensor, sample["gt_labels"])
         eval_masks = cast(torch.Tensor, sample["gt_mask"])
@@ -489,7 +502,7 @@ class Trainer:
         logits = (
             step_logits[:, -1]
             if step_logits.shape[1] > 0
-            else cast(torch.Tensor, sample["fast_logits"])[:, -1]
+            else cast(torch.Tensor, sample["slow_logits"])
         )
         eval_labels = cast(torch.Tensor, sample["gt_labels"])
         eval_masks = cast(torch.Tensor, sample["gt_mask"])

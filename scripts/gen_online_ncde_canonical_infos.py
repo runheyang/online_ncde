@@ -85,6 +85,15 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="可选：仅处理前 N 个 scene，0 表示全量。",
     )
+    parser.add_argument(
+        "--allow-short-history",
+        action="store_true",
+        help=(
+            "允许 scene 开头不足 history_keyframes 的 keyframe 也生成条目："
+            "前面用 null 填充保持 13 帧定长，并记录 rollout_start_step。"
+            "默认关闭，保持与旧行为兼容。"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -260,6 +269,9 @@ def build_supervision_fields(
 
     for sup_i, kf_offset in enumerate(SUPERVISION_KEYFRAME_OFFSETS):
         sup_sample_token = keyframe_sample_tokens[kf_offset]
+        # pad 段的 keyframe 位置为空字符串，此 sup 点不可用
+        if not sup_sample_token:
+            continue
         gt_rel = make_gt_rel_path(scene_name, sup_sample_token)
         gt_abs = str(Path(gt_root_abs) / gt_rel)
 
@@ -326,11 +338,14 @@ def build_invalid_entry(
         "frame_interval_indices": np.zeros((0,), dtype=np.int16),
         "frame_phase_indices": np.zeros((0,), dtype=np.int16),
         "frame_is_keyframe": np.zeros((0,), dtype=np.uint8),
+        "frame_valid_mask": np.zeros((0,), dtype=np.uint8),
         "frame_timestamps": np.zeros((0,), dtype=np.int64),
         "frame_dt": np.zeros((0,), dtype=np.float32),
         "frame_ego2global": np.zeros((0, 4, 4), dtype=np.float32),
         "has_duplicate_fast_frames": False,
         "num_unique_fast_frames": 0,
+        "rollout_start_step": int(num_output_frames - 1),
+        "history_completeness": 0,
         "slow_sample_token": "",
         "slow_frame_token": "",
         "slow_logit_path": "",
@@ -396,6 +411,7 @@ def main() -> None:
 
     interval_len_hist: Counter[int] = Counter()
     selection_pattern_hist: Counter[tuple[int, tuple[int, ...]]] = Counter()
+    history_completeness_hist: Counter[int] = Counter()
     duplicate_fast_frame_count = 0
     valid_count = 0
     base_valid_count = 0
@@ -418,14 +434,16 @@ def main() -> None:
 
             enough_history = local_idx >= args.history_keyframes
             invalid_reasons: list[str] = []
-            if not enough_history:
+            # 短历史：是否允许取决于 --allow-short-history
+            use_short_entry = (not enough_history) and bool(args.allow_short_history)
+            if not enough_history and not args.allow_short_history:
                 invalid_reasons.append("insufficient_keyframe_history")
                 invalid_due_to_history += 1
             if not base_valid:
                 invalid_reasons.append("source_valid_flag_false")
                 invalid_due_to_source += 1
 
-            if not enough_history:
+            if (not enough_history) and (not args.allow_short_history):
                 entry = build_invalid_entry(
                     info=curr_info,
                     split_name=split_name,
@@ -435,17 +453,29 @@ def main() -> None:
                     invalid_reasons=invalid_reasons,
                 )
             else:
-                history_infos = scene_infos[local_idx - args.history_keyframes : local_idx + 1]
-                keyframe_sample_tokens = [str(info["token"]) for info in history_infos]
-                frame_tokens: list[str] = []
-                frame_interval_indices: list[int] = []
-                frame_phase_indices: list[int] = []
-                interval_frame_counts: list[int] = []
-                interval_selected_local_indices: list[list[int]] = []
+                # 真实历史数 h ∈ [0, history_keyframes]；pad 是前段填空的 step 数
+                h = min(local_idx, args.history_keyframes)
+                pad_intervals = args.history_keyframes - h
+                pad_steps = pad_intervals * args.steps_per_interval
 
-                for interval_idx in range(args.history_keyframes):
-                    start_sample_token = keyframe_sample_tokens[interval_idx]
-                    end_sample_token = keyframe_sample_tokens[interval_idx + 1]
+                history_infos_real = scene_infos[local_idx - h : local_idx + 1]
+                keyframe_sample_tokens_real = [str(info["token"]) for info in history_infos_real]
+                # 长度恒为 history_keyframes + 1，前面 pad_intervals 个位置填 ""
+                keyframe_sample_tokens: list[str] = [""] * pad_intervals + keyframe_sample_tokens_real
+
+                # 初始化按 num_output_frames 长度的占位列表
+                frame_tokens: list[str] = [""] * pad_steps
+                frame_interval_indices: list[int] = [-1] * pad_steps
+                frame_phase_indices: list[int] = [-1] * pad_steps
+                interval_frame_counts: list[int] = [0] * pad_intervals
+                interval_selected_local_indices: list[list[int]] = [
+                    [-1] * args.steps_per_interval for _ in range(pad_intervals)
+                ]
+
+                for real_i in range(h):
+                    interval_idx = pad_intervals + real_i  # 绝对 interval 位置
+                    start_sample_token = keyframe_sample_tokens_real[real_i]
+                    end_sample_token = keyframe_sample_tokens_real[real_i + 1]
                     interval_tokens, end_frame_token = collect_interval_camera_tokens(
                         start_sample_token=start_sample_token,
                         end_sample_token=end_sample_token,
@@ -472,7 +502,9 @@ def main() -> None:
                         frame_interval_indices.append(interval_idx)
                         frame_phase_indices.append(phase_idx)
 
-                current_frame_token = str(sample_by_token[keyframe_sample_tokens[-1]]["data"][args.token_camera])
+                current_frame_token = str(
+                    sample_by_token[keyframe_sample_tokens_real[-1]]["data"][args.token_camera]
+                )
                 frame_tokens.append(current_frame_token)
                 frame_interval_indices.append(args.history_keyframes)
                 frame_phase_indices.append(0)
@@ -483,41 +515,68 @@ def main() -> None:
                         f"frame_tokens 长度异常：实际 {len(frame_tokens)}，预期 {expected_num_frames}"
                     )
 
-                frame_sample_tokens = [
-                    str(sample_data_by_token[token]["sample_token"])
-                    for token in frame_tokens
-                ]
-                frame_timestamps = np.asarray(
-                    [int(sample_data_by_token[token]["timestamp"]) for token in frame_tokens],
-                    dtype=np.int64,
-                )
+                # 真实帧的 ts / ego 先算出来，pad 段用第一个真实帧的值复制
+                first_real_token = frame_tokens[pad_steps]
+                first_real_ts = int(sample_data_by_token[first_real_token]["timestamp"])
+                first_real_pose = get_pose_matrix_from_frame_token(first_real_token)
+
+                frame_sample_tokens: list[str] = []
+                frame_ts_list: list[int] = []
+                frame_pose_list: list[np.ndarray] = []
+                frame_is_kf_list: list[int] = []
+                for pos, token in enumerate(frame_tokens):
+                    if pos < pad_steps or token == "":
+                        # pad 段：sample_token 为空串，ts/ego 用第一个真实帧复制，is_keyframe=0
+                        frame_sample_tokens.append("")
+                        frame_ts_list.append(first_real_ts)
+                        frame_pose_list.append(first_real_pose)
+                        frame_is_kf_list.append(0)
+                    else:
+                        sd_rec = sample_data_by_token[token]
+                        frame_sample_tokens.append(str(sd_rec["sample_token"]))
+                        frame_ts_list.append(int(sd_rec["timestamp"]))
+                        frame_pose_list.append(get_pose_matrix_from_frame_token(token))
+                        frame_is_kf_list.append(1 if bool(sd_rec["is_key_frame"]) else 0)
+
+                frame_timestamps = np.asarray(frame_ts_list, dtype=np.int64)
                 frame_dt = ((frame_timestamps - frame_timestamps[-1]).astype(np.float64) * 1.0e-6).astype(
                     np.float32
                 )
-                frame_ego2global = np.stack(
-                    [get_pose_matrix_from_frame_token(token) for token in frame_tokens],
-                    axis=0,
-                ).astype(np.float32)
-                frame_is_keyframe = np.asarray(
-                    [bool(sample_data_by_token[token]["is_key_frame"]) for token in frame_tokens],
-                    dtype=np.uint8,
-                )
+                frame_ego2global = np.stack(frame_pose_list, axis=0).astype(np.float32)
+                frame_is_keyframe = np.asarray(frame_is_kf_list, dtype=np.uint8)
+                frame_valid_mask = np.zeros((expected_num_frames,), dtype=np.uint8)
+                frame_valid_mask[pad_steps:] = 1
+
                 keyframe_step_indices = [
                     step * args.steps_per_interval for step in range(args.history_keyframes + 1)
                 ]
                 keyframe_frame_tokens = [frame_tokens[step] for step in keyframe_step_indices]
 
-                slow_sample_token = keyframe_sample_tokens[0]
-                slow_frame_token = frame_tokens[0]
-                slow_ego2global = frame_ego2global[0].copy()
+                # slow 锚到最老真实 keyframe：即 step = pad_steps 的帧
+                slow_sample_token = keyframe_sample_tokens_real[0]
+                slow_frame_token = frame_tokens[pad_steps]
+                slow_ego2global = first_real_pose.copy()
                 current_ego2global = frame_ego2global[-1]
                 T_slow_to_curr = (np.linalg.inv(current_ego2global) @ slow_ego2global).astype(np.float32)
-                has_duplicate_fast_frames = len(set(frame_tokens)) < len(frame_tokens)
+
+                # 只在真实段统计重复帧
+                real_frame_tokens = frame_tokens[pad_steps:]
+                has_duplicate_fast_frames = len(set(real_frame_tokens)) < len(real_frame_tokens)
                 if has_duplicate_fast_frames:
                     duplicate_fast_frame_count += 1
 
+                # frame_rel_paths：pad 段保持 ""，logits_loader 端用零张量占位
+                frame_rel_paths: list[str] = []
+                for token in frame_tokens:
+                    if token == "":
+                        frame_rel_paths.append("")
+                    else:
+                        frame_rel_paths.append(
+                            make_logit_rel_path(str(curr_info["scene_name"]), token)
+                        )
+
                 entry = {
-                    "token": keyframe_sample_tokens[-1],
+                    "token": keyframe_sample_tokens_real[-1],
                     "scene_name": str(curr_info["scene_name"]),
                     "scene_token": str(curr_info["scene_token"]),
                     "split": split_name,
@@ -528,6 +587,8 @@ def main() -> None:
                     "history_keyframes": int(args.history_keyframes),
                     "steps_per_interval": int(args.steps_per_interval),
                     "num_output_frames": int(expected_num_frames),
+                    "rollout_start_step": int(pad_steps),
+                    "history_completeness": int(h),
                     "keyframe_step_indices": keyframe_step_indices,
                     "keyframe_sample_tokens": keyframe_sample_tokens,
                     "keyframe_frame_tokens": keyframe_frame_tokens,
@@ -538,26 +599,24 @@ def main() -> None:
                     ),
                     "frame_tokens": frame_tokens,
                     "frame_sample_tokens": frame_sample_tokens,
-                    "frame_rel_paths": [
-                        make_logit_rel_path(str(curr_info["scene_name"]), frame_token)
-                        for frame_token in frame_tokens
-                    ],
+                    "frame_rel_paths": frame_rel_paths,
                     "frame_interval_indices": np.asarray(frame_interval_indices, dtype=np.int16),
                     "frame_phase_indices": np.asarray(frame_phase_indices, dtype=np.int16),
                     "frame_is_keyframe": frame_is_keyframe,
+                    "frame_valid_mask": frame_valid_mask,
                     "frame_timestamps": frame_timestamps,
                     "frame_dt": frame_dt,
                     "frame_ego2global": frame_ego2global,
                     "has_duplicate_fast_frames": bool(has_duplicate_fast_frames),
-                    "num_unique_fast_frames": int(len(set(frame_tokens))),
+                    "num_unique_fast_frames": int(len(set(real_frame_tokens))),
                     "slow_sample_token": slow_sample_token,
                     "slow_frame_token": slow_frame_token,
                     "slow_logit_path": make_logit_rel_path(str(curr_info["scene_name"]), slow_sample_token),
-                    "slow_timestamp": int(frame_timestamps[0]),
+                    "slow_timestamp": int(first_real_ts),
                     "slow_ego2global": slow_ego2global,
                     "T_slow_to_curr": T_slow_to_curr,
                     "curr_gt_rel_path": str(
-                        Path(str(curr_info["scene_name"])) / keyframe_sample_tokens[-1] / "labels.npz"
+                        Path(str(curr_info["scene_name"])) / keyframe_sample_tokens_real[-1] / "labels.npz"
                     ),
                     # RayIoU 评估所需的 lidar→ego 刚体变换（当前 keyframe）
                     "lidar2ego_translation": np.asarray(
@@ -567,7 +626,7 @@ def main() -> None:
                         curr_info["lidar2ego_rotation"], dtype=np.float32
                     ),
                 }
-                # 添加多帧监督字段
+                # 添加多帧监督字段（pad 段自动置 0，见 build_supervision_fields）
                 sup_fields = build_supervision_fields(
                     keyframe_sample_tokens=keyframe_sample_tokens,
                     keyframe_frame_tokens=keyframe_frame_tokens,
@@ -579,6 +638,7 @@ def main() -> None:
 
             index_by_token[str(entry["token"])] = len(infos_out)
             infos_out.append(entry)
+            history_completeness_hist[int(entry.get("history_completeness", 0))] += 1
             if entry["valid"]:
                 valid_count += 1
                 if entry["num_supervision"] > 0:
@@ -636,6 +696,10 @@ def main() -> None:
             ],
             "num_valid_with_any_supervision": int(sup_any_count),
             "num_valid_with_all_4_supervision": int(sup_all_count),
+            "allow_short_history": bool(args.allow_short_history),
+            "history_completeness_hist": {
+                str(k): int(v) for k, v in sorted(history_completeness_hist.items())
+            },
         },
         "index_by_token": index_by_token,
         "infos": infos_out,
@@ -657,6 +721,11 @@ def main() -> None:
         f"supervision: any={sup_any_count} all_4={sup_all_count}"
     )
     print(f"[stats] interval_length_hist={dict(sorted(interval_len_hist.items()))}")
+    print(
+        "[stats] history_completeness_hist="
+        f"{dict(sorted(history_completeness_hist.items()))} "
+        f"(allow_short_history={bool(args.allow_short_history)})"
+    )
     top_patterns = selection_pattern_hist.most_common(8)
     print(
         "[stats] top_selection_patterns="

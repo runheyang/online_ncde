@@ -199,9 +199,23 @@ class OnlineNcdeAligner(nn.Module):
         frame_ego2global: torch.Tensor,
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
+        rollout_start_step: int = 0,
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """处理单样本（不含 batch 维），全分辨率 Dense 流程。"""
+        """处理单样本（不含 batch 维），全分辨率 Dense 流程。
+
+        rollout_start_step：短历史 pad 长度。rss == num_frames-1（scene 首帧）
+        时直接返回 slow_logits 作为 aligned，不过 encoder/decoder。
+        """
         num_frames = fast_logits.shape[0]
+
+        # h=0 退化：scene 第一帧 keyframe，直接输出慢系统 logits
+        if rollout_start_step >= num_frames - 1:
+            return {
+                "aligned": slow_logits.float(),
+                "diagnostics": {
+                    "delta_scene_abs_mean": torch.tensor(0.0, device=fast_logits.device),
+                },
+            }
 
         fast_feat = self._encode_fast(fast_logits)
         slow_feat = self._encode_slow(slow_logits)
@@ -223,14 +237,15 @@ class OnlineNcdeAligner(nn.Module):
         ).to(device=fast_logits.device)
         tau = cumulative_tau(dt).to(device=fast_logits.device)
 
+        # 初始 Z 锚到最老真实 keyframe
         if self.use_fast_residual:
-            Z_dense = slow_feat - fast_feat[0]
+            Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
             Z_dense = slow_feat
 
         delta_mag_values: list[float] = []
 
-        for k in range(num_frames - 1):
+        for k in range(rollout_start_step, num_frames - 1):
             transform = compute_transform_prev_to_curr(
                 pose_prev_ego2global=frame_ego2global[k],
                 pose_curr_ego2global=frame_ego2global[k + 1],
@@ -292,10 +307,31 @@ class OnlineNcdeAligner(nn.Module):
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
         max_step_index: int | None = None,
+        rollout_start_step: int = 0,
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """逐步训练单样本：每步更新后解码并返回全时刻 logits。"""
+        """逐步训练/评估单样本：每步更新后解码并返回全时刻 logits。
+
+        rollout_start_step：短历史 pad 段长度，从该 step 开始推演；
+        达到 num_frames-1 时退化为直接输出 slow_logits（scene 首帧）。
+        """
         num_frames = fast_logits.shape[0]
-        rollout_steps = num_frames - 1
+
+        # h=0 退化：只有一帧真实数据（即当前 keyframe），直接返回 slow_logits
+        if rollout_start_step >= num_frames - 1:
+            step_logits = slow_logits.unsqueeze(0).float()
+            step_indices = torch.tensor(
+                [num_frames - 1], device=fast_logits.device, dtype=torch.long
+            )
+            out: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
+                "step_logits": step_logits,
+                "step_indices": step_indices,
+                "diagnostics": {
+                    "delta_scene_abs_mean": torch.tensor(0.0, device=fast_logits.device),
+                },
+            }
+            return out
+
+        rollout_steps = (num_frames - 1) - rollout_start_step
         if max_step_index is not None:
             rollout_steps = min(rollout_steps, max(int(max_step_index), 0))
 
@@ -317,8 +353,9 @@ class OnlineNcdeAligner(nn.Module):
         ).to(device=fast_logits.device)
         tau = cumulative_tau(dt).to(device=fast_logits.device)
 
+        # 初始 Z 锚到最老真实 keyframe（pad 段被跳过）
         if self.use_fast_residual:
-            Z_dense = slow_feat - fast_feat[0]
+            Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
             Z_dense = slow_feat
 
@@ -328,7 +365,9 @@ class OnlineNcdeAligner(nn.Module):
         step_logits_list: list[torch.Tensor] = []
         compute_fast_kl = self._fast_kl_active and self.use_fast_residual
 
-        for k in range(rollout_steps):
+        # 按绝对 step 遍历 [rollout_start_step, rollout_start_step + rollout_steps)
+        for k_off in range(rollout_steps):
+            k = rollout_start_step + k_off
             transform = compute_transform_prev_to_curr(
                 pose_prev_ego2global=frame_ego2global[k],
                 pose_curr_ego2global=frame_ego2global[k + 1],
@@ -391,7 +430,12 @@ class OnlineNcdeAligner(nn.Module):
             step_logits = fast_logits.new_zeros(
                 (0, self.num_classes, fast_logits.shape[2], fast_logits.shape[3], fast_logits.shape[4])
             )
-        step_indices = torch.arange(1, rollout_steps + 1, device=fast_logits.device, dtype=torch.long)
+        step_indices = torch.arange(
+            rollout_start_step + 1,
+            rollout_start_step + 1 + rollout_steps,
+            device=fast_logits.device,
+            dtype=torch.long,
+        )
         avg_delta = sum(delta_mag_values) / max(len(delta_mag_values), 1)
         diagnostics = {
             "delta_scene_abs_mean": torch.tensor(avg_delta, device=fast_logits.device),
@@ -412,9 +456,35 @@ class OnlineNcdeAligner(nn.Module):
         frame_ego2global: torch.Tensor,
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
+        rollout_start_step: int = 0,
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """逐步评估单样本：每步更新后都做解码并和当前 fast logits 残差融合。"""
+        """逐步评估单样本：每步更新后都做解码并和当前 fast logits 残差融合。
+
+        rollout_start_step：短历史 pad 段的长度。前 pad 帧不参与 rollout，
+        从 step `rollout_start_step` 开始以 `slow_logits`（已锚到最老真实 keyframe）
+        作为初始状态推演。当 rollout_start_step == num_frames - 1（scene 第一帧）时，
+        直接返回 slow_logits 作为当前时刻的对齐输出。
+        """
         num_frames = fast_logits.shape[0]
+
+        # h=0 退化：没有 rollout step，直接把 slow_logits 作为当前 keyframe 的对齐输出
+        if rollout_start_step >= num_frames - 1:
+            step_logits = slow_logits.unsqueeze(0).float()  # (1, C, X, Y, Z)
+            step_indices = torch.tensor(
+                [num_frames - 1], device=fast_logits.device, dtype=torch.long
+            )
+            zero = torch.zeros((0,), device=fast_logits.device, dtype=torch.float32)
+            return {
+                "step_logits": step_logits,
+                "step_time_ms": zero,
+                "step_warp_ms": zero,
+                "step_solver_ms": zero,
+                "step_decode_ms": zero,
+                "step_indices": step_indices,
+                "diagnostics": {
+                    "delta_scene_abs_mean": torch.tensor(0.0, device=fast_logits.device),
+                },
+            }
 
         fast_feat = self._encode_fast(fast_logits)
         slow_feat = self._encode_slow(slow_logits)
@@ -434,8 +504,9 @@ class OnlineNcdeAligner(nn.Module):
         ).to(device=fast_logits.device)
         tau = cumulative_tau(dt).to(device=fast_logits.device)
 
+        # 初始 Z 锚到最老的真实 keyframe（pad 段被跳过）
         if self.use_fast_residual:
-            Z_dense = slow_feat - fast_feat[0]
+            Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
             Z_dense = slow_feat
 
@@ -449,7 +520,7 @@ class OnlineNcdeAligner(nn.Module):
         step_time_events: list[tuple[torch.cuda.Event, torch.cuda.Event, torch.cuda.Event, torch.cuda.Event]] = []
         use_cuda_timing = fast_logits.is_cuda
 
-        for k in range(num_frames - 1):
+        for k in range(rollout_start_step, num_frames - 1):
             if use_cuda_timing:
                 ev_t0 = torch.cuda.Event(enable_timing=True)
                 ev_t1 = torch.cuda.Event(enable_timing=True)
@@ -546,7 +617,9 @@ class OnlineNcdeAligner(nn.Module):
                 (0, self.num_classes, fast_logits.shape[2], fast_logits.shape[3], fast_logits.shape[4])
             )
 
-        step_indices = torch.arange(1, num_frames, device=fast_logits.device, dtype=torch.long)
+        step_indices = torch.arange(
+            rollout_start_step + 1, num_frames, device=fast_logits.device, dtype=torch.long
+        )
         step_time_ms = torch.tensor(step_time_ms_values, device=fast_logits.device, dtype=torch.float32)
         step_warp_ms = torch.tensor(step_warp_ms_values, device=fast_logits.device, dtype=torch.float32)
         step_solver_ms = torch.tensor(step_solver_ms_values, device=fast_logits.device, dtype=torch.float32)
@@ -665,6 +738,7 @@ class OnlineNcdeAligner(nn.Module):
         frame_dt: torch.Tensor | None,
         mode: str = "default",
         max_step_index: int | None = None,
+        rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
         """统一前向入口，通过 mode 分发到不同路径（兼容 DDP）。
 
@@ -672,6 +746,8 @@ class OnlineNcdeAligner(nn.Module):
           - "default": 仅返回最终 aligned logits
           - "stepwise_train": 逐步训练，返回每步 logits（完整 BPTT）
           - "stepwise_eval": 逐步评估，返回每步 logits 与耗时
+
+        rollout_start_step：(B,) long tensor，短历史样本的 pad 长度；默认全 0。
         """
         fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt = (
             self._unsqueeze_inputs(fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt)
@@ -681,14 +757,17 @@ class OnlineNcdeAligner(nn.Module):
             return self._forward_batched_stepwise_train(
                 fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt,
                 max_step_index=max_step_index,
+                rollout_start_step=rollout_start_step,
             )
         elif mode == "stepwise_eval":
             return self._forward_batched_stepwise_eval(
                 fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt,
+                rollout_start_step=rollout_start_step,
             )
         elif mode == "default":
             return self._forward_batched_default(
                 fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt,
+                rollout_start_step=rollout_start_step,
             )
         else:
             raise ValueError(f"未知的 forward mode: {mode!r}，可选: 'default', 'stepwise_train', 'stepwise_eval'")
@@ -700,18 +779,21 @@ class OnlineNcdeAligner(nn.Module):
         frame_ego2global: torch.Tensor,
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
+        rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         aligned_list = []
         diag_list = []
         with amp_ctx:
             for b in range(fast_logits.shape[0]):
+                rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
                 out = self._forward_single(
                     fast_logits=fast_logits[b],
                     slow_logits=slow_logits[b],
                     frame_ego2global=frame_ego2global[b],
                     frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
                     frame_dt=frame_dt[b] if frame_dt is not None else None,
+                    rollout_start_step=rss_b,
                 )
                 aligned_list.append(out["aligned"])
                 diag_list.append(out["diagnostics"])
@@ -725,6 +807,7 @@ class OnlineNcdeAligner(nn.Module):
         frame_ego2global: torch.Tensor,
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
+        rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
         """评估：返回每个循环步的 logits 与耗时。"""
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
@@ -737,12 +820,14 @@ class OnlineNcdeAligner(nn.Module):
         step_indices: torch.Tensor | None = None
         with amp_ctx:
             for b in range(fast_logits.shape[0]):
+                rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
                 out = self._forward_single_stepwise_eval(
                     fast_logits=fast_logits[b],
                     slow_logits=slow_logits[b],
                     frame_ego2global=frame_ego2global[b],
                     frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
                     frame_dt=frame_dt[b] if frame_dt is not None else None,
+                    rollout_start_step=rss_b,
                 )
                 sample_step_logits = cast(torch.Tensor, out["step_logits"])
                 sample_step_time = cast(torch.Tensor, out["step_time_ms"])
@@ -789,6 +874,7 @@ class OnlineNcdeAligner(nn.Module):
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
         max_step_index: int | None = None,
+        rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
         """训练：返回逐步 logits（完整 BPTT），不做计时。"""
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
@@ -798,6 +884,7 @@ class OnlineNcdeAligner(nn.Module):
         step_indices: torch.Tensor | None = None
         with amp_ctx:
             for b in range(fast_logits.shape[0]):
+                rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
                 out = self._forward_single_stepwise_train(
                     fast_logits=fast_logits[b],
                     slow_logits=slow_logits[b],
@@ -805,6 +892,7 @@ class OnlineNcdeAligner(nn.Module):
                     frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
                     frame_dt=frame_dt[b] if frame_dt is not None else None,
                     max_step_index=max_step_index,
+                    rollout_start_step=rss_b,
                 )
                 sample_step_logits = cast(torch.Tensor, out["step_logits"])
                 sample_step_indices = cast(torch.Tensor, out["step_indices"])

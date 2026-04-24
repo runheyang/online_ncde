@@ -36,6 +36,14 @@ def parse_args() -> argparse.Namespace:
                         help="sweep pkl 路径（相对于项目根目录）")
     parser.add_argument("--solver", choices=["heun", "euler"], default="euler",
                         help="ODE 求解器：euler（默认，Euler + next-fast 单次求值）或 heun")
+    parser.add_argument(
+        "--include-short-history",
+        action="store_true",
+        help=(
+            "覆盖 config 的 min_history_completeness，强制为 0，"
+            "让评估覆盖短历史样本（h<4）。"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -69,6 +77,11 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     logits_loader = build_logits_loader(data_cfg, cfg["root_path"])
 
+    # 默认沿用 config 的 min_history_completeness（通常 4，过滤短历史）。
+    # --include-short-history 强制为 0：覆盖全集含 h<4 样本，h=0 走 aligner 退化分支。
+    min_hc = 0 if args.include_short_history else int(data_cfg.get("min_history_completeness", 4))
+    print(f"[eval] min_history_completeness={min_hc}"
+          + ("  (--include-short-history 强制为 0)" if args.include_short_history else ""))
     dataset = Occ3DOnlineNcdeDataset(
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
         root_path=cfg["root_path"],
@@ -81,6 +94,7 @@ def main() -> None:
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split="val",
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
+        min_history_completeness=min_hc,
     )
     num_workers = int(eval_cfg.get("num_workers", 4))
     kwargs = dict(

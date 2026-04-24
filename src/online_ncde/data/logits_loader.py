@@ -131,6 +131,16 @@ class AloccDenseTopkLoader(LogitsLoader):
         """拼接完整路径。"""
         return resolve_path(self.root_path, os.path.join(logits_root, rel_path))
 
+    def _empty_frame(self, device: torch.device) -> torch.Tensor:
+        """pad 帧占位：全 fill_value 的 (C, X, Y, Z) 张量。"""
+        X, Y, Z = self.grid_size
+        return torch.full(
+            (self.num_classes, X, Y, Z),
+            fill_value=self.fill_value,
+            dtype=torch.float32,
+            device=device,
+        )
+
     def load_fast_logits(
         self,
         info: Dict[str, Any],
@@ -140,6 +150,10 @@ class AloccDenseTopkLoader(LogitsLoader):
         frame_rel_paths = info["frame_rel_paths"]
         frames = []
         for rel_path in frame_rel_paths:
+            if not rel_path:
+                # 短历史 pad 帧：空路径直接返回占位张量，不走 IO
+                frames.append(self._empty_frame(device))
+                continue
             full_path = self._resolve(self.fast_logits_root, rel_path)
             frames.append(self._decode_dense_topk_frame(full_path, device))
         return torch.stack(frames, dim=0)
@@ -223,6 +237,18 @@ class OpusSparseFullLoader(LogitsLoader):
             raise ValueError("rel_path 为空，无法定位 logits 文件")
         return resolve_path(self.root_path, os.path.join(logits_root, rel_path))
 
+    def _empty_frame(self, device: torch.device) -> torch.Tensor:
+        """pad 帧占位：free 通道为 free_fill_value，其它为 other_fill_value。"""
+        X, Y, Z = self.grid_size
+        frame = torch.full(
+            (self.num_classes, X, Y, Z),
+            fill_value=self.other_fill_value,
+            dtype=torch.float32,
+            device=device,
+        )
+        frame[self.free_index] = self.free_fill_value
+        return frame
+
     def load_fast_logits(
         self,
         info: Dict[str, Any],
@@ -232,6 +258,10 @@ class OpusSparseFullLoader(LogitsLoader):
         frame_rel_paths = info["frame_rel_paths"]
         frames = []
         for rel_path in frame_rel_paths:
+            if not rel_path:
+                # 短历史 pad 帧：空路径直接返回占位张量，不走 IO
+                frames.append(self._empty_frame(device))
+                continue
             full_path = self._resolve(self.fast_logits_root, rel_path)
             frames.append(self._decode_frame(full_path, device))
         return torch.stack(frames, dim=0)

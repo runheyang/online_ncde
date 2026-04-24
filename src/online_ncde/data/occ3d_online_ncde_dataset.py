@@ -34,6 +34,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
         ray_sidecar_dir: str | None = None,
         ray_sidecar_split: str | None = None,
         fast_frame_stride: int = 1,
+        min_history_completeness: int | None = None,
     ) -> None:
         self.root_path = root_path
         self.info_path = resolve_path(root_path, info_path)
@@ -61,6 +62,15 @@ class Occ3DOnlineNcdeDataset(Dataset):
             payload = pickle.load(f)
         infos = payload["infos"] if isinstance(payload, dict) else payload
         self.infos: List[Dict[str, Any]] = [info for info in infos if info.get("valid", True)]
+        # 训练默认只吃完整 2s 历史的样本，评估可以显式传 0 覆盖全集。
+        # 若 pkl 不含 history_completeness 字段（旧格式），视为 history_keyframes（兼容）。
+        if min_history_completeness is not None:
+            thr = int(min_history_completeness)
+            self.infos = [
+                info for info in self.infos
+                if int(info.get("history_completeness", info.get("history_keyframes", 0))) >= thr
+            ]
+        self.min_history_completeness = min_history_completeness
 
         if self.infos and "supervision_mask" in self.infos[0]:
             # canonical pkl 直接包含多帧监督字段
@@ -124,6 +134,15 @@ class Occ3DOnlineNcdeDataset(Dataset):
             for key in ("frame_ego2global", "frame_timestamps", "frame_dt"):
                 if key in info_view:
                     info_view[key] = info[key][::stride]
+            # rollout_start_step 在抽帧后也要重映射，要求与 stride 整除
+            if "rollout_start_step" in info_view:
+                rss = int(info_view["rollout_start_step"])
+                if rss % stride != 0:
+                    raise ValueError(
+                        f"rollout_start_step={rss} 不是 fast_frame_stride={stride} 的整数倍，"
+                        "无法对齐到抽帧后的 rollout step。"
+                    )
+                info_view["rollout_start_step"] = rss // stride
             info = info_view
 
         fast_logits = self.logits_loader.load_fast_logits(info, device)
@@ -233,6 +252,12 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 ray_sup_valid = torch.from_numpy(sup_mask_np.astype("float32"))  # (sup,)
                 ray_origin_mask = torch.from_numpy(origin_mask_np.astype("float32"))  # (sup, K)
 
+        # rollout 起点：旧格式 pkl 无此字段，默认 0（完整历史）
+        rollout_start_step = int(info.get("rollout_start_step", 0))
+        history_completeness = int(
+            info.get("history_completeness", info.get("history_keyframes", 0))
+        )
+
         return {
             "fast_logits": fast_logits,
             "slow_logits": slow_logits,
@@ -249,6 +274,8 @@ class Occ3DOnlineNcdeDataset(Dataset):
             "ray_origin": ray_origin,
             "ray_origin_mask": ray_origin_mask,
             "ray_sup_valid": ray_sup_valid,
+            "rollout_start_step": torch.tensor(rollout_start_step, dtype=torch.long),
+            "history_completeness": torch.tensor(history_completeness, dtype=torch.long),
             "meta": {
                 "scene_name": scene_name,
                 "token": token,
@@ -256,5 +283,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 "logits_path": info.get("logits_path", ""),
                 "slow_logit_path": info.get("slow_logit_path", ""),
                 "supervision_labels": self.supervision_labels,
+                "rollout_start_step": rollout_start_step,
+                "history_completeness": history_completeness,
             },
         }
