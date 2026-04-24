@@ -28,11 +28,23 @@ except Exception:  # pragma: no cover
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TOKEN_CAMERA = "CAM_FRONT"
 
-# 多帧监督定义：4 个 keyframe 时间点（排除最早的 t-2.0s）
-# 对应 keyframe_sample_tokens 索引 1-4，即 step 3/6/9/12
+# 多帧监督定义：4 个 keyframe 时间点（t-1.5 / t-1.0 / t-0.5 / t）
+# 始终锚到 keyframe_sample_tokens 的末 4 个位置，即
+# offsets = [H-3, H-2, H-1, H]（H = history_keyframes），
+# 保证 "t" 永远对应当前帧 step = num_output_frames-1。
+# H=4 时退化为旧版的 [1, 2, 3, 4]，与历史 pkl 完全兼容。
 SUPERVISION_LABELS = ["t-1.5", "t-1.0", "t-0.5", "t"]
-SUPERVISION_KEYFRAME_OFFSETS = [1, 2, 3, 4]
 NUM_SUPERVISION = len(SUPERVISION_LABELS)
+
+
+def compute_supervision_keyframe_offsets(history_keyframes: int) -> list[int]:
+    """返回末 NUM_SUPERVISION 个 keyframe 的 offset（相对起点）。"""
+    if history_keyframes < NUM_SUPERVISION:
+        raise ValueError(
+            f"--history-keyframes 需 >= {NUM_SUPERVISION}（监督点数），"
+            f"当前 {history_keyframes}。"
+        )
+    return [history_keyframes - (NUM_SUPERVISION - 1 - i) for i in range(NUM_SUPERVISION)]
 
 
 def parse_args() -> argparse.Namespace:
@@ -252,13 +264,14 @@ def build_supervision_fields(
     keyframe_sample_tokens: list[str],
     keyframe_frame_tokens: list[str],
     keyframe_step_indices: list[int],
+    supervision_keyframe_offsets: list[int],
     scene_name: str,
     gt_root_abs: str,
 ) -> dict[str, Any]:
     """为一条 valid info 构建多帧监督字段。
 
     监督 4 个 keyframe 时间点（t-1.5 / t-1.0 / t-0.5 / t），
-    对应 keyframe_sample_tokens[1:5] 和 step 3/6/9/12。
+    锚到 keyframe_sample_tokens 的末 4 个位置，保证 "t" 对应当前帧。
     """
     sup_mask = [0] * NUM_SUPERVISION
     sup_step_indices = [-1] * NUM_SUPERVISION
@@ -267,7 +280,7 @@ def build_supervision_fields(
     sup_gt_rel_paths = [""] * NUM_SUPERVISION
     sup_count = 0
 
-    for sup_i, kf_offset in enumerate(SUPERVISION_KEYFRAME_OFFSETS):
+    for sup_i, kf_offset in enumerate(supervision_keyframe_offsets):
         sup_sample_token = keyframe_sample_tokens[kf_offset]
         # pad 段的 keyframe 位置为空字符串，此 sup 点不可用
         if not sup_sample_token:
@@ -379,6 +392,8 @@ def main() -> None:
         raise ValueError("--history-keyframes 必须为正。")
     if args.steps_per_interval <= 0:
         raise ValueError("--steps-per-interval 必须为正。")
+
+    supervision_keyframe_offsets = compute_supervision_keyframe_offsets(args.history_keyframes)
 
     gt_root_abs = str(resolve_repo_path(args.gt_root))
 
@@ -631,6 +646,7 @@ def main() -> None:
                     keyframe_sample_tokens=keyframe_sample_tokens,
                     keyframe_frame_tokens=keyframe_frame_tokens,
                     keyframe_step_indices=keyframe_step_indices,
+                    supervision_keyframe_offsets=supervision_keyframe_offsets,
                     scene_name=str(curr_info["scene_name"]),
                     gt_root_abs=gt_root_abs,
                 )
@@ -690,9 +706,10 @@ def main() -> None:
             "slow_logit_path_template": "{scene_name}/{slow_sample_token}/logits.npz",
             "gt_root": args.gt_root,
             "supervision_labels": list(SUPERVISION_LABELS),
+            "supervision_keyframe_offsets": list(supervision_keyframe_offsets),
             "supervision_step_indices": [
                 step * args.steps_per_interval
-                for step in SUPERVISION_KEYFRAME_OFFSETS
+                for step in supervision_keyframe_offsets
             ],
             "num_valid_with_any_supervision": int(sup_any_count),
             "num_valid_with_all_4_supervision": int(sup_all_count),
