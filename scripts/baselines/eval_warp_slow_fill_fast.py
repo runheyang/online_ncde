@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Baseline 评估：warp_slow_fill_fast（无参数纯几何）。
 
-流程：
-  - 复用 Occ3DOnlineNcdeDataset 吃 canonical val pkl。
-  - 对每个样本用 WarpSlowFillFastBaseline 预测当前 keyframe 的 dense 语义。
-  - 累加 mIoU（MetricMiouOcc3D）+ RayIoU（RayIouAccumulator）。
-  - 另外统计 valid_mask 占比、退化样本数。
+流程（对齐 scripts/eval_online_ncde.py）：
+  1. 推理阶段：逐 batch 跑 baseline.predict_sample，累加 mIoU，并把
+     每个样本的 dense pred/gt/token 收集到内存。
+  2. RayIoU 阶段：推理结束后，按 token 查 lidar origin，一次性调
+     ray_metrics.main 统一批量计算 RayIoU@1/2/4。
+  - 另外统计连续 coverage 平均值、退化样本数。
 """
 
 from __future__ import annotations
@@ -33,13 +34,45 @@ from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
 from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
-from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator  # noqa: E402
+from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 
 try:
     import progressbar
 except Exception:
     progressbar = None
+
+
+class _LastFrameOnlyFastLogitsLoader:
+    """Wrap 现有 logits_loader，让 load_fast_logits 只返回末帧 (1, C, X, Y, Z)。
+
+    原理：dataset worker 调用 load_fast_logits 前，把 info.frame_rel_paths
+    裁剪到只剩末帧路径，inner loader 只解码 1 帧并 stack 出 shape (1, ...)。
+    baseline 下游只用 fast_logits[-1]，且 num_frames 从 frame_ego2global
+    读取，不依赖 fast_logits.shape[0]。
+
+    相比前一版（前 T-1 填空串走占位分支），这一版同时省：
+      - 磁盘 I/O 与 sparse→dense 解码（T 次 → 1 次）
+      - worker 侧 dense 张量分配（某些 loader 如 AloccDenseTopkLoader 的
+        _empty_frame 仍分配 full dense，占位≠零成本）
+      - multiprocessing IPC 传输（worker → 主进程，T 帧 → 1 帧）
+
+    5s pkl (T=31) 下 IPC 传输量从 ~700MB/样本 降到 ~23MB/样本。
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def load_fast_logits(self, info: dict, device: torch.device) -> torch.Tensor:
+        paths = info.get("frame_rel_paths", None)
+        if not paths:
+            return self._inner.load_fast_logits(info, device)
+        info_view = dict(info)
+        info_view["frame_rel_paths"] = [paths[-1]]
+        return self._inner.load_fast_logits(info_view, device)
+
+    def load_slow_logits(self, info: dict, device: torch.device) -> torch.Tensor:
+        return self._inner.load_slow_logits(info, device)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,9 +87,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dump-json", default="", help="可选：统计结果 json")
     parser.add_argument(
-        "--include-short-history",
+        "--exclude-short-history",
         action="store_true",
-        help="强制 min_history_completeness=0，评估覆盖短历史样本。",
+        help="只评估满足 config.min_history_completeness（通常 4）的完整历史样本；"
+             "默认包含全部短历史样本（min_history_completeness=0，h=0 退化为 slow 直出）。",
     )
     parser.add_argument(
         "--val-info-path",
@@ -64,12 +98,6 @@ def parse_args() -> argparse.Namespace:
         help="覆盖 config 的 data.val_info_path（空则沿用 config）。",
     )
     parser.add_argument("--no-rayiou", action="store_true", help="跳过 RayIoU 评估")
-    parser.add_argument(
-        "--mask-thresh",
-        type=float,
-        default=0.5,
-        help="warp ones 后的 valid mask 阈值（默认 0.5）",
-    )
     return parser.parse_args()
 
 
@@ -88,11 +116,13 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     root_path = cfg["root_path"]
 
-    logits_loader = build_logits_loader(data_cfg, root_path)
+    # baseline 只用 fast_logits[-1]，用 wrapper 屏蔽前 T-1 帧的真实解码
+    logits_loader = _LastFrameOnlyFastLogitsLoader(build_logits_loader(data_cfg, root_path))
+    print("[io] fast_logits worker 只返回末帧 (1,C,X,Y,Z)，省 I/O + 内存分配 + IPC 传输")
 
-    min_hc = 0 if args.include_short_history else int(data_cfg.get("min_history_completeness", 4))
+    min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval-baseline] min_history_completeness={min_hc}"
-          + ("  (--include-short-history 强制为 0)" if args.include_short_history else ""))
+          + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
 
     info_path = args.val_info_path if args.val_info_path else data_cfg.get("val_info_path", data_cfg["info_path"])
     if args.val_info_path:
@@ -134,9 +164,8 @@ def main() -> None:
         pc_range=tuple(data_cfg["pc_range"]),
         voxel_size=tuple(data_cfg["voxel_size"]),
         free_index=int(data_cfg["free_index"]),
-        mask_thresh=float(args.mask_thresh),
     )
-    print(f"[baseline] {baseline.name} mask_thresh={baseline.mask_thresh}")
+    print(f"[baseline] {baseline.name} (logits-level blend)")
 
     num_classes = int(data_cfg["num_classes"])
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
@@ -150,18 +179,12 @@ def main() -> None:
     class_names = metric_miou.class_names
 
     enable_rayiou = not args.no_rayiou
-    ray_acc: RayIouAccumulator | None = None
-    origins_by_token: dict[str, Any] = {}
-    missing_origin_count = 0
     sweep_info_path = resolve_path(root_path, args.sweep_info_path)
-    if enable_rayiou:
-        print(f"[rayiou] 加载 lidar origins: {sweep_info_path}")
-        origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)
-        print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
-        ray_acc = RayIouAccumulator()
 
-    valid_ratio_sum = 0.0
-    valid_ratio_count = 0
+    # 推理阶段累积预测；RayIoU 阶段统一批量计算（不做流式 per-sample raycast）
+    collected: list[dict[str, Any]] = []
+    coverage_sum = 0.0
+    coverage_count = 0
     degenerate_count = 0  # scene 首帧退化（slow 直出）
     missing_gt_count = 0
     processed = 0
@@ -176,14 +199,17 @@ def main() -> None:
 
     with torch.inference_mode():
         for batch_idx, sample in enumerate(iterator, start=1):
+            # worker 侧 wrapper 已将 fast_logits 裁到末帧 (1, C, X, Y, Z)，
+            # 主进程无需再切片；num_frames 的真值由 frame_ego2global 提供。
             sample = move_to_device(sample, device)
-            fast_logits = cast(torch.Tensor, sample["fast_logits"])   # (B, T, C, X, Y, Z)
+            fast_logits = cast(torch.Tensor, sample["fast_logits"])   # (B, 1, C, X, Y, Z)
             slow_logits = cast(torch.Tensor, sample["slow_logits"])   # (B, C, X, Y, Z)
             frame_ego2global = cast(torch.Tensor, sample["frame_ego2global"])  # (B, T, 4, 4)
             rollout_start_step = sample.get("rollout_start_step", None)
             meta_list = cast(list[dict[str, Any]], sample["meta"])
 
             B = fast_logits.shape[0]
+            num_frames = int(frame_ego2global.shape[1])
             for b in range(B):
                 rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
                 out = baseline.predict_sample(
@@ -193,14 +219,13 @@ def main() -> None:
                     rollout_start_step=rss_b,
                 )
                 pred = cast(torch.Tensor, out["pred"])
-                valid_mask = cast(torch.Tensor, out["valid_mask"])
+                coverage = cast(torch.Tensor, out["coverage"])
 
-                num_frames = int(fast_logits.shape[1])
                 if rss_b >= num_frames - 1:
                     degenerate_count += 1
                 else:
-                    valid_ratio_sum += float(valid_mask.float().mean().item())
-                    valid_ratio_count += 1
+                    coverage_sum += float(coverage.mean().item())
+                    coverage_count += 1
 
                 meta = meta_list[b]
                 scene_name = str(meta.get("scene_name", ""))
@@ -225,12 +250,13 @@ def main() -> None:
                     mask_camera=gt_mask,
                 )
 
-                if enable_rayiou and ray_acc is not None:
-                    origin = origins_by_token.get(token, None)
-                    if origin is None:
-                        missing_origin_count += 1
-                    else:
-                        ray_acc.add_sample(pred_np, gt_semantics, origin)
+                if enable_rayiou:
+                    # 只存 RayIoU 所需字段，用 uint8 省内存（~640KB/样本）
+                    collected.append({
+                        "pred": pred_np.astype(np.uint8),
+                        "gt": gt_semantics.astype(np.uint8),
+                        "token": token,
+                    })
 
                 processed += 1
 
@@ -238,26 +264,49 @@ def main() -> None:
                 print(f"[baseline] batch={batch_idx}/{total_batches} processed={processed}")
 
     print(f"[baseline] processed={processed} degenerate={degenerate_count} "
-          f"valid_ratio_mean={valid_ratio_sum / max(valid_ratio_count, 1):.4f}")
+          f"coverage_mean={coverage_sum / max(coverage_count, 1):.4f}")
 
     if metric_miou.cnt > 0:
         miou = float(metric_miou.count_miou(verbose=False))
+        miou_d = float(metric_miou.count_miou_d(verbose=False))
         per_class = np.nan_to_num(metric_miou.get_per_class_iou(), nan=0.0).tolist()
-        print(f"[miou] num={metric_miou.cnt} miou={miou:.2f}")
+        print(f"[miou] num={metric_miou.cnt} miou={miou:.2f} miou_d={miou_d:.2f}")
         for name, value in zip(class_names, per_class):
             print(f"  {name}: {float(value):.2f}")
     else:
         miou = float("nan")
+        miou_d = float("nan")
         per_class = []
         print("[miou] no samples")
 
     rayiou_result: dict[str, Any] | None = None
-    if enable_rayiou and ray_acc is not None:
-        if ray_acc.num_samples > 0:
-            rayiou_result = ray_acc.finalize(print_table=True)
+    missing_origin_count = 0
+    rayiou_num_samples = 0
+    if enable_rayiou:
+        print(f"\n[rayiou] 加载 lidar origins: {sweep_info_path}")
+        origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)
+        print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
+
+        sem_pred_list: list[np.ndarray] = []
+        sem_gt_list: list[np.ndarray] = []
+        lidar_origin_list: list[Any] = []
+        for item in collected:
+            origin = origins_by_token.get(item["token"], None)
+            if origin is None:
+                missing_origin_count += 1
+                continue
+            sem_pred_list.append(item["pred"])
+            sem_gt_list.append(item["gt"])
+            lidar_origin_list.append(origin)
+        if missing_origin_count:
+            print(f"[rayiou] 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
+        rayiou_num_samples = len(sem_pred_list)
+        print(f"[rayiou] {rayiou_num_samples} 个样本参与计算")
+
+        if rayiou_num_samples > 0:
+            rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
             print(
-                f"[rayiou] num={rayiou_result['num_samples']} "
-                f"RayIoU={rayiou_result['RayIoU']:.4f} "
+                f"[rayiou] RayIoU={rayiou_result['RayIoU']:.4f} "
                 f"@1={rayiou_result['RayIoU@1']:.4f} "
                 f"@2={rayiou_result['RayIoU@2']:.4f} "
                 f"@4={rayiou_result['RayIoU@4']:.4f}"
@@ -270,13 +319,15 @@ def main() -> None:
     if args.dump_json:
         payload = {
             "baseline": baseline.name,
-            "mask_thresh": baseline.mask_thresh,
+            "fuse_strategy": "logits_blend",
             "num_samples": int(metric_miou.cnt),
             "miou": _to_json_number(miou),
+            "miou_d": _to_json_number(miou_d),
             "per_class_iou": [float(v) for v in per_class],
             "class_names": class_names,
             "rayiou": rayiou_result,
-            "valid_mask_ratio_mean": _to_json_number(valid_ratio_sum / max(valid_ratio_count, 1)),
+            "rayiou_num_samples": int(rayiou_num_samples),
+            "coverage_mean": _to_json_number(coverage_sum / max(coverage_count, 1)),
             "degenerate_count": int(degenerate_count),
             "missing_gt_count": int(missing_gt_count),
             "missing_origin_count": int(missing_origin_count),
