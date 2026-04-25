@@ -385,6 +385,7 @@ def main() -> None:
             per_step_results[str(step_idx)] = {
                 "num_keyframes": 0,
                 "miou": None,
+                "miou_d": None,
                 "per_class_iou": [],
                 "class_names": class_names,
                 "avg_time_ms": float(step_time_avg[step_idx]),
@@ -397,10 +398,11 @@ def main() -> None:
             continue
 
         step_miou = float(metric.count_miou(verbose=False))
+        step_miou_d = float(metric.count_miou_d(verbose=False))
         step_per_class = np.nan_to_num(metric.get_per_class_iou(), nan=0.0).tolist()
         print(
             f"[keyframe][step={step_idx}] "
-            f"num={metric.cnt} miou={step_miou:.2f}"
+            f"num={metric.cnt} miou={step_miou:.2f} miou_d={step_miou_d:.2f}"
         )
         for name, value in zip(class_names, step_per_class):
             print(f"  {name}: {float(value):.2f}")
@@ -423,6 +425,7 @@ def main() -> None:
         per_step_results[str(step_idx)] = {
             "num_keyframes": int(metric.cnt),
             "miou": float(step_miou),
+            "miou_d": _to_json_number(step_miou_d),
             "per_class_iou": [float(v) for v in step_per_class],
             "class_names": class_names,
             "avg_time_ms": float(step_time_avg[step_idx]),
@@ -435,12 +438,14 @@ def main() -> None:
 
     if metric_all.cnt > 0:
         all_miou = float(metric_all.count_miou(verbose=False))
+        all_miou_d = float(metric_all.count_miou_d(verbose=False))
         all_per_class = np.nan_to_num(metric_all.get_per_class_iou(), nan=0.0).tolist()
-        print(f"[keyframe][all] num={metric_all.cnt} miou={all_miou:.2f}")
+        print(f"[keyframe][all] num={metric_all.cnt} miou={all_miou:.2f} miou_d={all_miou_d:.2f}")
         for name, value in zip(class_names, all_per_class):
             print(f"  {name}: {float(value):.2f}")
     else:
         all_miou = float("nan")
+        all_miou_d = float("nan")
         all_per_class = []
         print("[keyframe][all] no samples")
 
@@ -485,6 +490,7 @@ def main() -> None:
             "keyframe_all": {
                 "num_keyframes": int(metric_all.cnt),
                 "miou": _to_json_number(all_miou),
+                "miou_d": _to_json_number(all_miou_d),
                 "per_class_iou": [float(v) for v in all_per_class],
                 "class_names": class_names,
                 "rayiou": all_rayiou_result,
