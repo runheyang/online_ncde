@@ -30,17 +30,15 @@ def _grid_sample_with_padding(
     padding_mode: str,
 ) -> torch.Tensor:
     """与 backward_warp_dense_trilinear 同口径，显式允许 zeros padding。"""
-    with torch.amp.autocast("cuda", enabled=False):
-        feat_5d = dense_feat.float().permute(0, 3, 2, 1).unsqueeze(0).contiguous()
-        warped_5d = F.grid_sample(
-            feat_5d,
-            grid,
-            mode="bilinear",      # 3D 张量上 bilinear = trilinear
-            padding_mode=padding_mode,
-            align_corners=True,
-        )
-    warped = warped_5d.squeeze(0).permute(0, 3, 2, 1).contiguous()
-    return warped.to(dense_feat.dtype)
+    feat_5d = dense_feat.permute(0, 3, 2, 1).unsqueeze(0).contiguous()
+    warped_5d = F.grid_sample(
+        feat_5d,
+        grid,
+        mode="bilinear",      # 3D 张量上 bilinear = trilinear
+        padding_mode=padding_mode,
+        align_corners=True,
+    )
+    return warped_5d.squeeze(0).permute(0, 3, 2, 1).contiguous()
 
 
 class WarpSlowFillFastBaseline:

@@ -22,6 +22,11 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 torch.backends.cudnn.benchmark = True
+# 与 train 对齐：fp32 + TF32（PyTorch 1.12+ matmul TF32 默认关闭，需显式开）
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
@@ -214,7 +219,6 @@ def main() -> None:
         func_g_body_dilations=tuple(model_cfg.get("func_g_body_dilations", [1, 2, 3])),
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
-        amp_fp16=bool(eval_cfg.get("amp_fp16", False)),
         solver_variant=args.solver,
     ).to(device)
     if args.solver == "euler":

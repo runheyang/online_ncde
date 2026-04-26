@@ -103,7 +103,6 @@ eval:
   free_conf_thresh: null
   log_interval: 500
   log_multistep_losses: true
-  amp_fp16: false
   sweep_pkl: data/nuscenes/nuscenes_infos_val_sweep.pkl
 
 wandb:

@@ -512,7 +512,6 @@ def main() -> None:
         func_g_body_dilations=tuple(model_cfg.get("func_g_body_dilations", [1, 2, 3])),
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
-        amp_fp16=bool(eval_cfg.get("amp_fp16", False)),
         solver_variant=args.solver,
     ).to(device)
     if args.solver == "euler":

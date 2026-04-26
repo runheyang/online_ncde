@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import time
-from contextlib import nullcontext
 from typing import Dict, Tuple, cast
 
 import torch
@@ -58,11 +57,9 @@ class OnlineNcdeAligner(nn.Module):
         func_g_body_dilations: tuple[int, ...] = (1, 2, 3),
         func_g_gn_groups: int = 8,
         timestamp_scale: float = 1.0e-6,
-        amp_fp16: bool = False,
         solver_variant: str = "heun",
     ) -> None:
         super().__init__()
-        self.amp_fp16 = bool(amp_fp16)
         self.use_fast_residual = bool(use_fast_residual)
         self.num_classes = int(num_classes)
         self.feat_dim = int(feat_dim)
@@ -697,22 +694,20 @@ class OnlineNcdeAligner(nn.Module):
         frame_dt: torch.Tensor | None,
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         aligned_list = []
         diag_list = []
-        with amp_ctx:
-            for b in range(fast_logits.shape[0]):
-                rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
-                out = self._forward_single(
-                    fast_logits=fast_logits[b],
-                    slow_logits=slow_logits[b],
-                    frame_ego2global=frame_ego2global[b],
-                    frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
-                    frame_dt=frame_dt[b] if frame_dt is not None else None,
-                    rollout_start_step=rss_b,
-                )
-                aligned_list.append(out["aligned"])
-                diag_list.append(out["diagnostics"])
+        for b in range(fast_logits.shape[0]):
+            rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
+            out = self._forward_single(
+                fast_logits=fast_logits[b],
+                slow_logits=slow_logits[b],
+                frame_ego2global=frame_ego2global[b],
+                frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
+                frame_dt=frame_dt[b] if frame_dt is not None else None,
+                rollout_start_step=rss_b,
+            )
+            aligned_list.append(out["aligned"])
+            diag_list.append(out["diagnostics"])
         aligned = torch.stack(aligned_list, dim=0)
         return {"aligned": aligned, "diagnostics": diag_list}
 
@@ -726,7 +721,6 @@ class OnlineNcdeAligner(nn.Module):
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
         """评估：返回每个循环步的 logits 与耗时。"""
-        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         step_logits_list: list[torch.Tensor] = []
         step_time_list: list[torch.Tensor] = []
         step_warp_list: list[torch.Tensor] = []
@@ -734,36 +728,35 @@ class OnlineNcdeAligner(nn.Module):
         step_decode_list: list[torch.Tensor] = []
         diag_list: list[dict[str, torch.Tensor]] = []
         step_indices: torch.Tensor | None = None
-        with amp_ctx:
-            for b in range(fast_logits.shape[0]):
-                rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
-                out = self._forward_single_stepwise_eval(
-                    fast_logits=fast_logits[b],
-                    slow_logits=slow_logits[b],
-                    frame_ego2global=frame_ego2global[b],
-                    frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
-                    frame_dt=frame_dt[b] if frame_dt is not None else None,
-                    rollout_start_step=rss_b,
+        for b in range(fast_logits.shape[0]):
+            rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
+            out = self._forward_single_stepwise_eval(
+                fast_logits=fast_logits[b],
+                slow_logits=slow_logits[b],
+                frame_ego2global=frame_ego2global[b],
+                frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
+                frame_dt=frame_dt[b] if frame_dt is not None else None,
+                rollout_start_step=rss_b,
+            )
+            sample_step_logits = cast(torch.Tensor, out["step_logits"])
+            sample_step_time = cast(torch.Tensor, out["step_time_ms"])
+            sample_step_warp = cast(torch.Tensor, out["step_warp_ms"])
+            sample_step_solver = cast(torch.Tensor, out["step_solver_ms"])
+            sample_step_decode = cast(torch.Tensor, out["step_decode_ms"])
+            sample_step_indices = cast(torch.Tensor, out["step_indices"])
+            if step_indices is None:
+                step_indices = sample_step_indices
+            elif sample_step_indices.shape != step_indices.shape:
+                raise ValueError(
+                    f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
                 )
-                sample_step_logits = cast(torch.Tensor, out["step_logits"])
-                sample_step_time = cast(torch.Tensor, out["step_time_ms"])
-                sample_step_warp = cast(torch.Tensor, out["step_warp_ms"])
-                sample_step_solver = cast(torch.Tensor, out["step_solver_ms"])
-                sample_step_decode = cast(torch.Tensor, out["step_decode_ms"])
-                sample_step_indices = cast(torch.Tensor, out["step_indices"])
-                if step_indices is None:
-                    step_indices = sample_step_indices
-                elif sample_step_indices.shape != step_indices.shape:
-                    raise ValueError(
-                        f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
-                    )
 
-                step_logits_list.append(sample_step_logits)
-                step_time_list.append(sample_step_time)
-                step_warp_list.append(sample_step_warp)
-                step_solver_list.append(sample_step_solver)
-                step_decode_list.append(sample_step_decode)
-                diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            step_logits_list.append(sample_step_logits)
+            step_time_list.append(sample_step_time)
+            step_warp_list.append(sample_step_warp)
+            step_solver_list.append(sample_step_solver)
+            step_decode_list.append(sample_step_decode)
+            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
@@ -793,36 +786,34 @@ class OnlineNcdeAligner(nn.Module):
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
         """训练：返回逐步 logits（完整 BPTT），不做计时。"""
-        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16) if self.amp_fp16 else nullcontext()
         step_logits_list: list[torch.Tensor] = []
         diag_list: list[dict[str, torch.Tensor]] = []
         fast_kl_list: list[torch.Tensor] = []
         step_indices: torch.Tensor | None = None
-        with amp_ctx:
-            for b in range(fast_logits.shape[0]):
-                rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
-                out = self._forward_single_stepwise_train(
-                    fast_logits=fast_logits[b],
-                    slow_logits=slow_logits[b],
-                    frame_ego2global=frame_ego2global[b],
-                    frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
-                    frame_dt=frame_dt[b] if frame_dt is not None else None,
-                    max_step_index=max_step_index,
-                    rollout_start_step=rss_b,
+        for b in range(fast_logits.shape[0]):
+            rss_b = int(rollout_start_step[b].item()) if rollout_start_step is not None else 0
+            out = self._forward_single_stepwise_train(
+                fast_logits=fast_logits[b],
+                slow_logits=slow_logits[b],
+                frame_ego2global=frame_ego2global[b],
+                frame_timestamps=frame_timestamps[b] if frame_timestamps is not None else None,
+                frame_dt=frame_dt[b] if frame_dt is not None else None,
+                max_step_index=max_step_index,
+                rollout_start_step=rss_b,
+            )
+            sample_step_logits = cast(torch.Tensor, out["step_logits"])
+            sample_step_indices = cast(torch.Tensor, out["step_indices"])
+            if step_indices is None:
+                step_indices = sample_step_indices
+            elif sample_step_indices.shape != step_indices.shape:
+                raise ValueError(
+                    f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
                 )
-                sample_step_logits = cast(torch.Tensor, out["step_logits"])
-                sample_step_indices = cast(torch.Tensor, out["step_indices"])
-                if step_indices is None:
-                    step_indices = sample_step_indices
-                elif sample_step_indices.shape != step_indices.shape:
-                    raise ValueError(
-                        f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
-                    )
 
-                step_logits_list.append(sample_step_logits)
-                diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
-                if "fast_kl" in out:
-                    fast_kl_list.append(cast(torch.Tensor, out["fast_kl"]))
+            step_logits_list.append(sample_step_logits)
+            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            if "fast_kl" in out:
+                fast_kl_list.append(cast(torch.Tensor, out["fast_kl"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)

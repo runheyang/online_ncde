@@ -127,29 +127,26 @@ def backward_warp_dense_trilinear(
     Returns:
         warped : (C, X, Y, Z)，对齐到 t 帧坐标系的稠密特征
     """
-    # grid_sample 需要 fp32 精度，局部禁用外层 autocast
-    with torch.amp.autocast("cuda", enabled=False):
-        # 转换轴顺序：(C, X, Y, Z) → (1, C, Z, Y, X) 以匹配 F.grid_sample 5D 输入
-        feat_5d = dense_prev_feat.float().permute(0, 3, 2, 1).unsqueeze(0).contiguous()
+    # 转换轴顺序：(C, X, Y, Z) → (1, C, Z, Y, X) 以匹配 F.grid_sample 5D 输入
+    feat_5d = dense_prev_feat.permute(0, 3, 2, 1).unsqueeze(0).contiguous()
 
-        if prebuilt_grid is not None:
-            grid = prebuilt_grid
-        else:
-            grid = _build_sampling_grid(
-                transform_prev_to_curr, spatial_shape_xyz, pc_range, voxel_size
-            )  # (1, Z, Y, X, 3)，全程 GPU
+    if prebuilt_grid is not None:
+        grid = prebuilt_grid
+    else:
+        grid = _build_sampling_grid(
+            transform_prev_to_curr, spatial_shape_xyz, pc_range, voxel_size
+        )  # (1, Z, Y, X, 3)，全程 GPU
 
-        warped_5d = F.grid_sample(
-            feat_5d,
-            grid,
-            mode="bilinear",         # 3D 张量上 bilinear = trilinear
-            padding_mode=padding_mode,
-            align_corners=True,
-        )  # (1, C, Z, Y, X)
+    warped_5d = F.grid_sample(
+        feat_5d,
+        grid,
+        mode="bilinear",         # 3D 张量上 bilinear = trilinear
+        padding_mode=padding_mode,
+        align_corners=True,
+    )  # (1, C, Z, Y, X)
 
     # 恢复轴顺序：(1, C, Z, Y, X) → (C, X, Y, Z)
-    warped = warped_5d.squeeze(0).permute(0, 3, 2, 1).contiguous()
-    return warped.to(dense_prev_feat.dtype)
+    return warped_5d.squeeze(0).permute(0, 3, 2, 1).contiguous()
 
 
 def build_sampling_grid(
