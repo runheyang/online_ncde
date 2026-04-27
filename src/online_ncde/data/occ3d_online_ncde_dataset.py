@@ -35,6 +35,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
         ray_sidecar_split: str | None = None,
         fast_frame_stride: int = 1,
         min_history_completeness: int | None = None,
+        eval_only_mode: bool = False,
     ) -> None:
         self.root_path = root_path
         self.info_path = resolve_path(root_path, info_path)
@@ -60,6 +61,19 @@ class Occ3DOnlineNcdeDataset(Dataset):
 
         with open(self.info_path, "rb") as f:
             payload = pickle.load(f)
+        # 拒绝 evolve_infos schema（start-anchored 评估专用），除非显式 eval_only_mode=True。
+        # 防止被误指给 train/eval_online_ncde 等入口：那些入口默认按 token=current keyframe 取
+        # GT/sup，对 start-anchored sample（token=start keyframe）会算到错位 GT。
+        _md = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+        schema_ver = str(_md.get("schema_version", ""))
+        if schema_ver == "online_ncde_evolve_infos_v1" and not eval_only_mode:
+            raise ValueError(
+                f"info_path={info_path} 是 start-anchored evolve_infos schema，"
+                "只能用 scripts/eval_online_ncde_evolution_times.py（传 eval_only_mode=True）评估。"
+                "其他入口（train / eval_online_ncde / stepwise）请使用 canonical_infos pkl，"
+                "否则会用 start keyframe 当 current GT 算出错位的 loss/mIoU。"
+            )
+        self._is_evolve_schema = schema_ver == "online_ncde_evolve_infos_v1"
         infos = payload["infos"] if isinstance(payload, dict) else payload
         self.infos: List[Dict[str, Any]] = [info for info in infos if info.get("valid", True)]
         # 训练默认只吃完整 2s 历史的样本，评估可以显式传 0 覆盖全集。
@@ -105,6 +119,8 @@ class Occ3DOnlineNcdeDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         info = self.infos[idx]
+        _ctx_scene = str(info.get("scene_name", ""))
+        _ctx_token = str(info.get("token", ""))
         device = torch.device("cpu")
         label_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -128,6 +144,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 raise ValueError(
                     f"fast_frame_stride={stride} 与 num_frames={num_full_frames} 不整除，"
                     "无法对齐 supervision_step_indices。"
+                    f" [scene={_ctx_scene} token={_ctx_token}]"
                 )
             info_view: Dict[str, Any] = dict(info)
             info_view["frame_rel_paths"] = frame_paths_src[::stride]
@@ -145,8 +162,32 @@ class Occ3DOnlineNcdeDataset(Dataset):
                     raise ValueError(
                         f"rollout_start_step={rss} 不是 fast_frame_stride={stride} 的整数倍，"
                         "无法对齐到抽帧后的 rollout step。"
+                        f" [scene={_ctx_scene} token={_ctx_token}]"
                     )
                 info_view["rollout_start_step"] = rss // stride
+            # evolve_infos schema：抽帧后同步重映射 step / num_real_frames，并切 mask
+            if "frame_valid_mask" in info_view:
+                info_view["frame_valid_mask"] = info["frame_valid_mask"][::stride]
+            if "num_real_frames" in info_view:
+                num_real = int(info_view["num_real_frames"])
+                if (num_real - 1) % stride != 0:
+                    raise ValueError(
+                        f"num_real_frames-1={num_real-1} 不是 fast_frame_stride={stride} 的整数倍。"
+                        f" [scene={_ctx_scene} token={_ctx_token}]"
+                    )
+                info_view["num_real_frames"] = (num_real - 1) // stride + 1
+            if "evolve_keyframe_step_indices" in info_view:
+                ek_steps = list(info["evolve_keyframe_step_indices"])
+                remapped: List[int] = []
+                for s in ek_steps:
+                    s_int = int(s)
+                    if s_int % stride != 0:
+                        raise ValueError(
+                            f"evolve_keyframe_step_indices={s_int} 不是 stride={stride} 的整数倍。"
+                            f" [scene={_ctx_scene} token={_ctx_token}]"
+                        )
+                    remapped.append(s_int // stride)
+                info_view["evolve_keyframe_step_indices"] = remapped
             info = info_view
 
         fast_logits = self.logits_loader.load_fast_logits(info, device)
@@ -289,5 +330,20 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 "supervision_labels": self.supervision_labels,
                 "rollout_start_step": rollout_start_step,
                 "history_completeness": history_completeness,
+                # evolve_infos schema：start-anchored 评估专用字段。旧 schema 下这些字段缺失，
+                # 调用方读 .get(...) 即可（评估脚本只在新 schema 下用）。
+                "num_real_frames": int(info.get("num_real_frames", num_frames)),
+                "max_evolve_keyframes": int(info.get("max_evolve_keyframes", -1)),
+                "evolve_keyframe_step_indices": list(
+                    info.get("evolve_keyframe_step_indices", [])
+                ),
+                "evolve_keyframe_sample_tokens": list(
+                    info.get("evolve_keyframe_sample_tokens", [])
+                ),
+                "evolve_keyframe_gt_exists": list(
+                    info.get("evolve_keyframe_gt_exists", [])
+                ),
+                "start_sample_token": str(info.get("start_sample_token", "")),
+                "start_keyframe_local_idx": int(info.get("start_keyframe_local_idx", -1)),
             },
         }

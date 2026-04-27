@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""按演化时长 T (默认 0.5/1.0/1.5/2.0s) 分桶评估 mIoU + RayIoU。
+"""按推演时长 T 分桶评估 mIoU + RayIoU（start-anchored 版本）。
 
-- 每个桶强制覆盖全部样本：短历史样本 fallback 到自身可达的最远演化（abs_step = num_frames-1）。
-- 走 collect-then-evaluate（一次性收集所有 (200,200,16) uint8 预测后批量算 RayIoU），
-  不依赖逐步累加器；不统计推理速度。
-- 输入 pkl 必须由 gen_online_ncde_canonical_infos.py --allow-short-history 生成（含短历史样本）。
+输入 pkl 必须由 gen_online_ncde_evolve_infos.py 生成（schema_version =
+online_ncde_evolve_infos_v1）。每个 sample 是「以某个 keyframe K_j 为 slow 锚 +
+往后推到 K_{j+max_evolve}」，max_evolve = min(history_keyframes, scene_end - j)。
+
+每个 sample 跑一次完整 forward，按 T 桶分发 step 输出：
+  - desired_step = round(T / dt_per_step)
+  - 若 desired_step > num_real_frames - 1（该 sample 推不到 T）：跳过该桶（无 fallback）
+  - 否则 pred = step_logits[step_indices == desired_step]，GT 取
+    evolve_keyframe_sample_tokens[desired_step // steps_per_kf] 对应的 keyframe GT
 """
 
 from __future__ import annotations
@@ -21,8 +26,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-torch.backends.cudnn.benchmark = True
-# 与 train 对齐：fp32 + TF32（PyTorch 1.12+ matmul TF32 默认关闭，需显式开）
+torch.backends.cudnn.benchmark = False
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -33,7 +37,6 @@ sys.path.append(str(ROOT / "src"))
 
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
 from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
@@ -49,8 +52,9 @@ except Exception:  # pragma: no cover
     progressbar = None
 
 
-DEFAULT_EVOLUTION_TIMES = "0.5,1.0,1.5,2.0"
+DEFAULT_EVOLUTION_TIMES = "0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0"
 DEFAULT_KEYFRAME_INTERVAL_SEC = 0.5
+EXPECTED_SCHEMA = "online_ncde_evolve_infos_v1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,29 +63,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", required=True, help="模型权重路径")
     p.add_argument("--limit", type=int, default=0, help="仅评估前 N 个样本，0 表示全量")
     p.add_argument("--batch-size", type=int, default=1,
-                   help="DataLoader batch_size；默认强制为 1（forward_stepwise_eval 要求 "
-                        "batch 内 rollout_start_step 一致，--allow-short-history 数据下连续样本"
-                        "几乎一定 mix h，bs>1 会直接 raise）。")
+                   help="DataLoader batch_size（默认 1）；start-anchored pkl 中所有 sample 的"
+                        "rss=0 且 num_output_frames 定长，bs>1 也合法但 num_real_frames 不同的"
+                        "sample 进同一 batch 时模型只能跑统一长度（pad 段无影响），bs=1 最稳。")
     p.add_argument("--solver", choices=["heun", "euler"], default="euler",
                    help="ODE 求解器；默认 euler（next-fast 单次求值）")
     p.add_argument("--evolution-times", default=DEFAULT_EVOLUTION_TIMES,
-                   help="逗号分隔，单位秒；默认 '0.5,1.0,1.5,2.0'")
+                   help="逗号分隔，单位秒；默认 '0.5,1.0,...,5.0'")
     p.add_argument("--keyframe-interval-sec", type=float, default=DEFAULT_KEYFRAME_INTERVAL_SEC,
                    help="单个 keyframe interval 时长，默认 0.5（NuScenes 2Hz）")
-    p.add_argument("--strict-no-fallback", action="store_true",
-                   help="关闭 fallback：每桶仅纳入有足够历史的样本，桶内 count 自然分布。"
-                        "默认 ON fallback：每桶覆盖全部样本。")
-    p.add_argument("--exclude-short-history", action="store_true",
-                   help="额外按 config.min_history_completeness 过滤短历史样本（与 stepwise 脚本一致）。"
-                        "默认不过滤，所有样本都参评。")
     p.add_argument("--no-rayiou", action="store_true", help="跳过 RayIoU 评估")
+    p.add_argument("--fallback", action=argparse.BooleanOptionalAction, default=True,
+                   help="启用 target-anchored fallback（默认 ON）：每个 keyframe K_target 在 T 桶下若没有"
+                        "推演时长正好 T 的 sample（即 target_idx<T*2），fallback 到 start=K_0 的"
+                        "sample 在 step target_idx*spi 处的输出（target_idx=0 时取 slow_logits）。"
+                        "开启后每桶覆盖全部 ~6017 keyframe。传 --no-fallback 关闭：每桶只评"
+                        "『真能推 T 秒』的样本。")
     p.add_argument("--val-info-path", default="",
-                   help="覆盖 data.val_info_path（空则沿用 config）")
-    p.add_argument("--nusc-dataroot", default="data/nuscenes",
-                   help="NuScenes dataroot（用于 frame_token -> key_frame 解析）")
+                   help="覆盖 data.val_info_path（应指向 evolve_infos pkl）")
+    p.add_argument("--nusc-dataroot", default="data/nuscenes", help="NuScenes dataroot")
     p.add_argument("--nusc-version", default="v1.0-trainval", help="NuScenes 版本")
     p.add_argument("--sweep-info-path", default="data/nuscenes/nuscenes_infos_val_sweep.pkl",
-                   help="sweep pkl 路径（用于 lidar origin 与 keyframe sample_token 集合）")
+                   help="sweep pkl 路径（用于 lidar origin 与 keyframe 校验）")
     p.add_argument("--dump-json", default="", help="可选：将结果写入 json")
     return p.parse_args()
 
@@ -93,7 +96,6 @@ def _to_json_number(v: float) -> float | None:
 
 
 def _to_json_safe(obj: Any) -> Any:
-    """递归把 numpy 标量/数组转成 Python 原生类型，避免 json.dump 报错。"""
     if isinstance(obj, dict):
         return {str(k): _to_json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -119,18 +121,29 @@ def main() -> None:
     evolution_times = [float(s) for s in args.evolution_times.split(",") if s.strip()]
     keyframe_interval = float(args.keyframe_interval_sec)
     print(f"[eval] evolution_times={evolution_times}s "
-          f"keyframe_interval={keyframe_interval}s "
-          f"fallback={'OFF' if args.strict_no_fallback else 'ON'}")
+          f"keyframe_interval={keyframe_interval}s")
 
     # === dataset ===
     logits_loader = build_logits_loader(data_cfg, root_path)
-    min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
-    print(f"[eval] min_history_completeness={min_hc}")
     info_path = args.val_info_path if args.val_info_path else data_cfg.get(
         "val_info_path", data_cfg["info_path"]
     )
     if args.val_info_path:
         print(f"[eval] --val-info-path 覆盖 -> {info_path}")
+    # 校验 schema：必须是 evolve_infos
+    info_path_abs = resolve_path(root_path, info_path)
+    import pickle
+    with open(info_path_abs, "rb") as f:
+        _payload = pickle.load(f)
+    _meta = _payload.get("metadata", {}) if isinstance(_payload, dict) else {}
+    schema_ver = str(_meta.get("schema_version", ""))
+    if schema_ver != EXPECTED_SCHEMA:
+        raise ValueError(
+            f"--val-info-path 的 schema_version={schema_ver!r}，"
+            f"本脚本只支持 {EXPECTED_SCHEMA}（由 gen_online_ncde_evolve_infos.py 生成）。"
+        )
+    del _payload, _meta
+
     dataset_full = Occ3DOnlineNcdeDataset(
         info_path=info_path,
         root_path=root_path,
@@ -141,7 +154,9 @@ def main() -> None:
         gt_mask_key=data_cfg["gt_mask_key"],
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
-        min_history_completeness=min_hc,
+        # evolve_infos 不参与 history-based 过滤（每个 sample 自己的 max_evolve 决定能进哪些桶）
+        min_history_completeness=0,
+        eval_only_mode=True,
     )
     if args.limit > 0:
         keep = min(args.limit, len(dataset_full))
@@ -150,7 +165,6 @@ def main() -> None:
         dataset = dataset_full
 
     num_workers = int(eval_cfg.get("num_workers", 4))
-    # 强制 bs=1：batch 内 rollout_start_step 不一致时 forward_stepwise_eval 会 raise
     batch_size = max(int(args.batch_size), 1)
     kwargs: dict[str, Any] = dict(
         batch_size=batch_size,
@@ -164,15 +178,15 @@ def main() -> None:
         kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
     loader = DataLoader(dataset, **kwargs)
 
-    # === 推断 dt_per_step（从 pkl 元信息） ===
+    # === 推断 dt_per_step（从 pkl 元信息 / 第一条 info） ===
     info0 = dataset_full.infos[0]
-    history_keyframes = int(info0.get("history_keyframes", 4))
+    history_keyframes = int(info0.get("history_keyframes", 10))
     stride = int(data_cfg.get("fast_frame_stride", 1))
     num_output_frames_canonical = int(info0.get("num_output_frames",
                                                 history_keyframes * info0.get("steps_per_interval", 1) + 1))
     if (num_output_frames_canonical - 1) % stride != 0:
         raise ValueError(
-            f"canonical num_output_frames-1={num_output_frames_canonical-1} 与 fast_frame_stride={stride} 不整除"
+            f"num_output_frames-1={num_output_frames_canonical-1} 与 fast_frame_stride={stride} 不整除"
         )
     num_frames = (num_output_frames_canonical - 1) // stride + 1
     if (num_frames - 1) % history_keyframes != 0:
@@ -184,24 +198,29 @@ def main() -> None:
     print(f"[eval] history_keyframes={history_keyframes} num_frames={num_frames} "
           f"steps_per_kf={steps_per_kf} dt_per_step={dt_per_step:.4f}s")
 
-    # 校验：所有 T 必须精确落在 step 网格上，且 desired_off 必须是 steps_per_kf 的正整数倍
-    # （否则 abs_step 会落到非 keyframe step，没有可用 GT，破坏“每桶覆盖全部样本”的语义）。
-    desired_offs: dict[float, int] = {}
+    # 校验：每个 T 必须落在 keyframe 网格（0.5s 倍数），同时换算到 keyframe distance T_x2
+    # （= T / keyframe_interval）。所有内部分桶用 T_x2 整数索引。
+    T_x2_to_T: dict[int, float] = {}
     grid_eps = 1e-6
     for T in evolution_times:
-        ratio = T / dt_per_step
-        d_off = int(round(ratio))
-        if abs(ratio - d_off) > grid_eps:
+        T_x2_f = T / keyframe_interval
+        T_x2 = int(round(T_x2_f))
+        if abs(T_x2_f - T_x2) > grid_eps:
             raise ValueError(
-                f"--evolution-times 中的 T={T}s 不在 step 网格上："
-                f"T/dt_per_step={ratio} 不是整数（dt_per_step={dt_per_step:.4f}s）。"
+                f"--evolution-times T={T}s 不在 keyframe 网格上："
+                f"T/{keyframe_interval}={T_x2_f} 不是整数。"
             )
-        if d_off <= 0 or d_off % steps_per_kf != 0:
+        if T_x2 <= 0:
+            raise ValueError(f"T={T}s 必须 > 0。")
+        if T_x2 > history_keyframes:
             raise ValueError(
-                f"--evolution-times 中的 T={T}s 对应 desired_off={d_off}，"
-                f"必须是 steps_per_kf={steps_per_kf} 的正整数倍（dt_per_step={dt_per_step:.4f}s）。"
+                f"T={T}s 对应 T_x2={T_x2} 超出 history_keyframes={history_keyframes}（pkl 不支持该长度）。"
             )
-        desired_offs[T] = d_off
+        T_x2_to_T[T_x2] = T
+    T_x2_set = set(T_x2_to_T.keys())
+    max_T_x2 = max(T_x2_set)
+    print(f"[eval] T_x2 集合: {sorted(T_x2_set)} (max={max_T_x2})")
+    print(f"[eval] fallback={'ON (target-anchored，每桶 ~6017 个评估单元)' if args.fallback else 'OFF (每桶只评真能推 T 秒的 sample)'}")
 
     # === model ===
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
@@ -228,14 +247,9 @@ def main() -> None:
     load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
     model.eval()
 
-    # === keyframe resolver / sweep origins ===
-    nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)
+    # === sweep origins for RayIoU ===
+    nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)  # noqa: F841 (保留以便将来扩展)
     sweep_info_path = resolve_path(root_path, args.sweep_info_path)
-    keyframe_resolver = NuScenesKeyFrameResolver(
-        dataroot=nusc_dataroot,
-        version=args.nusc_version,
-        sweep_info_path=sweep_info_path,
-    )
     enable_rayiou = not args.no_rayiou
     origins_by_token: dict[str, Any] = {}
     if enable_rayiou:
@@ -249,13 +263,12 @@ def main() -> None:
     class_names = MetricMiouOcc3D(num_classes=num_classes).class_names
 
     # === 推理 + 收集 buckets ===
-    # buckets[T] -> list of dict(pred uint8 (X,Y,Z), token, scene, abs_step, rss, is_fallback)
+    # buckets[T] -> list of dict(pred uint8 (X,Y,Z), token, scene, source ∈ {'main', 'fallback'})
     buckets: dict[float, list[dict[str, Any]]] = {T: [] for T in evolution_times}
-    no_scene_count = 0
-    no_frame_tokens_count = 0
-    skip_no_keyframe_token: dict[float, int] = defaultdict(int)
-    fallback_count: dict[float, int] = defaultdict(int)
+    skip_too_short: dict[float, int] = defaultdict(int)
+    skip_no_gt_token: dict[float, int] = defaultdict(int)
     real_count: dict[float, int] = defaultdict(int)
+    fallback_count: dict[float, int] = defaultdict(int)
 
     total_steps = len(loader)
     iterator = (
@@ -267,104 +280,132 @@ def main() -> None:
     with torch.inference_mode():
         for batch_idx, sample in enumerate(iterator, start=1):
             sample = move_to_device(sample, device)
-            # 前置检查：bs>1 时 batch 内 rss 必须一致，否则 forward_stepwise_eval 会 raise
-            rss_tensor = sample.get("rollout_start_step", None)
-            if rss_tensor is not None and rss_tensor.numel() > 1:
-                rss_unique = torch.unique(rss_tensor).tolist()
-                if len(rss_unique) > 1:
-                    raise RuntimeError(
-                        f"batch 内 rollout_start_step 不一致：{rss_tensor.tolist()}；"
-                        "本脚本 batch 不支持混合短/长历史样本，请使用 --batch-size 1。"
-                    )
+            # bs=1 时按 num_real_frames 截断输入，避免模型在 pad 段做无意义的 ODE step
+            # （compute_segment_dt 内部 clamp_min(eps)，pad 段并非真零，会推一点点）。
+            # bs>1 时各样本 num_real 可能不同，这里走完整 num_frames，pad 段输出会被 meta
+            # 的 num_real_frames 过滤掉，但模型仍会跑满，浪费一些算力。
+            B_in = sample["fast_logits"].shape[0]
+            fast_in = sample["fast_logits"]
+            slow_in = sample["slow_logits"]
+            ego_in = sample["frame_ego2global"]
+            ts_in = sample.get("frame_timestamps", None)
+            dt_in = sample.get("frame_dt", None)
+            if B_in == 1:
+                meta_b0 = cast(list[dict[str, Any]], sample["meta"])[0]
+                n_real = int(meta_b0.get("num_real_frames", fast_in.shape[1]))
+                if 0 < n_real < fast_in.shape[1]:
+                    fast_in = fast_in[:, :n_real]
+                    ego_in = ego_in[:, :n_real]
+                    if ts_in is not None:
+                        ts_in = ts_in[:, :n_real]
+                    if dt_in is not None:
+                        dt_in = dt_in[:, :n_real]
             outputs = model.forward_stepwise_eval(
-                fast_logits=sample["fast_logits"],
-                slow_logits=sample["slow_logits"],
-                frame_ego2global=sample["frame_ego2global"],
-                frame_timestamps=sample.get("frame_timestamps", None),
-                frame_dt=sample.get("frame_dt", None),
+                fast_logits=fast_in,
+                slow_logits=slow_in,
+                frame_ego2global=ego_in,
+                frame_timestamps=ts_in,
+                frame_dt=dt_in,
                 rollout_start_step=sample.get("rollout_start_step", None),
             )
             step_logits = cast(torch.Tensor, outputs["step_logits"])  # (B, S, C, X, Y, Z)
-            # argmax → uint8 → CPU，省内存
             step_preds = step_logits.argmax(dim=2).to(torch.uint8).cpu().numpy()  # (B, S, X, Y, Z)
-            step_indices_arr = cast(torch.Tensor, outputs["step_indices"]).detach().cpu().numpy()  # (S,)
+            step_indices_arr = cast(torch.Tensor, outputs["step_indices"]).detach().cpu().numpy()
             step_idx_to_local = {int(v): i for i, v in enumerate(step_indices_arr)}
+            # slow_logits.argmax 用作 fallback 路径里 distance=0 (target=K_0) 的预测
+            slow_preds = slow_in.argmax(dim=1).to(torch.uint8).cpu().numpy()  # (B, X, Y, Z)
 
             B = step_preds.shape[0]
-            if rss_tensor is None:
-                rss_batch = np.zeros((B,), dtype=np.int64)
-            else:
-                rss_batch = rss_tensor.detach().cpu().numpy()
             meta_list = cast(list[dict[str, Any]], sample["meta"])
 
             for b in range(B):
                 meta = meta_list[b]
-                rss_b = int(rss_batch[b])
+                num_real = int(meta.get("num_real_frames", num_frames))
+                max_real_step = num_real - 1  # 该 sample 真实段最末 abs_step（抽帧后坐标）
+                ek_step_indices = list(meta.get("evolve_keyframe_step_indices", []))
+                ek_sample_tokens = list(meta.get("evolve_keyframe_sample_tokens", []))
+                ek_gt_exists = list(meta.get("evolve_keyframe_gt_exists", []))
                 scene_name = str(meta.get("scene_name", ""))
-                frame_tokens_raw = meta.get("frame_tokens", [])
-                frame_tokens = [str(tok) for tok in frame_tokens_raw] if frame_tokens_raw else []
-                if not scene_name:
-                    no_scene_count += 1
-                    continue
-                if not frame_tokens:
-                    no_frame_tokens_count += 1
-                    continue
+                start_kf_idx = int(meta.get("start_keyframe_local_idx", -1))
+                max_evolve = int(meta.get("max_evolve_keyframes", -1))
 
-                keyframe_steps = keyframe_resolver.resolve_keyframe_steps(frame_tokens)
-                # rss 必须落在 keyframe 边界，否则 abs_step = rss + chosen_off 会脱离 keyframe step
-                assert rss_b % steps_per_kf == 0, \
-                    f"rollout_start_step={rss_b} 不是 steps_per_kf={steps_per_kf} 的整数倍"
-                max_off = (num_frames - 1) - rss_b  # >= 0
+                if not ek_step_indices or not ek_sample_tokens:
+                    raise RuntimeError(
+                        "meta 缺少 evolve_keyframe_step_indices / sample_tokens；"
+                        "请确认 pkl 是 evolve_infos_v1 schema。"
+                    )
+                if max_evolve < 0 or start_kf_idx < 0:
+                    raise RuntimeError(
+                        "meta 缺少 max_evolve_keyframes / start_keyframe_local_idx。"
+                    )
 
-                for T in evolution_times:
-                    desired_off = desired_offs[T]
-                    # strict 模式：desired_off 超出可达范围（含 max_off==0）一律跳过
-                    if args.strict_no_fallback and desired_off > max_off:
-                        continue
-                    if max_off == 0:
-                        # h=0 退化分支：forward_stepwise_eval 只返回 1 个 step（slow_logits）
-                        abs_step = num_frames - 1
-                        assert abs_step in step_idx_to_local, \
-                            f"h=0 退化分支应包含 abs_step={abs_step}，实际 step_indices={step_indices_arr}"
-                        local_idx = step_idx_to_local[abs_step]
-                        is_fallback = True
+                def _emit(T: float, dist: int, source: str) -> None:
+                    """发射一个 (target=K_{start+dist}, T) 评估单元到桶里。"""
+                    if dist >= len(ek_sample_tokens):
+                        return
+                    if dist < len(ek_gt_exists) and not bool(ek_gt_exists[dist]):
+                        skip_no_gt_token[T] += 1
+                        return
+                    target_token = str(ek_sample_tokens[dist])
+                    if not target_token:
+                        skip_no_gt_token[T] += 1
+                        return
+                    if dist == 0:
+                        pred = slow_preds[b]
                     else:
-                        chosen_off = min(desired_off, max_off)
-                        abs_step = rss_b + chosen_off
-                        assert abs_step in step_idx_to_local, \
-                            f"abs_step={abs_step} 不在 step_indices={step_indices_arr}（rss={rss_b}）"
-                        local_idx = step_idx_to_local[abs_step]
-                        is_fallback = (chosen_off != desired_off)
-
-                    sample_token = keyframe_steps.get(abs_step, None)
-                    if sample_token is None:
-                        skip_no_keyframe_token[T] += 1
-                        continue
-
-                    # 显式拷贝避免持有整块 step_preds tensor 的 base view，
-                    # 让每条 bucket item 真正只占 ~640KB
-                    pred_arr = np.ascontiguousarray(step_preds[b, local_idx])  # (X, Y, Z) uint8
+                        step = ek_step_indices[dist] if dist < len(ek_step_indices) else (dist * steps_per_kf)
+                        step_int = int(step)
+                        if step_int not in step_idx_to_local:
+                            raise RuntimeError(
+                                f"step={step_int} 不在模型 step_indices={step_indices_arr}"
+                                f" [scene={scene_name} start_idx={start_kf_idx}]"
+                            )
+                        local_idx = step_idx_to_local[step_int]
+                        pred = step_preds[b, local_idx]
                     buckets[T].append({
-                        "pred": pred_arr,
-                        "token": sample_token,
+                        "pred": np.ascontiguousarray(pred),
+                        "token": target_token,
                         "scene": scene_name,
                     })
-                    if is_fallback:
-                        fallback_count[T] += 1
-                    else:
+                    if source == "main":
                         real_count[T] += 1
+                    else:
+                        fallback_count[T] += 1
+
+                # 主路径：每个 d ∈ [1, max_evolve] 贡献到 T_x2=d 桶
+                # （target = K_{start+d}, sample 自身能整步推到 d 个 keyframe）
+                for d in range(1, max_evolve + 1):
+                    if d not in T_x2_set:
+                        continue
+                    # 确认 d 对应的 step 在 num_real_frames 内（应该总成立，因为 d ≤ max_evolve）
+                    step_d = d * steps_per_kf
+                    if step_d > max_real_step:
+                        skip_too_short[T_x2_to_T[d]] += 1
+                        continue
+                    _emit(T_x2_to_T[d], d, "main")
+
+                # fallback 路径：仅 start=K_0 的 sample 触发；为 target_idx ∈ [0, max_evolve] 提供
+                # T_x2 > target_idx 桶下的预测。
+                # （target_idx=0 时取 slow_logits；target_idx=k>0 时取 step k*spi 输出，
+                # 即「以 K_0 为 start 推演 k 个 keyframe 到 K_k」。这就是 K_k 在更长 T 桶下的
+                # 「能找到的最早 start 推到 K_k」的输出。）
+                if args.fallback and start_kf_idx == 0:
+                    for d in range(0, max_evolve + 1):
+                        # 主路径覆盖 T_x2 = d；fallback 覆盖 T_x2 > d
+                        for T_x2 in range(max(d, 0) + 1, max_T_x2 + 1):
+                            if T_x2 not in T_x2_set:
+                                continue
+                            _emit(T_x2_to_T[T_x2], d, "fallback")
 
             if progressbar is None and (batch_idx % log_interval == 0 or batch_idx == total_steps):
                 print(f"[eval evol-times] batch={batch_idx}/{total_steps}")
 
-    print(f"[meta] no_scene={no_scene_count} no_frame_tokens={no_frame_tokens_count}")
     for T in evolution_times:
         print(f"[bucket T={T}s] collected={len(buckets[T])} "
-              f"real={real_count[T]} fallback={fallback_count[T]} "
-              f"no_keyframe_token={skip_no_keyframe_token[T]}")
+              f"main={real_count[T]} fallback={fallback_count[T]} "
+              f"too_short={skip_too_short[T]} no_gt_token={skip_no_gt_token[T]}")
 
     # === 逐桶评估 mIoU + RayIoU ===
-    # GT 缓存：(scene, token) → (semantics, mask)，跨桶共享
     gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] = {}
 
     def load_gt(scene: str, token: str) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -439,8 +480,10 @@ def main() -> None:
 
         summary[str(T)] = {
             "num_collected": int(len(items)),
-            "num_real": int(real_count[T]),
+            "num_main": int(real_count[T]),
             "num_fallback": int(fallback_count[T]),
+            "num_too_short": int(skip_too_short[T]),
+            "num_no_gt_token": int(skip_no_gt_token[T]),
             "num_miou_samples": int(metric.cnt),
             "miou": _to_json_number(miou),
             "miou_d": _to_json_number(miou_d),
@@ -450,7 +493,7 @@ def main() -> None:
             "missing_gt": int(missing_gt),
             "missing_origin": int(missing_origin),
         }
-        # 释放本桶的 preds 引用，下一桶进入前回收
+        # 释放本桶引用
         items.clear()
 
     if args.dump_json:
@@ -463,14 +506,9 @@ def main() -> None:
             "history_keyframes": history_keyframes,
             "num_frames": num_frames,
             "steps_per_kf": steps_per_kf,
-            "strict_no_fallback": bool(args.strict_no_fallback),
-            "exclude_short_history": bool(args.exclude_short_history),
+            "schema": EXPECTED_SCHEMA,
+            "fallback_enabled": bool(args.fallback),
             "buckets": summary,
-            "meta": {
-                "no_scene": int(no_scene_count),
-                "no_frame_tokens": int(no_frame_tokens_count),
-                "skip_no_keyframe_token": {str(k): int(v) for k, v in skip_no_keyframe_token.items()},
-            },
         }
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
