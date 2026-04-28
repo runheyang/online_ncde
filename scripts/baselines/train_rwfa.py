@@ -8,7 +8,7 @@ _fast_kl_active 协议），trainer 内部不需要任何分支改动。
 
 精简掉的功能（baseline 实验场景一般不需要，需要时再扩）：
   - DDP（单卡训完即可）
-  - wandb / 分箱 RayIoU / metrics json
+  - 分箱 RayIoU / metrics json
 
 CLI 与 train_online_ncde.py 兼容子集：相同 config 文件可直接复用，model 段
 新增字段 fusion_inner_dim / fusion_body_dilations / fusion_attn_* 走默认即可。
@@ -56,6 +56,11 @@ from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 from online_ncde.utils.ema import ModelEMA  # noqa: E402
 from online_ncde.utils.reproducibility import set_seed  # noqa: E402
 
+try:
+    import wandb
+except Exception:  # pragma: no cover
+    wandb = None
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -81,6 +86,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ray-override", type=str, default="", help="JSON 覆盖 loss.ray")
     parser.add_argument("--fast-logits-root", type=str, default=None, help="覆盖 data.fast_logits_root")
     parser.add_argument("--no-rayiou", action="store_true", help="评估时跳过 RayIoU（更快）")
+    parser.add_argument("--wandb", action="store_true", help="启用 wandb")
+    parser.add_argument("--wandb-new-run", action="store_true",
+                        help="忽略 checkpoint 里的 wandb_run_id，强制新建 run")
     return parser.parse_args()
 
 
@@ -143,6 +151,7 @@ def main() -> None:
     train_cfg = cfg["train"]
     eval_cfg = cfg.get("eval", {})
     loader_cfg = cfg.get("dataloader", {})
+    wandb_cfg = cfg.get("wandb", {})
 
     logits_loader = build_logits_loader(data_cfg, root_path)
     train_dataset = build_dataset(
@@ -174,9 +183,13 @@ def main() -> None:
 
     start_epoch = 1
     resumed_payload = None
+    resumed_wandb_id = None
     if args.resume:
         resumed_payload = load_checkpoint(args.resume, model=model, optimizer=None, strict=False)
         start_epoch = resumed_payload.get("epoch", 0) + 1
+        resumed_wandb_id = resumed_payload.get("wandb_run_id", None)
+        if args.wandb_new_run:
+            resumed_wandb_id = None
         print(f"[resume] 从 epoch={start_epoch} 继续训练")
 
     ema = None
@@ -260,6 +273,32 @@ def main() -> None:
     os.makedirs(output_dir, exist_ok=True)
     print(f"[ckpt] output_dir: {output_dir}")
 
+    # --- wandb 初始化：resume 时续接同一个 run ---
+    run = None
+    if args.wandb:
+        if wandb is None:
+            raise ImportError("未安装 wandb，无法启用日志。")
+        wandb_kwargs = dict(
+            entity=wandb_cfg.get("entity", "runheyang"),
+            project=wandb_cfg.get("project", "neural-ode"),
+            config={
+                "model_kind": args.model_kind,
+                "epochs": int(train_cfg["epochs"]),
+                "batch_size": int(train_cfg["batch_size"]),
+                "lr": float(train_cfg["lr"]),
+                "weight_decay": float(train_cfg["weight_decay"]),
+            },
+        )
+        if resumed_wandb_id:
+            wandb_kwargs["id"] = resumed_wandb_id
+            wandb_kwargs["resume"] = "allow"
+        else:
+            wandb_kwargs["name"] = wandb_cfg.get("name", "") or datetime.now().strftime("%Y%m%d_%H%M%S")
+        run = wandb.init(**wandb_kwargs)
+        run.define_metric("epoch")
+        run.define_metric("train/*", step_metric="epoch")
+        run.define_metric("val/*", step_metric="epoch")
+
     train_loader = DataLoader(train_dataset, **train_loader_kwargs)
     val_loader = DataLoader(val_dataset, **val_loader_kwargs) if val_dataset is not None else None
 
@@ -298,7 +337,14 @@ def main() -> None:
             f"{kl_text}{ray_text}{sup_text}"
         )
 
-        if val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
+        should_eval = val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0
+        if run is not None:
+            train_payload = {f"train/{k}": float(v) for k, v in train_metrics.items()
+                             if isinstance(v, (int, float))}
+            train_payload["epoch"] = float(epoch)
+            run.log(train_payload, commit=not should_eval)
+
+        if should_eval:
             val_metrics = trainer.evaluate(val_loader, collect_predictions=enable_rayiou)
             _cleanup_gpu_cache()
             val_sup = " ".join(
@@ -342,9 +388,36 @@ def main() -> None:
                         f"@4={rayiou_result['RayIoU@4']:.4f}"
                     )
 
+            if run is not None:
+                payload = {"epoch": float(epoch)}
+                for key in ("loss", "focal", "aux", "miou", "miou_d"):
+                    value = to_float(val_metrics.get(key, None))
+                    if value is not None:
+                        payload[f"val/{key}"] = value
+                for key, value in val_metrics.items():
+                    if isinstance(key, str) and key.startswith("sup_loss_t"):
+                        score = to_float(value)
+                        if score is not None:
+                            payload[f"val/{key}"] = score
+                if isinstance(class_names, list) and isinstance(per_class, list):
+                    for name, value in zip(class_names, per_class):
+                        score = to_float(value)
+                        if score is not None:
+                            payload[f"val/iou_{name}"] = score
+                if rayiou_result is not None:
+                    for key in ("RayIoU", "RayIoU@1", "RayIoU@2", "RayIoU@4"):
+                        payload[f"val/{key}"] = float(rayiou_result[key])
+                run.log(payload, commit=True)
+
         ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
-        trainer.save_checkpoint(ckpt_path, epoch=epoch)
+        ckpt_extra = {}
+        if run is not None:
+            ckpt_extra["wandb_run_id"] = run.id
+        trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
         print(f"[ckpt] saved -> {ckpt_path}")
+
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":
