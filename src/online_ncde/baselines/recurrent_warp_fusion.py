@@ -16,7 +16,7 @@ forward / forward_stepwise_eval 接口签名与 OnlineNcdeAligner 一致，
 from __future__ import annotations
 
 import time
-from typing import Dict, Tuple, cast
+from typing import Dict, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -302,7 +302,7 @@ class RecurrentWarpFusionAligner(nn.Module):
         free_index: int,
         pc_range: Tuple[float, float, float, float, float, float],
         voxel_size: Tuple[float, float, float],
-        decoder_init_scale: float = 0.0,
+        decoder_init_scale: Optional[float] = 0.0,
         use_fast_residual: bool = True,
         fusion_kind: str = "conv",
         fusion_inner_dim: int = 32,

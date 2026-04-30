@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch.nn as nn
 
 from online_ncde.utils.nn import resolve_group_norm_groups
@@ -11,13 +13,19 @@ class DenseDecoder(nn.Module):
     """全分辨率解码器：3x3x3 卷积 → depthwise (1,3,3) 卷积 → 1x1x1 映射到 logits。
 
     三段式结构：语义增强 → XY 方向细化 → pointwise 输出。
+
+    init_scale 语义：
+      - None：输出头走 PyTorch Conv3d 默认初始化（Kaiming uniform），
+        适用于 decoder 直接产出绝对 logits（无残差）的场景。
+      - <= 0：权重/bias 全置零，残差范式下首步输出 = 0。
+      - > 0：权重以 std=init_scale 的正态采样，bias 置零，残差范式下首步输出近 0。
     """
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        init_scale: float = 1.0e-6,
+        init_scale: Optional[float] = 1.0e-6,
         gn_groups: int = 8,
     ) -> None:
         super().__init__()
@@ -45,8 +53,10 @@ class DenseDecoder(nn.Module):
         self.out_conv = nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=True)
         self._init_output(init_scale)
 
-    def _init_output(self, init_scale: float) -> None:
-        """残差范式下将输出头接近置零。"""
+    def _init_output(self, init_scale: Optional[float]) -> None:
+        """init_scale=None 走 PyTorch 默认；<=0 全零；>0 小方差正态。"""
+        if init_scale is None:
+            return
         if init_scale <= 0.0:
             nn.init.constant_(self.out_conv.weight, 0.0)
             if self.out_conv.bias is not None:

@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ray-override", type=str, default="", help="JSON 覆盖 loss.ray")
     parser.add_argument("--fast-logits-root", type=str, default=None, help="覆盖 data.fast_logits_root")
     parser.add_argument("--no-rayiou", action="store_true", help="评估时跳过 RayIoU（更快）")
+    parser.add_argument(
+        "--use-fast-residual",
+        action="store_true",
+        help="开启 fast logits 残差连接（默认关闭：decoder 直接输出对齐结果）",
+    )
     parser.add_argument("--wandb", action="store_true", help="启用 wandb")
     parser.add_argument("--wandb-new-run", action="store_true",
                         help="忽略 checkpoint 里的 wandb_run_id，强制新建 run")
@@ -98,9 +103,24 @@ def _cleanup_gpu_cache() -> None:
         torch.cuda.empty_cache()
 
 
-def _build_model(model_kind: str, model_cfg: dict, data_cfg: dict, device: torch.device) -> RecurrentWarpFusionAligner:
-    """根据 fusion_kind 构造 RWFA。conv/attn 共用同一个 Aligner 类。"""
+def _build_model(
+    model_kind: str,
+    model_cfg: dict,
+    data_cfg: dict,
+    device: torch.device,
+    use_fast_residual: bool,
+) -> RecurrentWarpFusionAligner:
+    """根据 fusion_kind 构造 RWFA。conv/attn 共用同一个 Aligner 类。
+
+    use_fast_residual=False 时，decoder 走 PyTorch 默认初始化（直接输出绝对 logits）；
+    True 时沿用残差范式默认（init_scale=1e-3，输出 ≈ 残差）。
+    """
     fusion_kind = "conv" if model_kind == "rwfa-conv" else "attn"
+    if use_fast_residual:
+        decoder_init_scale = model_cfg.get("decoder_init_scale", 1.0e-3)
+    else:
+        # 无残差：decoder 必须输出完整 logits，走 PyTorch Conv3d 默认初始化
+        decoder_init_scale = None
     return RecurrentWarpFusionAligner(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
@@ -109,8 +129,8 @@ def _build_model(model_kind: str, model_cfg: dict, data_cfg: dict, device: torch
         free_index=data_cfg["free_index"],
         pc_range=tuple(data_cfg["pc_range"]),
         voxel_size=tuple(data_cfg["voxel_size"]),
-        decoder_init_scale=model_cfg.get("decoder_init_scale", 1.0e-3),
-        use_fast_residual=bool(model_cfg.get("use_fast_residual", True)),
+        decoder_init_scale=decoder_init_scale,
+        use_fast_residual=use_fast_residual,
         fusion_kind=fusion_kind,
         fusion_inner_dim=int(model_cfg.get("fusion_inner_dim", 32)),
         fusion_body_dilations=tuple(model_cfg.get("fusion_body_dilations", [1, 2, 3])),
@@ -177,9 +197,13 @@ def main() -> None:
             val_dataset = Subset(val_dataset, val_indices)
 
     device = torch.device(train_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
-    model = _build_model(args.model_kind, model_cfg, data_cfg, device)
+    model = _build_model(
+        args.model_kind, model_cfg, data_cfg, device,
+        use_fast_residual=args.use_fast_residual,
+    )
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[model] kind={args.model_kind} params={n_params}")
+    residual_text = "on" if args.use_fast_residual else "off"
+    print(f"[model] kind={args.model_kind} params={n_params} fast_residual={residual_text}")
 
     start_epoch = 1
     resumed_payload = None
