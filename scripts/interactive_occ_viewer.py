@@ -598,6 +598,11 @@ class OccViewer(QtWidgets.QMainWindow):
         self.reset_view_btn.clicked.connect(self._reset_views)
         tb.addWidget(self.reset_view_btn)
 
+        self.ego_toggle = QtWidgets.QCheckBox("显示自车")
+        self.ego_toggle.setChecked(True)
+        self.ego_toggle.toggled.connect(self._on_toggle_ego_visible)
+        tb.addWidget(self.ego_toggle)
+
         self.save_btn = QtWidgets.QPushButton("💾 保存大图")
         self.save_btn.clicked.connect(self._on_save_composite)
         tb.addWidget(self.save_btn)
@@ -829,6 +834,17 @@ class OccViewer(QtWidgets.QMainWindow):
             figure=fig,
         )
         self._ego_actors[key] = [sphere, arrow]
+        # 新画的 marker 也要遵循当前 toggle 状态（切样本时不会突然又显示出来）
+        if not self._is_ego_visible():
+            for a in self._ego_actors[key]:
+                try:
+                    a.visible = False
+                except Exception:
+                    pass
+
+    def _is_ego_visible(self) -> bool:
+        toggle = getattr(self, "ego_toggle", None)
+        return True if toggle is None else bool(toggle.isChecked())
 
     def _set_ego_visible(self, visible: bool) -> None:
         for actors in self._ego_actors.values():
@@ -837,6 +853,14 @@ class OccViewer(QtWidgets.QMainWindow):
                     a.visible = bool(visible)
                 except Exception:
                     pass
+
+    def _on_toggle_ego_visible(self, checked: bool) -> None:
+        self._set_ego_visible(checked)
+        for k in PANEL_KEYS:
+            try:
+                self._panels[k].scene.scene.render()
+            except Exception:
+                pass
 
     # ---------- 按钮：运行 aligner ----------
     def _on_run_aligner(self) -> None:
