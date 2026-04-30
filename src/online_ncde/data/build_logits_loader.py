@@ -9,6 +9,7 @@ from online_ncde.data.logits_loader import (
     CompositeLogitsLoader,
     LogitsLoader,
     OpusSparseFullLoader,
+    OpusSparseTopkLoader,
 )
 
 
@@ -70,6 +71,25 @@ def build_logits_loader(
             free_index=int(data_cfg["free_index"]),
             grid_size=tuple(data_cfg["grid_size"]),
             topk_k=int(data_cfg.get("opus_full_topk_k", 3)),
+            other_fill_value=float(data_cfg.get("opus_other_fill_value", -5.0)),
+            free_fill_value=float(data_cfg.get("opus_free_fill_value", 5.0)),
+        )
+
+    if logits_format == "opus_sparse_topk":
+        fast_logits_root = data_cfg.get("fast_logits_root", "")
+        slow_logit_root = data_cfg.get("slow_logit_root", "")
+        if not fast_logits_root or not slow_logit_root:
+            raise KeyError(
+                "logits_format=opus_sparse_topk 时，"
+                "data.fast_logits_root 和 data.slow_logit_root 为必填项。"
+            )
+        return OpusSparseTopkLoader(
+            root_path=root_path,
+            fast_logits_root=fast_logits_root,
+            slow_logit_root=slow_logit_root,
+            num_classes=int(data_cfg["num_classes"]),
+            free_index=int(data_cfg["free_index"]),
+            grid_size=tuple(data_cfg["grid_size"]),
             other_fill_value=float(data_cfg.get("opus_other_fill_value", -5.0)),
             free_fill_value=float(data_cfg.get("opus_free_fill_value", 5.0)),
         )

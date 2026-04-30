@@ -30,8 +30,9 @@ from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
 from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
+from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
+from online_ncde.metrics import MetricMiouOcc3D, build_miou_metric  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
 from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator  # noqa: E402
@@ -119,14 +120,10 @@ def main() -> None:
     info_path = args.val_info_path if args.val_info_path else data_cfg.get("val_info_path", data_cfg["info_path"])
     if args.val_info_path:
         print(f"[eval] --val-info-path 覆盖 data.val_info_path -> {info_path}")
-    dataset = Occ3DOnlineNcdeDataset(
+    dataset = build_online_ncde_dataset(
+        data_cfg,
         info_path=info_path,
         root_path=root_path,
-        gt_root=data_cfg["gt_root"],
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        gt_mask_key=data_cfg["gt_mask_key"],
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
         min_history_completeness=min_hc,
@@ -184,10 +181,10 @@ def main() -> None:
     num_classes = int(data_cfg["num_classes"])
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
-    class_names = MetricMiouOcc3D(num_classes=num_classes).class_names
+    class_names = build_miou_metric(num_classes=num_classes).class_names
 
     per_step_metrics: dict[int, MetricMiouOcc3D] = {}
-    metric_all = MetricMiouOcc3D(
+    metric_all = build_miou_metric(
         num_classes=num_classes,
         use_image_mask=True,
         use_lidar_mask=False,
@@ -300,7 +297,7 @@ def main() -> None:
 
                     metric = per_step_metrics.setdefault(
                         step_idx,
-                        MetricMiouOcc3D(
+                        build_miou_metric(
                             num_classes=num_classes,
                             use_image_mask=True,
                             use_lidar_mask=False,

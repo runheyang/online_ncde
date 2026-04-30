@@ -39,6 +39,11 @@ def decode_sparse_topk(
     num_frames = int(frame_splits.shape[0] - 1)
     use_device = device or torch.device("cpu")
 
+    # torch.from_numpy 不支持 uint16（OpenOccupancy 大网格的 sparse_coords dtype），
+    # 在最外层统一升宽到 int32 后再切片，避免逐帧重复转换。
+    if sparse_coords.dtype == np.uint16:
+        sparse_coords = sparse_coords.astype(np.int32, copy=False)
+
     outputs: list[torch.Tensor] = []
     for t in range(num_frames):
         start = int(frame_splits[t])
@@ -118,6 +123,10 @@ def decode_sparse_full(
             "sparse_values 维度异常，"
             f"期望第二维为 {len(semantic_indices)}，实际为 {tuple(sparse_values.shape)}"
         )
+
+    # uint16 → int32（torch.from_numpy 不支持 uint16）。
+    if sparse_coords.dtype == np.uint16:
+        sparse_coords = sparse_coords.astype(np.int32, copy=False)
 
     outputs: list[torch.Tensor] = []
     for t in range(num_frames):

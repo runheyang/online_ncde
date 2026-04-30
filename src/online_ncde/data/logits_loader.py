@@ -16,6 +16,13 @@ from online_ncde.data.logits_io import (
 )
 
 
+def _resolve_relative(root_path: str, logits_root: str, rel_path: str) -> str:
+    """统一拼接 logits 文件路径。"""
+    if not rel_path:
+        raise ValueError("rel_path 为空，无法定位 logits 文件")
+    return resolve_path(root_path, os.path.join(logits_root, rel_path))
+
+
 class LogitsLoader(ABC):
     """logits 加载策略接口。
 
@@ -274,6 +281,98 @@ class OpusSparseFullLoader(LogitsLoader):
         """加载慢系统单帧 logits，返回 (C, X, Y, Z)。"""
         rel_path = info["slow_logit_path"]
         full_path = self._resolve(self.slow_logit_root, rel_path)
+        return self._decode_frame(full_path, device)
+
+
+class OpusSparseTopkLoader(LogitsLoader):
+    """OPUS 逐帧 sparse top-k logits 加载器（OpenOccupancy 等 top-3 已落盘场景）。
+
+    每帧 npz 包含：
+      - sparse_coords:        (N, 3) uint8/uint16 —— 体素坐标（OO 大网格用 uint16）
+      - sparse_topk_values:   (N, K) float16     —— 按值降序的 top-K logits
+      - sparse_topk_indices:  (N, K) uint8       —— 对应的类别索引（< num_sem_classes）
+
+    decode：
+      1. 命中 voxel：top-K 类位置写 clamp_min(other_fill_value) 后的 logit；其余非 free 类填 other_fill_value。
+      2. 未命中 voxel：free 类置 free_fill_value，其余类填 other_fill_value。
+      3. uint16 坐标在 decode 内部统一 long-cast，无需额外处理。
+    """
+
+    def __init__(
+        self,
+        root_path: str,
+        fast_logits_root: str,
+        slow_logit_root: str,
+        num_classes: int,
+        free_index: int,
+        grid_size: Tuple[int, int, int],
+        other_fill_value: float = -5.0,
+        free_fill_value: float = 5.0,
+    ) -> None:
+        self.root_path = root_path
+        self.fast_logits_root = fast_logits_root
+        self.slow_logit_root = slow_logit_root
+        self.num_classes = int(num_classes)
+        self.free_index = int(free_index)
+        self.grid_size = tuple(grid_size)
+        self.other_fill_value = float(other_fill_value)
+        self.free_fill_value = float(free_fill_value)
+
+    def _decode_frame(self, path: str, device: torch.device) -> torch.Tensor:
+        """单帧 sparse top-k → dense (C, X, Y, Z)。"""
+        with np.load(path, allow_pickle=False) as data:
+            sparse_coords = data["sparse_coords"]              # (N, 3) uint8/uint16
+            sparse_topk_values = data["sparse_topk_values"]    # (N, K) float16
+            sparse_topk_indices = data["sparse_topk_indices"]  # (N, K) uint8
+
+        return decode_single_frame_sparse_topk(
+            sparse_coords=sparse_coords,
+            sparse_topk_values=sparse_topk_values,
+            sparse_topk_indices=sparse_topk_indices,
+            grid_size=self.grid_size,
+            num_classes=self.num_classes,
+            free_index=self.free_index,
+            other_fill_value=self.other_fill_value,
+            free_fill_value=self.free_fill_value,
+            device=device,
+        )
+
+    def _empty_frame(self, device: torch.device) -> torch.Tensor:
+        """pad 帧占位：free 通道为 free_fill_value，其它为 other_fill_value。"""
+        X, Y, Z = self.grid_size
+        frame = torch.full(
+            (self.num_classes, X, Y, Z),
+            fill_value=self.other_fill_value,
+            dtype=torch.float32,
+            device=device,
+        )
+        frame[self.free_index] = self.free_fill_value
+        return frame
+
+    def load_fast_logits(
+        self,
+        info: Dict[str, Any],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """加载快系统多帧 logits，返回 (T, C, X, Y, Z)。"""
+        frame_rel_paths = info["frame_rel_paths"]
+        frames = []
+        for rel_path in frame_rel_paths:
+            if not rel_path:
+                frames.append(self._empty_frame(device))
+                continue
+            full_path = _resolve_relative(self.root_path, self.fast_logits_root, rel_path)
+            frames.append(self._decode_frame(full_path, device))
+        return torch.stack(frames, dim=0)
+
+    def load_slow_logits(
+        self,
+        info: Dict[str, Any],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """加载慢系统单帧 logits，返回 (C, X, Y, Z)。"""
+        rel_path = info["slow_logit_path"]
+        full_path = _resolve_relative(self.root_path, self.slow_logit_root, rel_path)
         return self._decode_frame(full_path, device)
 
 

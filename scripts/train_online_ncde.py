@@ -36,9 +36,11 @@ sys.path.append(str(ROOT / "src"))
 
 from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
+from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
+from online_ncde.models.online_ncde_aligner_ds import OnlineNcdeAlignerDS  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 from online_ncde.utils.reproducibility import set_seed  # noqa: E402
@@ -128,14 +130,10 @@ def build_dataset(
     训练/训练内 val 默认过滤短历史样本（history_completeness < 4），
     可在 data_cfg 里设 min_history_completeness 覆盖。
     """
-    return Occ3DOnlineNcdeDataset(
+    return build_online_ncde_dataset(
+        data_cfg,
         info_path=info_path,
         root_path=root_path,
-        gt_root=data_cfg["gt_root"],
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        gt_mask_key=data_cfg["gt_mask_key"],
         logits_loader=logits_loader,
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split=ray_sidecar_split,
@@ -310,7 +308,8 @@ def main() -> None:
 
     # DDP 模式下按 local_rank 分配 GPU，否则用配置值
     device = torch.device(f"cuda:{local_rank}" if use_ddp else (train_cfg["device"] if torch.cuda.is_available() else "cpu"))
-    model = OnlineNcdeAligner(
+    model_variant = str(model_cfg.get("variant", "dense")).lower()
+    common_kwargs = dict(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
         hidden_dim=model_cfg["hidden_dim"],
@@ -325,7 +324,21 @@ def main() -> None:
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         solver_variant=args.solver,
-    ).to(device)
+    )
+    if model_variant == "dense":
+        model = OnlineNcdeAligner(**common_kwargs).to(device)
+    elif model_variant == "ds2x_oo":
+        # OpenOccupancy 等大网格分支：encoder stride=(2,2,2)，主干在 1/2 分辨率上演化。
+        model = OnlineNcdeAlignerDS(
+            encoder_downsample_stride=tuple(
+                model_cfg.get("encoder_downsample_stride", [2, 2, 2])
+            ),
+            **common_kwargs,
+        ).to(device)
+    else:
+        raise ValueError(
+            f"未知的 model.variant: {model_variant!r}，可选: 'dense', 'ds2x_oo'"
+        )
 
     # 先加载权重
     start_epoch = 1

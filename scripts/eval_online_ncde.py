@@ -19,6 +19,7 @@ sys.path.append(str(ROOT / "src"))
 
 from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
+from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner          # noqa: E402
@@ -82,14 +83,10 @@ def main() -> None:
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval] min_history_completeness={min_hc}"
           + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
-    dataset = Occ3DOnlineNcdeDataset(
+    dataset = build_online_ncde_dataset(
+        data_cfg,
         info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
         root_path=cfg["root_path"],
-        gt_root=data_cfg["gt_root"],
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        gt_mask_key=data_cfg["gt_mask_key"],
         logits_loader=logits_loader,
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split="val",

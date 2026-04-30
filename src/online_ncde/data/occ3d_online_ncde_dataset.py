@@ -198,13 +198,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
 
         scene_name = info.get("scene_name", "")
         token = info.get("token", "")
-        curr_gt_path = os.path.join(self.gt_root, scene_name, token, "labels.npz")
-        curr_npz = _load_label_cached(curr_gt_path)
-        gt_labels = torch.from_numpy(curr_npz["semantics"].astype("int64"))
-        gt_mask_np = curr_npz.get(self.gt_mask_key, None)
-        if gt_mask_np is None:
-            gt_mask_np = torch.ones(self.grid_size, dtype=torch.float32).numpy()
-        gt_mask = torch.from_numpy(gt_mask_np.astype("float32"))
+        gt_labels, gt_mask = self._load_curr_gt(info, _load_label_cached)
 
         sup_labels = None
         sup_masks = None
@@ -242,15 +236,10 @@ class Occ3DOnlineNcdeDataset(Dataset):
                             "无法对齐到抽帧后的 rollout step。"
                         )
                     step_idx = step_idx // self.fast_frame_stride
-                gt_path = gt_rel if os.path.isabs(gt_rel) else os.path.join(self.gt_root, gt_rel)
-                if not os.path.exists(gt_path):
+                loaded = self._load_sup_gt(info, sup_i, gt_rel, _load_label_cached)
+                if loaded is None:
                     continue
-                sup_npz = _load_label_cached(gt_path)
-                sup_sem = torch.from_numpy(sup_npz["semantics"].astype("int64"))
-                sup_mask_np = sup_npz.get(self.gt_mask_key, None)
-                if sup_mask_np is None:
-                    sup_mask_np = torch.ones(self.grid_size, dtype=torch.float32).numpy()
-                sup_m = torch.from_numpy(sup_mask_np.astype("float32"))
+                sup_sem, sup_m = loaded
 
                 sup_labels[sup_i] = sup_sem
                 sup_masks[sup_i] = sup_m
@@ -347,3 +336,47 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 "start_keyframe_local_idx": int(info.get("start_keyframe_local_idx", -1)),
             },
         }
+
+    # ------- GT 加载钩子（子类可 override 以支持其它 GT 格式，如 OpenOccupancy） ------- #
+    def _load_curr_gt(
+        self,
+        info: Dict[str, Any],
+        load_npz_cached,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """读取当前帧 GT，返回 (semantics: long (X,Y,Z), mask: float (X,Y,Z))。
+
+        Occ3D 默认实现：从 `<gt_root>/<scene_name>/<token>/labels.npz` 读
+        `semantics` 与 `gt_mask_key` 字段（缺 mask 时全 1）。
+        """
+        scene_name = info.get("scene_name", "")
+        token = info.get("token", "")
+        curr_gt_path = os.path.join(self.gt_root, scene_name, token, "labels.npz")
+        curr_npz = load_npz_cached(curr_gt_path)
+        gt_labels = torch.from_numpy(curr_npz["semantics"].astype("int64"))
+        gt_mask_np = curr_npz.get(self.gt_mask_key, None)
+        if gt_mask_np is None:
+            gt_mask_np = torch.ones(self.grid_size, dtype=torch.float32).numpy()
+        gt_mask = torch.from_numpy(gt_mask_np.astype("float32"))
+        return gt_labels, gt_mask
+
+    def _load_sup_gt(
+        self,
+        info: Dict[str, Any],
+        sup_index: int,
+        gt_rel: str,
+        load_npz_cached,
+    ) -> Tuple[torch.Tensor, torch.Tensor] | None:
+        """读取指定 supervision 帧 GT，返回 (semantics, mask)，找不到返回 None。
+
+        Occ3D 默认实现：以 pkl 中的 `supervision_gt_rel_paths[sup_index]` 拼路径。
+        """
+        gt_path = gt_rel if os.path.isabs(gt_rel) else os.path.join(self.gt_root, gt_rel)
+        if not os.path.exists(gt_path):
+            return None
+        sup_npz = load_npz_cached(gt_path)
+        sup_sem = torch.from_numpy(sup_npz["semantics"].astype("int64"))
+        sup_mask_np = sup_npz.get(self.gt_mask_key, None)
+        if sup_mask_np is None:
+            sup_mask_np = torch.ones(self.grid_size, dtype=torch.float32).numpy()
+        sup_m = torch.from_numpy(sup_mask_np.astype("float32"))
+        return sup_sem, sup_m

@@ -1,0 +1,16 @@
+# 本机 smoke test：只为验证 train 路径能跑通，不为训练。
+# 单 sample 在 CPU 端约 5.7 GB（fast 5×0.7G + slow 0.7G + 5 GT × 0.33G），
+# 多 worker 并发会把 91GB RAM 打到 swap 卡死，因此这里强制 num_workers=0。
+base_config: ./base_2hz.yaml
+
+train:
+  num_workers: 0
+  log_interval: 1     # 每 step 打一行，立刻能看到第一步是否真在跑
+
+dataloader:
+  pin_memory: false   # cuda host alloc 锁页对 RAM 也吃，本机关掉
+  prefetch_factor: null
+  persistent_workers: false
+
+eval:
+  num_workers: 0

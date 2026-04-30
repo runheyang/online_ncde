@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from online_ncde.losses import resize_labels_and_mask_to_logits
-from online_ncde.metrics import MetricMiouOcc3D, apply_free_threshold
+from online_ncde.metrics import MetricMiouOcc3D, apply_free_threshold, build_miou_metric
 from online_ncde.utils.checkpoints import save_checkpoint as _save_checkpoint
 from online_ncde.utils.ema import ModelEMA
 
@@ -689,7 +689,7 @@ class Trainer:
         total_sup_loss: Dict[str, float] = {}
         total_sup_count: Dict[str, int] = {}
         collected: list[dict] = []
-        metric = MetricMiouOcc3D(
+        metric = build_miou_metric(
             num_classes=self.num_classes,
             use_image_mask=True,
             use_lidar_mask=False,

@@ -38,8 +38,9 @@ sys.path.append(str(ROOT / "src"))
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
+from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
+from online_ncde.metrics import MetricMiouOcc3D, build_miou_metric  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
 from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou  # noqa: E402
@@ -144,14 +145,10 @@ def main() -> None:
         )
     del _payload, _meta
 
-    dataset_full = Occ3DOnlineNcdeDataset(
+    dataset_full = build_online_ncde_dataset(
+        data_cfg,
         info_path=info_path,
         root_path=root_path,
-        gt_root=data_cfg["gt_root"],
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        gt_mask_key=data_cfg["gt_mask_key"],
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
         # evolve_infos 不参与 history-based 过滤（每个 sample 自己的 max_evolve 决定能进哪些桶）
@@ -260,7 +257,7 @@ def main() -> None:
     num_classes = int(data_cfg["num_classes"])
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
-    class_names = MetricMiouOcc3D(num_classes=num_classes).class_names
+    class_names = build_miou_metric(num_classes=num_classes).class_names
 
     # === 推理 + 收集 buckets ===
     # buckets[T] -> list of dict(pred uint8 (X,Y,Z), token, scene, source ∈ {'main', 'fallback'})
@@ -425,7 +422,7 @@ def main() -> None:
     for T in evolution_times:
         items = buckets[T]
         print(f"\n[bucket T={T}s] 收集到 {len(items)} 个样本，开始评估 mIoU + RayIoU")
-        metric = MetricMiouOcc3D(
+        metric = build_miou_metric(
             num_classes=num_classes,
             use_image_mask=True,
             use_lidar_mask=False,
