@@ -146,12 +146,14 @@ echo "==================== 汇总 ===================="
 echo "[run] summary csv: ${SUMMARY}"
 column -t -s, "${SUMMARY}" || cat "${SUMMARY}"
 
-# ---- mean ± std（用 python 计算，避免依赖 bc/awk 浮点）----
+# ---- mean ± std（写到临时 .py 跑，绕开 conda run + stdin heredoc 的兼容问题）----
 echo
 echo "==================== mean ± std ===================="
-conda run -n neural_ode python - <<PY
-import csv, math, statistics, sys
-path = "${SUMMARY}"
+TMP_PY="$(mktemp --suffix=.py)"
+trap 'rm -f "${TMP_PY}"' EXIT
+cat > "${TMP_PY}" <<'PY'
+import statistics, sys
+path = sys.argv[1]
 rows = []
 with open(path) as f:
     for line in f:
@@ -161,26 +163,37 @@ with open(path) as f:
         rows.append(line.split(","))
 
 if not rows:
-    print("no data parsed from ${SUMMARY}")
+    print(f"no data parsed from {path}")
     sys.exit(0)
 
 cols = ["miou", "miou_d", "rayiou", "rayiou_at1", "rayiou_at2", "rayiou_at4"]
 data = {c: [] for c in cols}
+seeds = []
 for r in rows:
+    seeds.append(r[0])
     for i, c in enumerate(cols, start=1):
         try:
             data[c].append(float(r[i]))
         except (ValueError, IndexError):
             pass
 
-print(f"{'metric':<12} {'n':>3} {'mean':>10} {'std':>10} {'min':>10} {'max':>10}")
-print("-" * 60)
+print(f"{'metric':<12} {'n':>3} {'mean':>10} {'std':>10} {'min':>10} {'max':>10} {'range':>10}")
+print("-" * 72)
 for c in cols:
     vs = data[c]
     if not vs:
-        print(f"{c:<12} {0:>3} {'-':>10} {'-':>10} {'-':>10} {'-':>10}")
+        print(f"{c:<12} {0:>3} {'-':>10} {'-':>10} {'-':>10} {'-':>10} {'-':>10}")
         continue
     mean = statistics.mean(vs)
     std = statistics.stdev(vs) if len(vs) >= 2 else 0.0
-    print(f"{c:<12} {len(vs):>3} {mean:>10.4f} {std:>10.4f} {min(vs):>10.4f} {max(vs):>10.4f}")
+    print(f"{c:<12} {len(vs):>3} {mean:>10.4f} {std:>10.4f} {min(vs):>10.4f} {max(vs):>10.4f} {max(vs)-min(vs):>10.4f}")
+
+# worst seed by miou
+if data["miou"]:
+    worst_idx = data["miou"].index(min(data["miou"]))
+    print(f"\nworst seed (by miou) = {seeds[worst_idx]}")
+    for c in cols:
+        if data[c]:
+            print(f"  {c}={data[c][worst_idx]:.4f}")
 PY
+conda run -n neural_ode python "${TMP_PY}" "${SUMMARY}"

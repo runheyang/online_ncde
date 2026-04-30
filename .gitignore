@@ -25,6 +25,9 @@ __pycache__/
 
 configs/online_ncde/hard_oversample_train_stats.json
 
+# tests 下的 txt 输出文件（实验产物，不纳入版本控制）
+tests/**/*.txt
+
 # configs 下的索引 / sidecar / cache 类 pkl 文件统一不纳入版本控制
 configs/**/*.pkl
 configs/**/*.npy
