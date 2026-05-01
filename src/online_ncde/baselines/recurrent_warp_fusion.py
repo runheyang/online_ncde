@@ -911,7 +911,7 @@ class RecurrentWarpFusionAligner(nn.Module):
                 rollout_start_step=rss_b,
             )
             aligned_list.append(cast(torch.Tensor, out["aligned"]))
-            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            diag_list.append(cast("dict[str, torch.Tensor]", out["diagnostics"]))
         aligned = torch.stack(aligned_list, dim=0)
         return {"aligned": aligned, "diagnostics": diag_list}
 
@@ -954,7 +954,7 @@ class RecurrentWarpFusionAligner(nn.Module):
             step_warp_list.append(cast(torch.Tensor, out["step_warp_ms"]))
             step_solver_list.append(cast(torch.Tensor, out["step_solver_ms"]))
             step_decode_list.append(cast(torch.Tensor, out["step_decode_ms"]))
-            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            diag_list.append(cast("dict[str, torch.Tensor]", out["diagnostics"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
@@ -1007,7 +1007,7 @@ class RecurrentWarpFusionAligner(nn.Module):
                     f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
                 )
             step_logits_list.append(sample_step_logits)
-            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            diag_list.append(cast("dict[str, torch.Tensor]", out["diagnostics"]))
             if "fast_kl" in out:
                 fast_kl_list.append(cast(torch.Tensor, out["fast_kl"]))
 

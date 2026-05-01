@@ -245,7 +245,7 @@ def main() -> None:
             step_indices = cast(torch.Tensor, outputs["step_indices"])  # (S,)
             step_indices_list = [int(v) for v in step_indices.detach().cpu().tolist()]
 
-            meta_list = cast(list[dict[str, Any]], sample["meta"])
+            meta_list = cast("list[dict[str, Any]]", sample["meta"])
             for b, meta in enumerate(meta_list):
                 step_times_list = [float(v) for v in step_time_ms[b].detach().cpu().tolist()]
                 step_warp_list = [float(v) for v in step_warp_ms[b].detach().cpu().tolist()]

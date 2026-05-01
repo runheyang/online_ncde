@@ -288,7 +288,7 @@ def main() -> None:
             ts_in = sample.get("frame_timestamps", None)
             dt_in = sample.get("frame_dt", None)
             if B_in == 1:
-                meta_b0 = cast(list[dict[str, Any]], sample["meta"])[0]
+                meta_b0 = cast("list[dict[str, Any]]", sample["meta"])[0]
                 n_real = int(meta_b0.get("num_real_frames", fast_in.shape[1]))
                 if 0 < n_real < fast_in.shape[1]:
                     fast_in = fast_in[:, :n_real]
@@ -313,7 +313,7 @@ def main() -> None:
             slow_preds = slow_in.argmax(dim=1).to(torch.uint8).cpu().numpy()  # (B, X, Y, Z)
 
             B = step_preds.shape[0]
-            meta_list = cast(list[dict[str, Any]], sample["meta"])
+            meta_list = cast("list[dict[str, Any]]", sample["meta"])
 
             for b in range(B):
                 meta = meta_list[b]

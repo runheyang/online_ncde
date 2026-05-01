@@ -826,7 +826,7 @@ class OnlineNcdeAlignerDS(nn.Module):
             step_warp_list.append(sample_step_warp)
             step_solver_list.append(sample_step_solver)
             step_decode_list.append(sample_step_decode)
-            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            diag_list.append(cast("dict[str, torch.Tensor]", out["diagnostics"]))
 
         if step_indices is None:
             step_indices = torch.zeros((0,), dtype=torch.long, device=fast_logits.device)
@@ -879,7 +879,7 @@ class OnlineNcdeAlignerDS(nn.Module):
                     f"batch 内 step 数不一致: {sample_step_indices.shape} vs {step_indices.shape}"
                 )
             step_logits_list.append(sample_step_logits)
-            diag_list.append(cast(dict[str, torch.Tensor], out["diagnostics"]))
+            diag_list.append(cast("dict[str, torch.Tensor]", out["diagnostics"]))
             if "fast_kl" in out:
                 fast_kl_list.append(cast(torch.Tensor, out["fast_kl"]))
 

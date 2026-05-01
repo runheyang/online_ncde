@@ -211,7 +211,7 @@ def main() -> None:
             slow_logits = cast(torch.Tensor, sample["slow_logits"])   # (B, C, X, Y, Z)
             frame_ego2global = cast(torch.Tensor, sample["frame_ego2global"])  # (B, T, 4, 4)
             rollout_start_step = sample.get("rollout_start_step", None)
-            meta_list = cast(list[dict[str, Any]], sample["meta"])
+            meta_list = cast("list[dict[str, Any]]", sample["meta"])
 
             B = fast_logits.shape[0]
             num_frames = int(frame_ego2global.shape[1])

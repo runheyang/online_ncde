@@ -26,7 +26,7 @@ def _stack_or_none(batch: list, key: str) -> torch.Tensor | None:
     vals = [item.get(key, None) for item in batch]
     if any(v is None for v in vals):
         return None
-    return torch.stack(cast(list[torch.Tensor], vals), dim=0)
+    return torch.stack(cast("list[torch.Tensor]", vals), dim=0)
 
 
 def online_ncde_collate(batch):
@@ -579,7 +579,7 @@ class Trainer:
                 total_sup_loss[key] = total_sup_loss.get(key, 0.0) + float(value) * float(cnt)
                 total_sup_count[key] = total_sup_count.get(key, 0) + int(cnt)
 
-            diag = self._pack_diag(cast(list[dict[str, torch.Tensor]], outputs.get("diagnostics", [])))
+            diag = self._pack_diag(cast("list[dict[str, torch.Tensor]]", outputs.get("diagnostics", [])))
             total_delta += diag.get("delta_scene_abs_mean", 0.0)
 
             if pbar is not None:

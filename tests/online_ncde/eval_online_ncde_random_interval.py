@@ -179,14 +179,14 @@ class SubsampledStepwiseEvalDataset(Dataset):
         sampled["fast_logits"] = fast_logits[self.sampled_frame_indices]
         sampled["frame_ego2global"] = frame_ego2global[self.sampled_frame_indices]
         frame_timestamps = self._slice_optional(
-            cast(torch.Tensor | None, sample.get("frame_timestamps", None))
+            cast("torch.Tensor | None", sample.get("frame_timestamps", None))
         )
         sampled["frame_timestamps"] = frame_timestamps
         if frame_timestamps is not None:
             sampled["frame_dt"] = None
         else:
             sampled["frame_dt"] = self._subsample_frame_dt(
-                cast(torch.Tensor | None, sample.get("frame_dt", None)),
+                cast("torch.Tensor | None", sample.get("frame_dt", None)),
                 total_num_frames=int(fast_logits.shape[0]),
             )
 
@@ -196,7 +196,7 @@ class SubsampledStepwiseEvalDataset(Dataset):
         new_R = sum(1 for s in self.sampled_frame_indices if s < orig_R)
         sampled["rollout_start_step"] = torch.tensor(new_R, dtype=torch.long)
 
-        meta = dict(cast(dict[str, Any], sample.get("meta", {})))
+        meta = dict(cast("dict[str, Any]", sample.get("meta", {})))
         meta["sampled_frame_indices"] = list(self.sampled_frame_indices)
         meta["rollout_start_step"] = new_R
         meta["rollout_start_step_orig"] = orig_R

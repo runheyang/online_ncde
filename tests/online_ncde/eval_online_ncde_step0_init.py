@@ -242,7 +242,7 @@ def main() -> None:
                 slow_logits=cast(torch.Tensor, sample["slow_logits"]),
             )
 
-            meta_list = cast(list[dict[str, Any]], sample["meta"])
+            meta_list = cast("list[dict[str, Any]]", sample["meta"])
             for b, meta in enumerate(meta_list):
                 t_ms = float(step0_time_ms[b].detach().cpu().item())
                 step0_time_sum += t_ms
