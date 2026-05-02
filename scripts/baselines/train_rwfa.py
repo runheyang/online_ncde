@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""RWFA baseline 训练脚本（单卡）。
+"""RWFA baseline 训练脚本（支持单卡 / DDP）。
 
 设计：复用 trainer / dataset / loss / RayIoU 的全套 wiring，只把 model 构造
 换成 RecurrentWarpFusionAligner（fusion_kind=conv 或 attn）。RWFA 的 forward
 接口与 OnlineNcdeAligner 完全一致（default / stepwise_train / stepwise_eval、
 _fast_kl_active 协议），trainer 内部不需要任何分支改动。
 
+DDP 启动方式与 train_online_ncde.py 一致，例如：
+    torchrun --nproc_per_node=2 scripts/baselines/train_rwfa.py --config <yaml>
+单卡时直接 python 调用即可。
+
 精简掉的功能（baseline 实验场景一般不需要，需要时再扩）：
-  - DDP（单卡训完即可）
   - 分箱 RayIoU / metrics json
 
 CLI 与 train_online_ncde.py 兼容子集：相同 config 文件可直接复用，model 段
@@ -26,7 +29,11 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
 
 torch.backends.cudnn.benchmark = True
 # 与 train_online_ncde 对齐：fp32 + TF32
@@ -34,6 +41,12 @@ if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
+
+# 多卡共享策略：避免低 ulimit 下多 epoch 重建 DataLoader 时 fd 耗尽
+try:
+    mp.set_sharing_strategy("file_system")
+except RuntimeError:
+    pass
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
@@ -44,6 +57,9 @@ from train_online_ncde import (  # noqa: E402
     build_dataset,
     build_scheduler,
     build_subset,
+    cleanup_ddp,
+    setup_ddp_early,
+    setup_ddp_init,
     to_float,
 )
 
@@ -68,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-kind",
         choices=["rwfa-conv", "rwfa-attn"],
-        default="rwfa-conv",
+        default="rwfa-attn",
         help="RWFA 主干类型；conv = 3 dilated conv 残差块；attn = dilated + W-MSA + SW-MSA + dilated",
     )
     parser.add_argument("--resume", default="", help="恢复训练权重")
@@ -145,24 +161,29 @@ def _build_model(
 
 def main() -> None:
     args = parse_args()
+    local_rank, use_ddp = setup_ddp_early()
+
     cfg = load_config_with_base(args.config)
     if args.epochs > 0:
         cfg.setdefault("train", {})["epochs"] = args.epochs
     if args.ray_override:
         cfg.setdefault("loss", {}).setdefault("ray", {}).update(json.loads(args.ray_override))
-        print(f"[ray-override] {args.ray_override}")
+        if local_rank == 0:
+            print(f"[ray-override] {args.ray_override}")
     if args.lambda_fast_kl is not None:
         cfg.setdefault("train", {})["lambda_fast_kl"] = float(args.lambda_fast_kl)
-        print(f"[lambda-fast-kl] override = {args.lambda_fast_kl}")
+        if local_rank == 0:
+            print(f"[lambda-fast-kl] override = {args.lambda_fast_kl}")
     if args.lambda_lovasz is not None:
         cfg.setdefault("loss", {})["lambda_lovasz"] = float(args.lambda_lovasz)
     if args.lambda_focal is not None:
         cfg.setdefault("loss", {})["lambda_focal"] = float(args.lambda_focal)
     if args.fast_logits_root is not None:
         cfg.setdefault("data", {})["fast_logits_root"] = str(args.fast_logits_root)
-        print(f"[fast-logits-root] override = {args.fast_logits_root}")
+        if local_rank == 0:
+            print(f"[fast-logits-root] override = {args.fast_logits_root}")
 
-    set_seed(args.seed)
+    set_seed(args.seed + local_rank)
 
     root_path = cfg["root_path"]
     data_cfg = cfg["data"]
@@ -196,14 +217,19 @@ def main() -> None:
             val_indices = [i for i, n in enumerate(scene_names) if n in keep]
             val_dataset = Subset(val_dataset, val_indices)
 
-    device = torch.device(train_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
+    # DDP 模式按 local_rank 分卡，否则用配置/cuda
+    device = torch.device(
+        f"cuda:{local_rank}" if use_ddp
+        else (train_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
+    )
     model = _build_model(
         args.model_kind, model_cfg, data_cfg, device,
         use_fast_residual=args.use_fast_residual,
     )
     n_params = sum(p.numel() for p in model.parameters())
-    residual_text = "on" if args.use_fast_residual else "off"
-    print(f"[model] kind={args.model_kind} params={n_params} fast_residual={residual_text}")
+    if local_rank == 0:
+        residual_text = "on" if args.use_fast_residual else "off"
+        print(f"[model] kind={args.model_kind} params={n_params} fast_residual={residual_text}")
 
     start_epoch = 1
     resumed_payload = None
@@ -214,26 +240,43 @@ def main() -> None:
         resumed_wandb_id = resumed_payload.get("wandb_run_id", None)
         if args.wandb_new_run:
             resumed_wandb_id = None
+
+    # 初始化进程组（必须在模型创建并加载权重之后，与主脚本对齐）
+    rank, local_rank, world_size = setup_ddp_init(local_rank)
+    is_main = rank == 0
+    if is_main and args.resume:
         print(f"[resume] 从 epoch={start_epoch} 继续训练")
 
     ema = None
     ema_cfg = train_cfg.get("ema", {}) or {}
     if bool(ema_cfg.get("enabled", True)):
         ema_decay = float(ema_cfg.get("decay", 0.999))
+        # EMA 在 DDP 包装前基于原始权重构建，避免 deepcopy DDP
         ema = ModelEMA(model, decay=ema_decay, device=device)
-        print(f"[ema] enabled, decay={ema_decay}")
+        if is_main:
+            print(f"[ema] enabled, decay={ema_decay}")
         if resumed_payload is not None and "ema" in resumed_payload:
             ema.load_state_dict(resumed_payload["ema"])
-            print(f"[ema] resumed num_updates={ema.num_updates}")
+            if is_main:
+                print(f"[ema] resumed num_updates={ema.num_updates}")
+
+    # DDP 包装
+    if use_ddp:
+        model = DDP(model, device_ids=[local_rank])
 
     num_workers = int(train_cfg["num_workers"])
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if use_ddp else None
     train_loader_kwargs = dict(
-        batch_size=int(train_cfg["batch_size"]), num_workers=num_workers, shuffle=True,
+        batch_size=int(train_cfg["batch_size"]), num_workers=num_workers,
+        shuffle=(train_sampler is None), sampler=train_sampler,
         collate_fn=online_ncde_collate, pin_memory=loader_cfg.get("pin_memory", False),
     )
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-        train_loader_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+        # DDP 多进程时强制关闭 persistent_workers，避免 train/val 切换期间内存峰值过高
+        train_loader_kwargs["persistent_workers"] = (
+            False if use_ddp else loader_cfg.get("persistent_workers", False)
+        )
     val_loader_kwargs = None
     if val_dataset is not None:
         val_workers = int(eval_cfg.get("num_workers", num_workers))
@@ -282,7 +325,7 @@ def main() -> None:
         rollout_mode=str(train_cfg.get("rollout_mode", "full")),
         primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
-        is_main=True,
+        is_main=is_main,
         ema=ema,
     )
 
@@ -292,14 +335,27 @@ def main() -> None:
     else:
         config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(str(ROOT), "outputs", "baselines", args.model_kind, os.path.dirname(config_rel))
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if use_ddp:
+            # 各 rank 时间戳可能不同，必须从 rank 0 广播一份
+            if rank == 0:
+                ts_tensor = torch.tensor(
+                    [int(datetime.now().strftime("%Y%m%d%H%M%S"))], dtype=torch.long, device=device
+                )
+            else:
+                ts_tensor = torch.zeros(1, dtype=torch.long, device=device)
+            dist.broadcast(ts_tensor, src=0)
+            ts_str = str(ts_tensor.item())
+            timestamp = f"{ts_str[:8]}_{ts_str[8:]}"
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join(output_base, timestamp)
     os.makedirs(output_dir, exist_ok=True)
-    print(f"[ckpt] output_dir: {output_dir}")
+    if is_main:
+        print(f"[ckpt] output_dir: {output_dir}")
 
-    # --- wandb 初始化：resume 时续接同一个 run ---
+    # --- wandb 初始化：仅 rank 0，resume 时续接同一个 run ---
     run = None
-    if args.wandb:
+    if args.wandb and is_main:
         if wandb is None:
             raise ImportError("未安装 wandb，无法启用日志。")
         wandb_kwargs = dict(
@@ -336,39 +392,44 @@ def main() -> None:
         )
 
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
+        # DDP 模式下每 epoch 设置 sampler epoch，保证打乱不同
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
         train_metrics = trainer.train_one_epoch(train_loader, epoch=epoch)
         _cleanup_gpu_cache()
         if scheduler is not None:
             scheduler.step()
 
-        sup_parts = [f"{k}={float(v):.4f}" for k, v in train_metrics.items() if k.startswith("loss_t")]
-        sup_text = (" " + " ".join(sup_parts)) if sup_parts else ""
-        ray_text = ""
-        if "ray" in train_metrics:
-            ray_text = (
-                f" ray_total={float(train_metrics['ray']):.4f}"
-                f" ray_hit={float(train_metrics['ray_hit']):.4f}"
-                f" ray_empty={float(train_metrics['ray_empty']):.4f}"
-                f" ray_depth={float(train_metrics['ray_depth']):.4f}"
+        if is_main:
+            sup_parts = [f"{k}={float(v):.4f}" for k, v in train_metrics.items() if k.startswith("loss_t")]
+            sup_text = (" " + " ".join(sup_parts)) if sup_parts else ""
+            ray_text = ""
+            if "ray" in train_metrics:
+                ray_text = (
+                    f" ray_total={float(train_metrics['ray']):.4f}"
+                    f" ray_hit={float(train_metrics['ray_hit']):.4f}"
+                    f" ray_empty={float(train_metrics['ray_empty']):.4f}"
+                    f" ray_depth={float(train_metrics['ray_depth']):.4f}"
+                )
+            kl_text = f" fast_kl={float(train_metrics['fast_kl']):.4f}" if "fast_kl" in train_metrics else ""
+            print(
+                f"[train] epoch={epoch} "
+                f"loss={train_metrics['loss']:.4f} "
+                f"focal={train_metrics['focal']:.4f} "
+                f"aux={train_metrics['aux']:.4f} "
+                f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"{kl_text}{ray_text}{sup_text}"
             )
-        kl_text = f" fast_kl={float(train_metrics['fast_kl']):.4f}" if "fast_kl" in train_metrics else ""
-        print(
-            f"[train] epoch={epoch} "
-            f"loss={train_metrics['loss']:.4f} "
-            f"focal={train_metrics['focal']:.4f} "
-            f"aux={train_metrics['aux']:.4f} "
-            f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
-            f"{kl_text}{ray_text}{sup_text}"
-        )
 
         should_eval = val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0
-        if run is not None:
+        if is_main and run is not None:
             train_payload = {f"train/{k}": float(v) for k, v in train_metrics.items()
                              if isinstance(v, (int, float))}
             train_payload["epoch"] = float(epoch)
             run.log(train_payload, commit=not should_eval)
 
-        if should_eval:
+        if is_main and should_eval:
             val_metrics = trainer.evaluate(val_loader, collect_predictions=enable_rayiou)
             _cleanup_gpu_cache()
             val_sup = " ".join(
@@ -433,15 +494,21 @@ def main() -> None:
                         payload[f"val/{key}"] = float(rayiou_result[key])
                 run.log(payload, commit=True)
 
-        ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
-        ckpt_extra = {}
-        if run is not None:
-            ckpt_extra["wandb_run_id"] = run.id
-        trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
-        print(f"[ckpt] saved -> {ckpt_path}")
+        if is_main:
+            ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
+            ckpt_extra = {}
+            if run is not None:
+                ckpt_extra["wandb_run_id"] = run.id
+            trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
+            print(f"[ckpt] saved -> {ckpt_path}")
+
+        # 同步所有 rank，等待 rank 0 完成 eval/checkpoint
+        if use_ddp:
+            dist.barrier()
 
     if run is not None:
         run.finish()
+    cleanup_ddp()
 
 
 if __name__ == "__main__":
