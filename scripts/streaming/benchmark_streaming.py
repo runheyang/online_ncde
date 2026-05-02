@@ -36,14 +36,21 @@ from online_ncde.streaming.fast_runner import FastRunner
 from online_ncde.streaming.scene_iterator import build_sample_meta_index, iter_scenes
 from online_ncde.streaming.stream_aligner import StreamAligner
 from online_ncde.streaming.streaming_loader import make_streaming_loader, scatter_to_device
-from online_ncde.streaming.slow_cache import SlowLogitsGPUCache
+from online_ncde.streaming.slow_cache import SlowLogitsGPUCache, build_slow_decoder_fn
 
+REPO_ROOT = "/root/autodl-tmp/online_ncde"
 OCC_ROOT = "/root/autodl-tmp/online_ncde/third_party/OccStudio"
 OCC_CONFIG = "configs/alocc/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.py"
 OCC_CKPT = "ckpts/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.pth"
 BDV2_PKL = "/root/autodl-tmp/data/nuscenes/bevdetv2-nuscenes_infos_val.pkl"
-SLOW_ROOT = "/root/autodl-tmp/data/alocc3d_wo_mask"
 GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
+
+
+def resolve_slow_root(data_cfg) -> str:
+    rel = data_cfg.get("slow_logit_root")
+    if rel is None:
+        raise ValueError("data_cfg.slow_logit_root 缺失")
+    return rel if os.path.isabs(rel) else os.path.join(REPO_ROOT, rel)
 
 
 def parse_args():
@@ -230,8 +237,10 @@ def main():
     )
     fast.build()
 
-    print("[3] sample meta index ...")
-    s2m = build_sample_meta_index(BDV2_PKL, SLOW_ROOT, GT_ROOT)
+    slow_root = resolve_slow_root(data_cfg)
+    slow_format = data_cfg.get("slow_logit_format", data_cfg.get("logits_format", "alocc_dense_topk"))
+    print(f"[3] sample meta index (slow_format={slow_format}, slow_root={slow_root}) ...")
+    s2m = build_sample_meta_index(BDV2_PKL, slow_root, GT_ROOT)
     scenes_meta = list(iter_scenes(fast.dataset, s2m, limit_scenes=None))
 
     # 收集 K+N 个连续 keyframe (跨 scene 连续, 跟 OccStudio benchmark.py 一致)
@@ -249,12 +258,8 @@ def main():
     print(f"  跨 {len(set(m.scene_name for m in flat_metas))} 个 scene")
 
     print(f"[4] preload slow logits (避免 zlib 解压噪声污染时间测量) ...")
-    slow_cache = SlowLogitsGPUCache(
-        device=device, num_classes=data_cfg["num_classes"],
-        clamp_min=float(data_cfg.get("alocc_clamp_min", -5.0)),
-        fill_value=float(data_cfg.get("alocc_fill_value", -5.0)),
-        max_centering=bool(data_cfg.get("alocc_max_centering", False)),
-    )
+    slow_decoder_fn = build_slow_decoder_fn(data_cfg, device)
+    slow_cache = SlowLogitsGPUCache(device=device, decoder_fn=slow_decoder_fn)
     slow_cache.preload([m.slow_logit_path for m in flat_metas], skip_missing=True, verbose=False)
     print(f"  cached {len(slow_cache)} slow paths")
 

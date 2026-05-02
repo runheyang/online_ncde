@@ -1,5 +1,7 @@
 """Dense top-k → (C, X, Y, Z) scatter, GPU/CPU 通用."""
 from __future__ import annotations
+from typing import Tuple
+
 import torch
 
 
@@ -51,3 +53,49 @@ def decode_topk_npz_to_dense_gpu(
         topk_vals = topk_vals - topk_vals.max(dim=-1, keepdim=True).values
     topk_vals = topk_vals.clamp_min(clamp_min)
     return scatter_topk_to_dense(topk_vals, topk_idx, num_classes, fill_value)
+
+
+def decode_opus_sparse_full_npz_to_dense_gpu(
+    npz_path: str,
+    device: torch.device,
+    num_classes: int,
+    free_index: int,
+    grid_size: Tuple[int, int, int],
+    topk_k: int = 3,
+    other_fill_value: float = -5.0,
+    free_fill_value: float = 5.0,
+) -> torch.Tensor:
+    """读取 OPUS sparse full npz → dense (C, X, Y, Z) fp32.
+
+    与训练时 OpusSparseFullLoader._decode_frame 严格等价:
+      sparse_coords/sparse_values → sparse_full_to_topk(top-k 截断) → 散射到 dense.
+    scatter 阶段在 GPU 上完成 (decode_single_frame_sparse_topk 接受 device 参数).
+    """
+    import numpy as np
+    from online_ncde.data.logits_io import (
+        decode_single_frame_sparse_topk,
+        sparse_full_to_topk,
+    )
+    with np.load(npz_path, allow_pickle=False) as data:
+        sparse_coords = data["sparse_coords"]    # (N, 3) uint8
+        sparse_values = data["sparse_values"]    # (N, 17) fp16
+    # PyTorch 2.0 CPU topk 不支持 fp16, sparse_full_to_topk 会爆 -> 先 cast.
+    if sparse_values.dtype != np.float32:
+        sparse_values = sparse_values.astype(np.float32, copy=False)
+    topk_values, topk_indices = sparse_full_to_topk(
+        sparse_values,
+        num_classes=num_classes,
+        free_index=free_index,
+        k=topk_k,
+    )
+    return decode_single_frame_sparse_topk(
+        sparse_coords=sparse_coords,
+        sparse_topk_values=topk_values,
+        sparse_topk_indices=topk_indices,
+        grid_size=tuple(grid_size),
+        num_classes=num_classes,
+        free_index=free_index,
+        other_fill_value=other_fill_value,
+        free_fill_value=free_fill_value,
+        device=device,
+    )

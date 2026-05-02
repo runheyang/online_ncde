@@ -47,16 +47,23 @@ from online_ncde.streaming.scene_iterator import build_sample_meta_index, iter_s
 from online_ncde.streaming.slow_schedule import schedule_slow_steps
 from online_ncde.streaming.stream_aligner import StreamAligner
 from online_ncde.streaming.streaming_loader import make_streaming_loader, scatter_to_device
-from online_ncde.streaming._dense_decode import decode_topk_npz_to_dense_gpu
-from online_ncde.streaming.slow_cache import SlowLogitsGPUCache
+from online_ncde.streaming.slow_cache import SlowLogitsGPUCache, build_slow_decoder_fn
 
+REPO_ROOT = "/root/autodl-tmp/online_ncde"
 OCC_ROOT = "/root/autodl-tmp/online_ncde/third_party/OccStudio"
 OCC_CONFIG = "configs/alocc/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.py"
 OCC_CKPT = "ckpts/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.pth"
 BDV2_PKL = "/root/autodl-tmp/data/nuscenes/bevdetv2-nuscenes_infos_val.pkl"
-SLOW_ROOT = "/root/autodl-tmp/data/alocc3d_wo_mask"
 GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
 DEFAULT_SWEEP_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
+
+
+def resolve_slow_root(data_cfg) -> str:
+    """从 cfg 读取 slow_logit_root, 支持绝对路径或相对 REPO_ROOT 的路径."""
+    rel = data_cfg.get("slow_logit_root")
+    if rel is None:
+        raise ValueError("data_cfg.slow_logit_root 缺失")
+    return rel if os.path.isabs(rel) else os.path.join(REPO_ROOT, rel)
 
 
 def parse_args():
@@ -66,7 +73,7 @@ def parse_args():
     p.add_argument("--slow-intervals", type=float, nargs="+", required=True)
     p.add_argument("--limit-scenes", type=int, default=None)
     p.add_argument("--solver", choices=["euler", "heun"], default="euler")
-    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--preload-slow", action="store_true",
                    help="预加载本 scene 的 slow logits 到 GPU dense fp16; 用时 ~0.1ms")
@@ -111,7 +118,8 @@ def cache_one_scene_fast(fast: FastRunner, kf_list, loader_iter):
 
 
 def stream_scene_one_interval(
-    kf_list, scene_fast_cache, slow_cache, stream_aligner, data_cfg,
+    kf_list, scene_fast_cache, slow_cache, slow_decoder_fn,
+    stream_aligner, data_cfg,
     slow_interval, device,
     pred_list_out, gt_cache,
 ):
@@ -120,10 +128,6 @@ def stream_scene_one_interval(
     不做时延打桩 (测速请用 benchmark_streaming.py).
     """
     n_reset, n_evolve = 0, 0
-    clamp_min = float(data_cfg.get("alocc_clamp_min", -5.0))
-    fill_value = float(data_cfg.get("alocc_fill_value", -5.0))
-    max_centering = bool(data_cfg.get("alocc_max_centering", False))
-    num_classes = data_cfg["num_classes"]
 
     ts = [m.timestamp_us for _, m in kf_list]
     slow_steps = schedule_slow_steps(ts, slow_interval)
@@ -142,11 +146,7 @@ def stream_scene_one_interval(
             if slow_cache is not None:
                 slow_logits = slow_cache.get(meta.slow_logit_path)
             else:
-                slow_logits = decode_topk_npz_to_dense_gpu(
-                    meta.slow_logit_path, device=device,
-                    num_classes=num_classes, clamp_min=clamp_min,
-                    fill_value=fill_value, max_centering=max_centering,
-                )
+                slow_logits = slow_decoder_fn(meta.slow_logit_path)
             aligned = stream_aligner.reset_with_slow(fast_logits, slow_logits, ego_t, meta.timestamp_us)
             n_reset += 1
         else:
@@ -235,9 +235,12 @@ def main():
     )
     fast.build()
 
-    print("[3] sample meta index ...")
-    s2m = build_sample_meta_index(BDV2_PKL, SLOW_ROOT, GT_ROOT)
+    slow_root = resolve_slow_root(data_cfg)
+    slow_format = data_cfg.get("slow_logit_format", data_cfg.get("logits_format", "alocc_dense_topk"))
+    print(f"[3] sample meta index (slow_format={slow_format}, slow_root={slow_root}) ...")
+    s2m = build_sample_meta_index(BDV2_PKL, slow_root, GT_ROOT)
     scenes_meta = list(iter_scenes(fast.dataset, s2m, limit_scenes=args.limit_scenes))
+    slow_decoder_fn = build_slow_decoder_fn(data_cfg, device)
     flat_indices = [idx for _, kf_list in scenes_meta for (idx, _) in kf_list]
     total_kf = len(flat_indices)
     print(f"  scenes count={len(scenes_meta)}, total kf={total_kf}")
@@ -262,20 +265,14 @@ def main():
 
         scene_slow_cache = None
         if args.preload_slow:
-            scene_slow_cache = SlowLogitsGPUCache(
-                device=device,
-                num_classes=data_cfg["num_classes"],
-                clamp_min=float(data_cfg.get("alocc_clamp_min", -5.0)),
-                fill_value=float(data_cfg.get("alocc_fill_value", -5.0)),
-                max_centering=bool(data_cfg.get("alocc_max_centering", False)),
-            )
+            scene_slow_cache = SlowLogitsGPUCache(device=device, decoder_fn=slow_decoder_fn)
             scene_slow_cache.preload([m.slow_logit_path for _, m in kf_list],
                                      skip_missing=True, verbose=False)
 
         for it in args.slow_intervals:
             n_r, n_e = stream_scene_one_interval(
-                kf_list, scene_fast_cache, scene_slow_cache, stream_aligner,
-                data_cfg, it, device,
+                kf_list, scene_fast_cache, scene_slow_cache, slow_decoder_fn,
+                stream_aligner, data_cfg, it, device,
                 pred_list_out=predictions[it], gt_cache=gt_cache,
             )
             reset_cnt[it] += n_r

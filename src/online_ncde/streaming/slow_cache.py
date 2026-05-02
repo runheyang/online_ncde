@@ -1,45 +1,42 @@
 """Slow logits 预加载缓存.
 
-alocc3d_wo_mask 的 npz 是 zlib compressed, 每次读 ~26ms 解压 fp16 topk_values.
-评估时往返同一组 keyframe 多次 (多个 slow_interval 共享), 在线推理时 reset 帧
-也只是少数, 但 zlib 每次都要重新解压.
+把单 scene 的 slow logits 全部预加载成 dense (C, X, Y, Z) fp16 放在 GPU 上,
+用时 .float() 仅 ~0.1ms, 避开磁盘 IO + zlib 解压噪声.
 
-把 slow 全部预加载成 dense (C, X, Y, Z) fp16 放在 GPU 上, 用时 .float() 仅 ~0.1ms.
-
-显存预算: 1 帧 dense fp16 = 18 * 200 * 200 * 16 * 2 / 2^20 = 21.97 MB.
-5 scenes × ~40 keyframe ≈ 4.6 GB. 全 val (150 scenes ≈ 6000 kf) ≈ 132 GB (放不下).
-所以这个 cache 仅适合中小规模评估; 大规模评估应在线解码或换 fp32 numpy on CPU.
+通过注入 decoder_fn 同时支持:
+  - alocc_dense_topk:  topk_values + topk_indices (alocc3d_wo_mask)
+  - opus_sparse_full:  sparse_coords + sparse_values (logits_opusv2l_full)
 """
 from __future__ import annotations
 import os
-from typing import Iterable, Dict
+from typing import Callable, Dict, Iterable
 
-import numpy as np
 import torch
 
-from ._dense_decode import scatter_topk_to_dense
+from ._dense_decode import (
+    decode_opus_sparse_full_npz_to_dense_gpu,
+    decode_topk_npz_to_dense_gpu,
+)
 
 
 class SlowLogitsGPUCache:
-    """path → dense (C, X, Y, Z) fp16 GPU tensor."""
+    """path → dense (C, X, Y, Z) fp16 GPU tensor.
+
+    decoder_fn(path) 必须返回 (C, X, Y, Z) fp32 GPU tensor.
+    """
 
     def __init__(
         self,
         device: torch.device,
-        num_classes: int = 18,
-        clamp_min: float = -5.0,
-        fill_value: float = -5.0,
-        max_centering: bool = False,
+        decoder_fn: Callable[[str], torch.Tensor],
     ) -> None:
         self.device = device
-        self.num_classes = int(num_classes)
-        self.clamp_min = float(clamp_min)
-        self.fill_value = float(fill_value)
-        self.max_centering = bool(max_centering)
+        self.decoder_fn = decoder_fn
         self._cache: Dict[str, torch.Tensor] = {}
 
-    def preload(self, paths: Iterable[str], skip_missing: bool = True, verbose: bool = True) -> None:
-        """一次性加载并 decode 到 GPU dense fp16."""
+    def preload(
+        self, paths: Iterable[str], skip_missing: bool = True, verbose: bool = True
+    ) -> None:
         unique = sorted(set(paths))
         n = len(unique)
         miss = 0
@@ -49,17 +46,7 @@ class SlowLogitsGPUCache:
                 if not skip_missing:
                     raise FileNotFoundError(p)
                 continue
-            with np.load(p, allow_pickle=False) as d:
-                vals = torch.from_numpy(d["topk_values"]).to(
-                    device=self.device, dtype=torch.float32, non_blocking=True
-                )
-                idx = torch.from_numpy(d["topk_indices"]).to(
-                    device=self.device, dtype=torch.long, non_blocking=True
-                )
-            if self.max_centering:
-                vals = vals - vals.max(dim=-1, keepdim=True).values
-            vals = vals.clamp_min(self.clamp_min)
-            dense = scatter_topk_to_dense(vals, idx, self.num_classes, self.fill_value)
+            dense = self.decoder_fn(p)
             self._cache[p] = dense.to(torch.float16)
             if verbose and (i + 1) % 50 == 0:
                 print(f"  preloaded {i+1}/{n} (miss so far: {miss})")
@@ -76,3 +63,54 @@ class SlowLogitsGPUCache:
 
     def __len__(self) -> int:
         return len(self._cache)
+
+
+def build_slow_decoder_fn(
+    data_cfg: dict, device: torch.device
+) -> Callable[[str], torch.Tensor]:
+    """根据 cfg.data.slow_logit_format 选择 slow logits 解码函数.
+
+    返回的闭包: path -> (C, X, Y, Z) fp32 GPU tensor.
+
+    支持:
+      - alocc_dense_topk:  data/alocc3d_wo_mask 等
+      - opus_sparse_full:  data/logits_opusv2l_full 等
+
+    复合 cfg (logits_format=composite) 用 slow_logit_format 区分.
+    """
+    fmt = data_cfg.get("slow_logit_format")
+    if fmt is None:
+        # 兼容 logits_format=alocc_dense_topk 这种非复合写法
+        fmt = data_cfg.get("logits_format", "alocc_dense_topk")
+    fmt = str(fmt)
+    num_classes = int(data_cfg["num_classes"])
+
+    if fmt == "alocc_dense_topk":
+        clamp_min = float(data_cfg.get("alocc_clamp_min", -5.0))
+        fill_value = float(data_cfg.get("alocc_fill_value", -5.0))
+        max_centering = bool(data_cfg.get("alocc_max_centering", False))
+
+        def _decode(path: str) -> torch.Tensor:
+            return decode_topk_npz_to_dense_gpu(
+                path, device=device, num_classes=num_classes,
+                clamp_min=clamp_min, fill_value=fill_value,
+                max_centering=max_centering,
+            )
+        return _decode
+
+    if fmt == "opus_sparse_full":
+        free_index = int(data_cfg["free_index"])
+        grid_size = tuple(data_cfg["grid_size"])
+        topk_k = int(data_cfg.get("opus_full_topk_k", 3))
+        other_fill = float(data_cfg.get("opus_other_fill_value", -5.0))
+        free_fill = float(data_cfg.get("opus_free_fill_value", 5.0))
+
+        def _decode(path: str) -> torch.Tensor:
+            return decode_opus_sparse_full_npz_to_dense_gpu(
+                path, device=device, num_classes=num_classes,
+                free_index=free_index, grid_size=grid_size, topk_k=topk_k,
+                other_fill_value=other_fill, free_fill_value=free_fill,
+            )
+        return _decode
+
+    raise ValueError(f"slow_logit_format 不支持: {fmt!r}")
