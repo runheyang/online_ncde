@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""RWFA baseline 的演化时长评估（0.5/1.0/1.5/2.0s 桶 mIoU + RayIoU）。
+"""RWFA baseline 随机/显式帧间隔评估（末帧 mIoU + RayIoU）。
 
-复用 scripts/eval_online_ncde_evolution_times.main() 的全套桶分配、fallback、
-RayIoU 收集逻辑，仅通过 monkey-patch 把 OnlineNcdeAligner 替换成签名兼容的
-RWFA factory（NCDE-only 的 func_g_* / solver_variant 字段被吸收/忽略）。
+复用 tests/online_ncde/eval_online_ncde_random_interval.py 的抽帧 dataset、
+mIoU/RayIoU 与 CLI，只把 OnlineNcdeAligner 替换为 RecurrentWarpFusionAligner。
 
-CLI 与上游一致：--config / --checkpoint / --evolution-times / --batch-size / ...
-新增参数：
-  - --model-kind {rwfa-conv, rwfa-attn}（默认 rwfa-attn）
-  - --use-fast-residual / --no-use-fast-residual（默认关闭，与 train_rwfa.py 对齐）
-其余参数（--solver 等）保留以兼容上游签名，但对 RWFA 无影响。
+示例：
+  python scripts/baselines/eval_rwfa_random_interval.py \
+      --config configs/xxx.yaml --checkpoint ckpt.pt --model-kind rwfa-attn \
+      --random --gap-choices "1,2,3" --target-last-step 12 --seed 0
 """
 
 from __future__ import annotations
@@ -20,21 +18,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
-sys.path.append(str(ROOT / "scripts"))
+sys.path.append(str(ROOT / "tests" / "online_ncde"))
 
-import eval_online_ncde_evolution_times as upstream  # noqa: E402
+import eval_online_ncde_random_interval as upstream  # noqa: E402
 from online_ncde.baselines import RecurrentWarpFusionAligner  # noqa: E402
 
 
 class _RwfaAsAlignerCallable:
-    """让 RWFA 看起来和 OnlineNcdeAligner 同构造签名。
+    """让 RWFA 看起来和 OnlineNcdeAligner 同构造签名。"""
 
-    NCDE-only 参数（func_g_*, solver_variant）被映射到 RWFA 对应字段或忽略。
-    fusion_attn_* 走 RWFA 默认值（论文实验里固定）；如需覆盖请直接在配置中
-    新增对应字段并在此处读取。
-    """
-
-    def __init__(self, model_kind: str, model_cfg: dict, use_fast_residual: bool) -> None:
+    def __init__(
+        self,
+        model_kind: str,
+        model_cfg: dict,
+        use_fast_residual: bool,
+    ) -> None:
         self._fusion_kind = "conv" if model_kind == "rwfa-conv" else "attn"
         self._model_cfg = model_cfg
         self._use_fast_residual = bool(use_fast_residual)
@@ -49,7 +47,7 @@ class _RwfaAsAlignerCallable:
         pc_range,
         voxel_size,
         decoder_init_scale=1.0e-3,
-        use_fast_residual=False,
+        use_fast_residual=True,
         func_g_inner_dim=32,
         func_g_body_dilations=(1, 2, 3),
         func_g_gn_groups=8,
@@ -60,6 +58,7 @@ class _RwfaAsAlignerCallable:
         resolved_use_fast_residual = self._use_fast_residual
         # 训练时若关闭 residual，DenseDecoder 使用默认初始化；结构不变，但保持构造语义一致。
         resolved_decoder_init_scale = decoder_init_scale if resolved_use_fast_residual else None
+
         return RecurrentWarpFusionAligner(
             num_classes=num_classes,
             feat_dim=feat_dim,
@@ -84,7 +83,7 @@ class _RwfaAsAlignerCallable:
 
 
 def _peek_baseline_args() -> tuple[str, bool]:
-    """提取 RWFA 专属参数，剩余参数留给上游 parse_args。"""
+    """提取 RWFA 专属参数，剩余参数交给上游 random-interval parser。"""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--model-kind", choices=["rwfa-conv", "rwfa-attn"], default="rwfa-attn")
     parser.add_argument(
@@ -99,7 +98,7 @@ def _peek_baseline_args() -> tuple[str, bool]:
 
 
 def _peek_config_path() -> str | None:
-    """偷一份 --config 路径用来加载 model_cfg；若未提供让上游正常处理（--help 等情形）。"""
+    """提前读取 --config，以便构造 RWFA factory；未提供时让上游处理 --help/报错。"""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--config", default=None)
     known, _ = parser.parse_known_args()
@@ -119,28 +118,26 @@ def _print_extra_help_if_needed() -> None:
 
 def main() -> None:
     _print_extra_help_if_needed()
-    model_kind, use_fast_residual = _peek_baseline_args()
+    model_kind, use_fast_residual_override = _peek_baseline_args()
     config_path = _peek_config_path()
 
     if config_path is None:
-        # 没拿到 --config（或用户 --help），直接走上游让它接管参数解析/帮助打印
         upstream.main()
         return
 
     from online_ncde.config import load_config_with_base
+
     cfg = load_config_with_base(config_path)
     model_cfg = cfg.get("model", {})
 
-    # monkey-patch：让上游脚本里 model = OnlineNcdeAligner(...) 实际构造 RWFA
     upstream.OnlineNcdeAligner = _RwfaAsAlignerCallable(
         model_kind=model_kind,
         model_cfg=model_cfg,
-        use_fast_residual=use_fast_residual,
+        use_fast_residual=use_fast_residual_override,
     )
     print(
-        f"[rwfa-eval] model_kind={model_kind} "
-        f"use_fast_residual={use_fast_residual} "
-        "(monkey-patched OnlineNcdeAligner)"
+        f"[rwfa-random-interval] model_kind={model_kind} "
+        f"use_fast_residual={use_fast_residual_override}"
     )
     upstream.main()
 
