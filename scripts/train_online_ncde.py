@@ -124,12 +124,17 @@ def build_dataset(
     root_path: str,
     logits_loader,
     ray_sidecar_split: str | None = None,
+    min_history_completeness: int | None = None,
 ) -> Occ3DOnlineNcdeDataset:
     """根据 data_cfg 构造 Occ3DOnlineNcdeDataset。
 
-    训练/训练内 val 默认过滤短历史样本（history_completeness < 4），
-    可在 data_cfg 里设 min_history_completeness 覆盖。
+    默认过滤短历史样本（history_completeness < 4），可通过参数显式覆盖。
     """
+    min_hc = (
+        int(data_cfg.get("min_history_completeness", 4))
+        if min_history_completeness is None
+        else int(min_history_completeness)
+    )
     return build_online_ncde_dataset(
         data_cfg,
         info_path=info_path,
@@ -138,7 +143,7 @@ def build_dataset(
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split=ray_sidecar_split,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
-        min_history_completeness=int(data_cfg.get("min_history_completeness", 4)),
+        min_history_completeness=min_hc,
     )
 
 

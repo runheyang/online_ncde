@@ -195,9 +195,15 @@ def main() -> None:
     wandb_cfg = cfg.get("wandb", {})
 
     logits_loader = build_logits_loader(data_cfg, root_path)
+    train_min_hc = int(data_cfg.get("min_history_completeness", 4))
+    val_min_hc = 0
+    if local_rank == 0:
+        print(f"[history] train min_history_completeness={train_min_hc}")
+        print("[history] val min_history_completeness=0 (include short-history samples)")
     train_dataset = build_dataset(
         info_path=data_cfg["info_path"], data_cfg=data_cfg, root_path=root_path,
         logits_loader=logits_loader, ray_sidecar_split="train",
+        min_history_completeness=train_min_hc,
     )
     train_dataset = build_subset(train_dataset, args.train_limit)
 
@@ -207,6 +213,7 @@ def main() -> None:
         val_dataset = build_dataset(
             info_path=val_info_path, data_cfg=data_cfg, root_path=root_path,
             logits_loader=logits_loader, ray_sidecar_split="val",
+            min_history_completeness=val_min_hc,
         )
         if args.val_scene_count > 0:
             scene_names = [info.get("scene_name", "") for info in val_dataset.infos]
