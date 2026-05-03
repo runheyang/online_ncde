@@ -77,6 +77,8 @@ def main() -> None:
         # no-warp 分支默认训练 10 epoch（用户显式指定 --epochs 时以指定值为准）
         if args.epochs == 0:
             args.epochs = 10
+        # no-warp 分支不使用 fast KL；在入口处覆盖，避免改共享 config。
+        args.lambda_fast_kl = 0.0
         return args
 
     upstream.parse_args = parse_args_with_kind
