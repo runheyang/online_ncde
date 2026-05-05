@@ -15,6 +15,7 @@ DDP 启动方式与 train_online_ncde.py 一致，例如：
 
 CLI 与 train_online_ncde.py 兼容子集：相同 config 文件可直接复用。attn 分支默认
 使用 hidden/state=32、fusion_inner_dim=func_g_inner_dim(24)，对齐 NCDE 计算维度。
+baseline 默认关闭 fast residual / fast KL，并训练 10 epoch；--epochs 可覆盖训练轮数。
 """
 
 from __future__ import annotations
@@ -178,6 +179,11 @@ def _build_model(
 def main() -> None:
     args = parse_args()
     local_rank, use_ddp = setup_ddp_early()
+
+    # baseline 默认短训且不蒸馏 fast logits；显式 --epochs 可覆盖。
+    if args.epochs == 0:
+        args.epochs = 10
+    args.lambda_fast_kl = 0.0
 
     cfg = load_config_with_base(args.config)
     if args.epochs > 0:
