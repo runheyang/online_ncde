@@ -33,9 +33,25 @@ class _RwfaAsAlignerCallable:
         model_cfg: dict,
         use_fast_residual: bool,
     ) -> None:
+        self._model_kind = model_kind
         self._fusion_kind = "conv" if model_kind == "rwfa-conv" else "attn"
         self._model_cfg = model_cfg
         self._use_fast_residual = bool(use_fast_residual)
+
+    def _resolve_fusion_channels(self) -> tuple[int, int]:
+        """与 train_rwfa.py 保持一致：attn 默认用 NCDE 的 24 维计算主干。"""
+        cfg = self._model_cfg
+        if self._model_kind == "rwfa-attn":
+            inner_dim = int(cfg.get("fusion_inner_dim", cfg.get("func_g_inner_dim", 24)))
+            num_heads = int(cfg.get("fusion_attn_num_heads", 3))
+        else:
+            inner_dim = int(cfg.get("fusion_inner_dim", 32))
+            num_heads = int(cfg.get("fusion_attn_num_heads", 4))
+        if inner_dim % num_heads != 0:
+            raise ValueError(
+                f"fusion_inner_dim={inner_dim} 必须能被 fusion_attn_num_heads={num_heads} 整除"
+            )
+        return inner_dim, num_heads
 
     def __call__(
         self,
@@ -58,6 +74,7 @@ class _RwfaAsAlignerCallable:
         resolved_use_fast_residual = self._use_fast_residual
         # 训练时若关闭 residual，DenseDecoder 使用默认初始化；结构不变，但保持构造语义一致。
         resolved_decoder_init_scale = decoder_init_scale if resolved_use_fast_residual else None
+        fusion_inner_dim, fusion_attn_num_heads = self._resolve_fusion_channels()
 
         return RecurrentWarpFusionAligner(
             num_classes=num_classes,
@@ -70,11 +87,10 @@ class _RwfaAsAlignerCallable:
             decoder_init_scale=resolved_decoder_init_scale,
             use_fast_residual=resolved_use_fast_residual,
             fusion_kind=self._fusion_kind,
-            # 与 train_rwfa.py 对齐：RWFA 默认值独立于 NCDE 的 func_g_* 配置。
-            fusion_inner_dim=int(cfg.get("fusion_inner_dim", 32)),
+            fusion_inner_dim=fusion_inner_dim,
             fusion_body_dilations=tuple(cfg.get("fusion_body_dilations", [1, 2, 3])),
             fusion_gn_groups=int(cfg.get("fusion_gn_groups", 8)),
-            fusion_attn_num_heads=int(cfg.get("fusion_attn_num_heads", 4)),
+            fusion_attn_num_heads=fusion_attn_num_heads,
             fusion_attn_window_size=tuple(cfg.get("fusion_attn_window_size", [8, 8, 4])),
             fusion_attn_head_dilations=tuple(cfg.get("fusion_attn_head_dilations", [1, 2])),
             fusion_attn_mlp_ratio=float(cfg.get("fusion_attn_mlp_ratio", 2.0)),

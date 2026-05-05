@@ -13,8 +13,8 @@ DDP 启动方式与 train_online_ncde.py 一致，例如：
 精简掉的功能（baseline 实验场景一般不需要，需要时再扩）：
   - 分箱 RayIoU / metrics json
 
-CLI 与 train_online_ncde.py 兼容子集：相同 config 文件可直接复用，model 段
-新增字段 fusion_inner_dim / fusion_body_dilations / fusion_attn_* 走默认即可。
+CLI 与 train_online_ncde.py 兼容子集：相同 config 文件可直接复用。attn 分支默认
+使用 hidden/state=32、fusion_inner_dim=func_g_inner_dim(24)，对齐 NCDE 计算维度。
 """
 
 from __future__ import annotations
@@ -119,6 +119,21 @@ def _cleanup_gpu_cache() -> None:
         torch.cuda.empty_cache()
 
 
+def _resolve_fusion_channels(model_kind: str, model_cfg: dict) -> tuple[int, int]:
+    """解析 RWFA 主干计算维度；attn 默认对齐 NCDE 的 func_g_inner_dim。"""
+    if model_kind == "rwfa-attn":
+        inner_dim = int(model_cfg.get("fusion_inner_dim", model_cfg.get("func_g_inner_dim", 24)))
+        num_heads = int(model_cfg.get("fusion_attn_num_heads", 3))
+    else:
+        inner_dim = int(model_cfg.get("fusion_inner_dim", 32))
+        num_heads = int(model_cfg.get("fusion_attn_num_heads", 4))
+    if inner_dim % num_heads != 0:
+        raise ValueError(
+            f"fusion_inner_dim={inner_dim} 必须能被 fusion_attn_num_heads={num_heads} 整除"
+        )
+    return inner_dim, num_heads
+
+
 def _build_model(
     model_kind: str,
     model_cfg: dict,
@@ -132,6 +147,7 @@ def _build_model(
     True 时沿用残差范式默认（init_scale=1e-3，输出 ≈ 残差）。
     """
     fusion_kind = "conv" if model_kind == "rwfa-conv" else "attn"
+    fusion_inner_dim, fusion_attn_num_heads = _resolve_fusion_channels(model_kind, model_cfg)
     if use_fast_residual:
         decoder_init_scale = model_cfg.get("decoder_init_scale", 1.0e-3)
     else:
@@ -148,10 +164,10 @@ def _build_model(
         decoder_init_scale=decoder_init_scale,
         use_fast_residual=use_fast_residual,
         fusion_kind=fusion_kind,
-        fusion_inner_dim=int(model_cfg.get("fusion_inner_dim", 32)),
+        fusion_inner_dim=fusion_inner_dim,
         fusion_body_dilations=tuple(model_cfg.get("fusion_body_dilations", [1, 2, 3])),
         fusion_gn_groups=int(model_cfg.get("fusion_gn_groups", 8)),
-        fusion_attn_num_heads=int(model_cfg.get("fusion_attn_num_heads", 4)),
+        fusion_attn_num_heads=fusion_attn_num_heads,
         fusion_attn_window_size=tuple(model_cfg.get("fusion_attn_window_size", [8, 8, 4])),
         fusion_attn_head_dilations=tuple(model_cfg.get("fusion_attn_head_dilations", [1, 2])),
         fusion_attn_mlp_ratio=float(model_cfg.get("fusion_attn_mlp_ratio", 2.0)),
