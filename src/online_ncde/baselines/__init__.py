@@ -8,6 +8,7 @@ from online_ncde.baselines.neural_ode_dt_aligner import (
     NeuralOdeDtAligner,
     NeuralOdeDtSolver,
 )
+from online_ncde.baselines.no_warp_motion_attn import NoWarpMotionBiasAttnAligner
 from online_ncde.baselines.recurrent_warp_fusion import (
     FusionAttnNet,
     FusionNet,
@@ -20,6 +21,7 @@ __all__ = [
     "RecurrentWarpFusionAligner",
     "FusionNet",
     "FusionAttnNet",
+    "NoWarpMotionBiasAttnAligner",
     "NeuralOdeDtAligner",
     "NeuralOdeDtSolver",
 ]
