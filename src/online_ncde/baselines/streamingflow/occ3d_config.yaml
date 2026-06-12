@@ -1,0 +1,45 @@
+# StreamingFlow BEV GRU-ODE baseline 的 Occ3D 配置覆盖层。
+# 由 scripts/baselines/train_streamingflow_bev_ode.py 和
+# scripts/baselines/eval_streamingflow_bev_ode.py 自动叠加到用户传入的
+# 任意 Occ3D base config 上，不需要为每个 fast/slow 组合单独写 yaml。
+
+data:
+  # StreamingFlow baseline 主设定固定为 2Hz，13 帧历史按 stride=3 抽成 5 帧。
+  fast_frame_stride: 3
+
+model:
+  variant: sf_ode_bev
+  feat_dim: 48
+  hidden_dim: 48
+  encoder_in_channels: 18
+  output_mode: absolute
+  decoder_init_scale: null
+  streamingflow:
+    bev_resolution: [200, 200]
+    temporal_state_resolution: [200, 200]
+    bev_channels: 48
+    bev_stride_xy: 1
+    adapter_kind: matched_stride1
+    adapter_mid_channels: 64
+    small_encoder_kind: light_no_pool
+    small_encoder_blocks: 3
+    small_encoder_spatial_downsample: false
+    small_decoder_kind: light_no_pool
+    small_decoder_blocks: 3
+    bev_to_3d_decoder_kind: matched_no_upsample
+    decoder_high_channels: 64
+    decoder_mid_channels: 64
+    decoder_fast_condition: true
+    decoder_fast_condition_channels: 64
+    n_spatial_gru: 1
+    n_res_layers: 1
+    impute: true
+    deterministic_impute: true
+    use_variable_ode_step: true
+
+train:
+  # StreamingFlow baseline 输出 absolute logits，不使用 fast residual KL。
+  lambda_fast_kl: 0.0
+
+wandb:
+  name: streamingflow_bev_ode
