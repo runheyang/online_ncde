@@ -7,6 +7,8 @@ data:
   # 训练/训练内评估过滤短历史样本（history_completeness<4）。独立评估脚本
   # 可加 --include-short-history 覆盖为 0，评估全集含短历史。
   min_history_completeness: 4
+  # 2Hz 推演：每 3 帧取 1 帧，13 帧 → 5 帧。
+  fast_frame_stride: 3
   # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
   ray_sidecar_dir: data/online_ncde_ray_sidecar
   # fast_logits_root: data/logits_opusv1t_full_postprocess
