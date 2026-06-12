@@ -1,4 +1,4 @@
-"""可微的 ray first-hit + no-hit termination loss。
+"""可微的 ray first-hit loss。
 
 设计目标：针对 RayIoU 的 first-hit 召回率下降问题，直接在 ray 级别上监督
 "沿着 GT 有 hit 的 ray，first-hit 概率质量应集中在 GT 深度附近"。
@@ -10,10 +10,8 @@
         → F.grid_sample 三线性插值到 (B,R,N)
         → first-hit 分布 q_i = p_i * Π_{j<i}(1-p_j)
         → L_hit：窗口 |d_i - d*| ≤ δ·step 内 q 求和的 NLL
-        → L_empty：GT no-hit ray 上对 trans_end 做 NLL
-        → L_depth：d_hat = Σ q·d + trans_end·d_max，与 d* 的非对称 SmoothL1
 
-GT finite hit ray 监督到 hit/depth；GT inf ray 监督到 no-hit。
+仅 GT finite hit ray 参与监督；GT inf / NaN / 超出 horizon 的 ray 忽略。
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ def generate_lidar_rays(device: torch.device | str = "cpu") -> torch.Tensor:
 
 
 class RayLoss(nn.Module):
-    """Ray first-hit + no-hit termination + asymmetric depth loss（可微）。
+    """Ray first-hit loss（可微）。
 
     Args:
         pc_range:        (x_min, y_min, z_min, x_max, y_max, z_max) ego 坐标系下的 bbox。
@@ -47,14 +45,10 @@ class RayLoss(nn.Module):
         window_voxels:   L_hit 窗口半宽，以 step 为单位（δ=1 → 窗口 ±0.4m）。
         near_max_m/mid_max_m: 近场/中场的深度上界。
         near_weight/mid_weight: 两段的 ray 权重。
-        lambda_hit/lambda_empty/lambda_pre_free/lambda_depth: 各项 loss 的组合权重。
-        depth_asym_far:  pred 比 GT 远时 SmoothL1 的权重。
-        depth_asym_near: pred 比 GT 近时 SmoothL1 的权重。
-        smooth_l1_beta:  SmoothL1 的切换阈值（米）。
+        lambda_hit:      hit loss 的内部权重。
         gt_dist_bias_m:  从 gt_dist 里减去的系统偏置。DVR 返回的是 hit voxel
-                         的"出射边界距离"（约 center + 0.5 voxel），而差分 ray
-                         marching 的 d_hat 在理想情形≈ voxel center，两者差
-                         约 0.5 * step。None → 默认 0.5 * step_m；手动传 0.0
+                         的"出射边界距离"（约 center + 0.5 voxel）。None →
+                         默认 0.5 * step_m；手动传 0.0
                          表示 GT 已经是 center 语义（如单元测试里人造的 GT）。
         eps:             数值稳定项。
     """
@@ -71,12 +65,6 @@ class RayLoss(nn.Module):
         near_weight: float = 2.0,
         mid_weight: float = 1.0,
         lambda_hit: float = 0.5,
-        lambda_empty: float = 0.5,
-        lambda_pre_free: float = 0.0,
-        lambda_depth: float = 0.2,
-        depth_asym_far: float = 2.0,
-        depth_asym_near: float = 1.0,
-        smooth_l1_beta: float = 1.0,
         gt_dist_bias_m: float | None = None,
         eps: float = 1.0e-6,
     ) -> None:
@@ -95,14 +83,8 @@ class RayLoss(nn.Module):
         self.near_weight = float(near_weight)
         self.mid_weight = float(mid_weight)
         self.lambda_hit = float(lambda_hit)
-        self.lambda_empty = float(lambda_empty)
-        self.lambda_pre_free = float(lambda_pre_free)
-        self.lambda_depth = float(lambda_depth)
-        self.depth_asym_far = float(depth_asym_far)
-        self.depth_asym_near = float(depth_asym_near)
-        self.smooth_l1_beta = float(smooth_l1_beta)
-        # DVR 输出的是 voxel 出射距离，差分 ray marching 的 d_hat 接近 center，
-        # 默认补偿 0.5 * step_m。测试/纯 center 语义的 GT 传 0.0 关掉。
+        # DVR 输出的是 voxel 出射距离；hit 窗口默认补偿 0.5 * step_m。
+        # 测试/纯 center 语义的 GT 传 0.0 关掉。
         self.gt_dist_bias_m = (
             0.5 * self.step_m if gt_dist_bias_m is None else float(gt_dist_bias_m)
         )
@@ -145,7 +127,7 @@ class RayLoss(nn.Module):
         valid_mask: Optional[torch.Tensor] = None,
         origin_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """计算 L_hit + L_empty + L_depth（多原点）。
+        """计算 hit-only ray loss（多原点）。
 
         Args:
             logits:      (B, C, X, Y, Z) 模型输出 logits。
@@ -154,22 +136,16 @@ class RayLoss(nn.Module):
                          套方向。
             gt_dist:     (B, K, R) GT ray 监督。
                          finite > 0 = first-hit 距离（米）
-                         inf        = 监督视野内 no-hit
-                         NaN        = ignore
+                         inf / NaN  = ignore
             valid_mask:  (B, K, R) bool 可选；false 表示忽略该 ray。
             origin_mask: (B, K) bool 可选；false 表示该原点是 pad，不贡献 loss。
 
         Returns:
             dict 包含:
-                total:      lambda_hit * hit + lambda_empty * empty + lambda_depth * depth
+                total:      lambda_hit * hit
                 hit:        加权后 hit loss（参与 total）
-                empty:      加权后 empty loss（参与 total）
-                depth:      加权后 depth loss（参与 total）
                 hit_raw:    未加权 hit loss（便于日志）
-                empty_raw:  未加权 empty loss
-                depth_raw:  未加权 depth loss
-                hit_rays:   本 batch 参与 hit/depth 的 ray 数
-                empty_rays: 本 batch 参与 empty 的 ray 数
+                hit_rays:   本 batch 参与 hit 的 ray 数
                 valid_rays: 本 batch 参与计算的 ray 数量（跨 K × R 求和）
         """
         if logits.dim() != 5:
@@ -264,9 +240,8 @@ class RayLoss(nn.Module):
         )
         trans = torch.exp(log_trans)                            # (B,K,R,N)
         q = p_occ * trans                                       # (B,K,R,N)
-        trans_end = torch.exp(cum[..., -1])                     # (B,K,R) 完全打不到的概率
 
-        # --- 5. GT ray 拆成 hit / empty / ignore ---
+        # --- 5. GT ray 只保留有限 first-hit，其他 ray 全部忽略 ---
         base_mask = torch.ones((B, K, R), device=device, dtype=torch.bool)
         if origin_mask is not None:
             if origin_mask.dim() != 2 or origin_mask.shape != (B, K):
@@ -278,10 +253,7 @@ class RayLoss(nn.Module):
             base_mask = base_mask & valid_mask.to(device=device).bool()
 
         hit_mask_raw = torch.isfinite(gt_dist) & (gt_dist > 0) & base_mask
-        empty_mask = (gt_dist == float("inf")) & base_mask
         hit_mask = hit_mask_raw & (gt_dist < self.ray_horizon_m)
-        empty_mask = empty_mask | (hit_mask_raw & (gt_dist >= self.ray_horizon_m))
-
         gt_dist_hit = torch.where(hit_mask, gt_dist, torch.zeros_like(gt_dist))
 
         # 近/中场权重（DVR 原生语义，与 sidecar / eval 指标口径一致）
@@ -298,12 +270,9 @@ class RayLoss(nn.Module):
         # 窗口内必须至少有一个 sample，否则产生恒定大常数惩罚污染均值
         has_window = in_window.any(dim=-1)                      # (B,K,R)
         hit_mask = hit_mask & has_window
-        gt_dist_eff = torch.where(hit_mask, gt_dist - self.gt_dist_bias_m, torch.zeros_like(gt_dist))
         w_hit = base_w * hit_mask.to(dtype)                     # (B,K,R)
-        w_empty = empty_mask.to(dtype)                          # (B,K,R)
         hit_rays = hit_mask.sum()
-        empty_rays = empty_mask.sum()
-        supervised_rays = hit_rays + empty_rays
+        supervised_rays = hit_rays
 
         zero = logits.sum() * 0.0
         zero_count = torch.tensor(0, device=device, dtype=torch.long)
@@ -311,15 +280,8 @@ class RayLoss(nn.Module):
             return {
                 "total": zero,
                 "hit": zero,
-                "empty": zero,
-                "pre_free": zero,
-                "depth": zero,
                 "hit_raw": zero.detach(),
-                "empty_raw": zero.detach(),
-                "pre_free_raw": zero.detach(),
-                "depth_raw": zero.detach(),
                 "hit_rays": zero_count,
-                "empty_rays": zero_count,
                 "supervised_rays": zero_count,
                 "valid_rays": zero_count,
             }
@@ -332,70 +294,13 @@ class RayLoss(nn.Module):
         nll = -torch.log(q_in_window + self.eps)                 # (B,K,R)
         hit_raw = _masked_mean(nll, w_hit)
 
-        # --- 7. L_empty：no-hit 概率的 NLL ---
-        empty_nll = -torch.log(trans_end + self.eps)             # (B,K,R)
-        empty_raw = _masked_mean(empty_nll, w_empty)
-
-        # --- 7.5 L_pre_free：GT surface 前方采样点显式约束为 free ---
-        # 对 hit ray，在 GT 表面前方（距离 < gt_dist_eff - δ）的采样点上，
-        # 直接监督 p_occ → 0，补充 L_hit 窗口 NLL 对前方脏点的弱隐式惩罚。
-        if self.lambda_pre_free > 0.0 and int(hit_rays.item()) > 0:
-            pre_margin_m = self.window_voxels * self.step_m  # 与 hit 窗口同宽的 margin
-            # (B,K,R,N) bool：采样深度严格小于 GT surface - margin
-            pre_surface = (
-                d_broadcast < (gt_dist_eff.unsqueeze(-1) - pre_margin_m)
-            ) & hit_mask.unsqueeze(-1)  # 只对 hit ray 生效
-            pre_count = pre_surface.sum(dim=-1)  # (B,K,R) 每条 ray 的 pre-surface 点数
-            # -log(1 - p_occ) = -log(p_free)，要求前方点为 free
-            pre_free_nll = -torch.log(
-                (1.0 - p_occ).clamp(min=self.eps)
-            )  # (B,K,R,N)
-            # 先按每条 ray 内的 pre-surface 点求均值，再按 ray 加权均值
-            pre_free_per_ray = (pre_free_nll * pre_surface.to(pre_free_nll.dtype)).sum(
-                dim=-1
-            ) / pre_count.clamp(min=1).to(pre_free_nll.dtype)  # (B,K,R)
-            # 只对有 pre-surface 点的 hit ray 参与均值
-            w_pre = w_hit * (pre_count > 0).to(dtype)
-            pre_free_raw = _masked_mean(pre_free_per_ray, w_pre)
-        else:
-            pre_free_raw = logits.sum() * 0.0
-
-        # --- 8. L_depth：非对称 SmoothL1 on expected first-hit depth ---
-        d_max = float(N * self.step_m)
-        d_hat = (q * d_broadcast).sum(dim=-1) + trans_end * d_max  # (B,K,R)
-        err = d_hat - gt_dist_eff                                   # 正 = 预测更远
-        pos_err = err.clamp(min=0.0)
-        neg_err = (-err).clamp(min=0.0)
-
-        def _sl1(x: torch.Tensor) -> torch.Tensor:
-            return F.smooth_l1_loss(
-                x, torch.zeros_like(x), reduction="none", beta=self.smooth_l1_beta
-            )
-
-        depth_per_ray = (
-            self.depth_asym_far * _sl1(pos_err)
-            + self.depth_asym_near * _sl1(neg_err)
-        )
-        depth_raw = _masked_mean(depth_per_ray, w_hit)
-
-        # --- 9. 汇总 ---
+        # --- 7. 汇总 ---
         hit_weighted = self.lambda_hit * hit_raw
-        empty_weighted = self.lambda_empty * empty_raw
-        pre_free_weighted = self.lambda_pre_free * pre_free_raw
-        depth_weighted = self.lambda_depth * depth_raw
-        total = hit_weighted + empty_weighted + pre_free_weighted + depth_weighted
         return {
-            "total": total,
+            "total": hit_weighted,
             "hit": hit_weighted,
-            "empty": empty_weighted,
-            "pre_free": pre_free_weighted,
-            "depth": depth_weighted,
             "hit_raw": hit_raw.detach(),
-            "empty_raw": empty_raw.detach(),
-            "pre_free_raw": pre_free_raw.detach(),
-            "depth_raw": depth_raw.detach(),
             "hit_rays": hit_rays,
-            "empty_rays": empty_rays,
             "supervised_rays": supervised_rays,
             "valid_rays": supervised_rays,
         }

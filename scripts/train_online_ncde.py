@@ -532,9 +532,6 @@ def main() -> None:
                 ray_total_text = (
                     f" ray_total={float(train_metrics['ray']):.4f}"
                     f" ray_hit={float(train_metrics['ray_hit']):.4f}"
-                    f" ray_empty={float(train_metrics['ray_empty']):.4f}"
-                    f" ray_pre_free={float(train_metrics.get('ray_pre_free', 0.0)):.4f}"
-                    f" ray_depth={float(train_metrics['ray_depth']):.4f}"
                 )
             fast_kl_text = ""
             if "fast_kl" in train_metrics:

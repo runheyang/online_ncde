@@ -170,7 +170,7 @@ class OnlineNcdeLoss(nn.Module):
 
 
 class SegAndRayLoss(nn.Module):
-    """seg loss + ray first-hit/depth loss 的组合包装。
+    """seg loss + ray first-hit loss 的组合包装。
 
     - seg loss 照旧接收 (logits, targets, mask)，返回 dict（必含 total/focal/aux）。
     - ray loss 仅在 forward 的 kwargs 里同时给出 ray_origins / gt_dist 时才会计算；
@@ -212,11 +212,7 @@ class SegAndRayLoss(nn.Module):
             zero = logits.sum() * 0.0
             seg_out["ray_total"] = zero.detach()
             seg_out["ray_hit"] = zero.detach()
-            seg_out["ray_empty"] = zero.detach()
-            seg_out["ray_pre_free"] = zero.detach()
-            seg_out["ray_depth"] = zero.detach()
             seg_out["ray_hit_rays"] = torch.tensor(0, device=logits.device)
-            seg_out["ray_empty_rays"] = torch.tensor(0, device=logits.device)
             seg_out["ray_valid_rays"] = torch.tensor(0, device=logits.device)
             return seg_out
 
@@ -232,11 +228,7 @@ class SegAndRayLoss(nn.Module):
         seg_out["total"] = seg_out["total"] + self.lambda_ray * ray_total
         seg_out["ray_total"] = (self.lambda_ray * ray_total).detach()
         seg_out["ray_hit"] = ray_out["hit_raw"]
-        seg_out["ray_empty"] = ray_out["empty_raw"]
-        seg_out["ray_pre_free"] = ray_out["pre_free_raw"]
-        seg_out["ray_depth"] = ray_out["depth_raw"]
         seg_out["ray_hit_rays"] = ray_out["hit_rays"]
-        seg_out["ray_empty_rays"] = ray_out["empty_rays"]
         seg_out["ray_valid_rays"] = ray_out["valid_rays"]
         return seg_out
 
@@ -278,12 +270,6 @@ def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
         "near_weight",
         "mid_weight",
         "lambda_hit",
-        "lambda_empty",
-        "lambda_pre_free",
-        "lambda_depth",
-        "depth_asym_far",
-        "depth_asym_near",
-        "smooth_l1_beta",
         "gt_dist_bias_m",
     ):
         if key in ray_cfg:
