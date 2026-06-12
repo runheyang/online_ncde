@@ -39,7 +39,7 @@ def decode_sparse_topk(
     num_frames = int(frame_splits.shape[0] - 1)
     use_device = device or torch.device("cpu")
 
-    # torch.from_numpy 不支持 uint16（OpenOccupancy 大网格的 sparse_coords dtype），
+    # torch.from_numpy 不支持 uint16（大网格 sparse_coords 可能使用该 dtype），
     # 在最外层统一升宽到 int32 后再切片，避免逐帧重复转换。
     if sparse_coords.dtype == np.uint16:
         sparse_coords = sparse_coords.astype(np.int32, copy=False)

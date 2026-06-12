@@ -40,7 +40,6 @@ from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E4
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
-from online_ncde.models.online_ncde_aligner_ds import OnlineNcdeAlignerDS  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 from online_ncde.utils.reproducibility import set_seed  # noqa: E402
@@ -332,17 +331,9 @@ def main() -> None:
     )
     if model_variant == "dense":
         model = OnlineNcdeAligner(**common_kwargs).to(device)
-    elif model_variant == "ds2x_oo":
-        # OpenOccupancy 等大网格分支：encoder stride=(2,2,2)，主干在 1/2 分辨率上演化。
-        model = OnlineNcdeAlignerDS(
-            encoder_downsample_stride=tuple(
-                model_cfg.get("encoder_downsample_stride", [2, 2, 2])
-            ),
-            **common_kwargs,
-        ).to(device)
     else:
         raise ValueError(
-            f"未知的 model.variant: {model_variant!r}，可选: 'dense', 'ds2x_oo'"
+            f"未知的 model.variant: {model_variant!r}，仅支持 'dense'"
         )
 
     # 先加载权重

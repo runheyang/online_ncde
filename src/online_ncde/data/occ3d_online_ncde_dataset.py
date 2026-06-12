@@ -337,7 +337,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
             },
         }
 
-    # ------- GT 加载钩子（子类可 override 以支持其它 GT 格式，如 OpenOccupancy） ------- #
+    # ------- GT 加载钩子（子类可 override 以支持其它 GT 格式） ------- #
     def _load_curr_gt(
         self,
         info: Dict[str, Any],
