@@ -17,7 +17,7 @@ scripts/ray_tuning_runs/state.json
 .cursor/
 .claude/
 CLAUDE.md
-AGENTS.md
+
 
 # Python cache
 __pycache__/
