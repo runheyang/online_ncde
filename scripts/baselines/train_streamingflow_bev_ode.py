@@ -322,13 +322,27 @@ def main() -> None:
 
     if args.resume:
         output_dir = os.path.dirname(os.path.abspath(args.resume))
+        run_timestamp = os.path.basename(output_dir)
     else:
         config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(
             str(ROOT), "outputs", "baselines", "streamingflow_bev_ode", os.path.dirname(config_rel)
         )
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join(output_base, timestamp)
+        if use_ddp:
+            if is_main:
+                ts_tensor = torch.tensor(
+                    [int(datetime.now().strftime("%Y%m%d%H%M%S"))],
+                    dtype=torch.long,
+                    device=device,
+                )
+            else:
+                ts_tensor = torch.zeros(1, dtype=torch.long, device=device)
+            dist.broadcast(ts_tensor, src=0)
+            timestamp_raw = str(int(ts_tensor.item()))
+            run_timestamp = f"{timestamp_raw[:8]}_{timestamp_raw[8:]}"
+        else:
+            run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = os.path.join(output_base, run_timestamp)
     os.makedirs(output_dir, exist_ok=True)
     if is_main:
         print(f"[ckpt] output_dir: {output_dir}")
@@ -340,7 +354,7 @@ def main() -> None:
         run = wandb.init(
             entity=wandb_cfg.get("entity", "runheyang"),
             project=wandb_cfg.get("project", "neural-ode"),
-            name=f"streamingflow_bev_ode-{wandb_cfg.get('name', datetime.now().strftime('%Y%m%d_%H%M%S'))}",
+            name=wandb_cfg.get("name", "") or run_timestamp,
             config={"model_kind": "streamingflow-bev-ode", "config": args.config},
         )
 

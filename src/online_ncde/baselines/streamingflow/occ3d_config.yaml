@@ -29,7 +29,7 @@ model:
     bev_to_3d_decoder_kind: matched_no_upsample
     decoder_high_channels: 64
     decoder_mid_channels: 64
-    decoder_fast_condition: true
+    decoder_fast_condition: false
     decoder_fast_condition_channels: 64
     n_spatial_gru: 1
     n_res_layers: 1
@@ -38,8 +38,9 @@ model:
     use_variable_ode_step: true
 
 train:
+  epochs: 10
   # StreamingFlow baseline 输出 absolute logits，不使用 fast residual KL。
   lambda_fast_kl: 0.0
 
 wandb:
-  name: streamingflow_bev_ode
+  name: ""
