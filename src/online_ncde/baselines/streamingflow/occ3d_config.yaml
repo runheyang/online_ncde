@@ -29,8 +29,6 @@ model:
     bev_to_3d_decoder_kind: matched_no_upsample
     decoder_high_channels: 64
     decoder_mid_channels: 64
-    decoder_fast_condition: false
-    decoder_fast_condition_channels: 64
     n_spatial_gru: 1
     n_res_layers: 1
     impute: true

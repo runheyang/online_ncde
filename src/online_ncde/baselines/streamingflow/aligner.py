@@ -10,7 +10,6 @@ import torch.nn as nn
 
 from online_ncde.baselines.streamingflow.bridge import (
     BEVTo3DDecoder,
-    FastConditionedBEVTo3DDecoder,
     LightNoPoolSmallDecoder,
     LightNoPoolSmallEncoder,
     LogitsToBEVAdapter,
@@ -90,11 +89,9 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         adapter_mid = int(cfg.get("adapter_mid_channels", 64))
         decoder_mid = int(cfg.get("decoder_mid_channels", 64))
         decoder_high = int(cfg.get("decoder_high_channels", 64))
-        fast_condition_channels = int(cfg.get("decoder_fast_condition_channels", 64))
         small_encoder_blocks = int(cfg.get("small_encoder_blocks", 3))
         small_decoder_blocks = int(cfg.get("small_decoder_blocks", 3))
         gn_groups = int(cfg.get("gn_groups", 8))
-        self.decoder_fast_condition = bool(cfg.get("decoder_fast_condition", True))
 
         self.fast_adapter = LogitsToBEVAdapter(
             num_classes=self.num_classes,
@@ -135,27 +132,15 @@ class StreamingFlowBEVOdeAligner(nn.Module):
             num_res_layers=int(cfg.get("n_res_layers", 1)),
             gn_groups=gn_groups,
         )
-        if self.decoder_fast_condition:
-            self.bev_to_3d = FastConditionedBEVTo3DDecoder(
-                in_channels=self.bev_channels,
-                mid_channels=decoder_mid,
-                high_channels=decoder_high,
-                fast_condition_channels=fast_condition_channels,
-                upsample_scale=decoder_upsample_scale,
-                num_classes=self.num_classes,
-                height_bins=self.height_bins,
-                gn_groups=gn_groups,
-            )
-        else:
-            self.bev_to_3d = BEVTo3DDecoder(
-                in_channels=self.bev_channels,
-                mid_channels=decoder_mid,
-                high_channels=decoder_high,
-                upsample_scale=decoder_upsample_scale,
-                num_classes=self.num_classes,
-                height_bins=self.height_bins,
-                gn_groups=gn_groups,
-            )
+        self.bev_to_3d = BEVTo3DDecoder(
+            in_channels=self.bev_channels,
+            mid_channels=decoder_mid,
+            high_channels=decoder_high,
+            upsample_scale=decoder_upsample_scale,
+            num_classes=self.num_classes,
+            height_bins=self.height_bins,
+            gn_groups=gn_groups,
+        )
 
     def _validate_logits(self, fast_logits: torch.Tensor, slow_logits: torch.Tensor) -> None:
         if fast_logits.dim() != 5 or slow_logits.dim() != 4:
@@ -227,20 +212,12 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         target_times = (tau[rollout_start_step + 1 : last_step + 1] - t0).float()
         return obs0, observations, target_times
 
-    def _decode_bev_states(
-        self,
-        bev_states: torch.Tensor,
-        target_fast_logits: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def _decode_bev_states(self, bev_states: torch.Tensor) -> torch.Tensor:
         if bev_states.shape[1] == 0:
             b = bev_states.shape[0]
             return bev_states.new_zeros((b, 0, self.num_classes, *self.grid_size))
         bev = self.small_decoder(bev_states)
         bev = self.sequence_refiner(bev)
-        if self.decoder_fast_condition:
-            if target_fast_logits is None:
-                raise ValueError("decoder_fast_condition=True 时必须提供 target_fast_logits")
-            return self.bev_to_3d(bev, target_fast_logits)
         return self.bev_to_3d(bev)
 
     def _diagnostics(self, bev_states: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -302,10 +279,7 @@ class StreamingFlowBEVOdeAligner(nn.Module):
                 return_step_times=False,
             ),
         )
-        target_fast_logits = fast_logits[
-            rollout_start_step + 1 : rollout_start_step + 1 + rollout_steps
-        ].unsqueeze(0)
-        step_logits = self._decode_bev_states(bev_states, target_fast_logits)[0].float()
+        step_logits = self._decode_bev_states(bev_states)[0].float()
         step_indices = torch.arange(
             rollout_start_step + 1,
             rollout_start_step + 1 + rollout_steps,
@@ -338,11 +312,7 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         aligned = step_logits[-1] if step_logits.shape[0] > 0 else slow_logits.float()
         return {"aligned": aligned, "diagnostics": cast(dict[str, torch.Tensor], out["diagnostics"])}
 
-    def _measure_decode_ms(
-        self,
-        bev_states: torch.Tensor,
-        target_fast_logits: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _measure_decode_ms(self, bev_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         steps = int(bev_states.shape[1])
         if steps <= 0:
             empty_logits = bev_states.new_zeros((bev_states.shape[0], 0, self.num_classes, *self.grid_size))
@@ -352,13 +322,13 @@ class StreamingFlowBEVOdeAligner(nn.Module):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            logits = self._decode_bev_states(bev_states, target_fast_logits).float()
+            logits = self._decode_bev_states(bev_states).float()
             end.record()
             torch.cuda.synchronize(device=bev_states.device)
             total_ms = start.elapsed_time(end)
         else:
             t0 = time.perf_counter()
-            logits = self._decode_bev_states(bev_states, target_fast_logits).float()
+            logits = self._decode_bev_states(bev_states).float()
             total_ms = (time.perf_counter() - t0) * 1000.0
         per_step = logits.new_full((steps,), float(total_ms) / max(steps, 1))
         return logits, per_step
@@ -407,8 +377,7 @@ class StreamingFlowBEVOdeAligner(nn.Module):
                 return_step_times=True,
             ),
         )
-        target_fast_logits = fast_logits[rollout_start_step + 1 : num_frames].unsqueeze(0)
-        logits, decode_ms = self._measure_decode_ms(bev_states, target_fast_logits)
+        logits, decode_ms = self._measure_decode_ms(bev_states)
         solver_ms = solver_ms.to(device=fast_logits.device, dtype=torch.float32)
         step_warp_ms = torch.zeros_like(solver_ms)
         step_time_ms = step_warp_ms + solver_ms + decode_ms
