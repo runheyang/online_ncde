@@ -112,6 +112,101 @@ class LightNoPoolSmallDecoder(nn.Module):
         return self.net(x)
 
 
+class StreamingFlowSmallEncoder2D(nn.Module):
+    """StreamingFlow 原版风格的 200x200 -> 50x50 SRVP encoder。"""
+
+    def __init__(
+        self,
+        in_channels: int = 64,
+        latent_channels: int = 192,
+        filter_size: int = 32,
+        gn_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        nf = int(filter_size)
+        self.blocks = nn.ModuleList(
+            [
+                ResBlock2D(int(in_channels), nf, gn_groups=gn_groups),
+                ResBlock2D(nf, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 4, gn_groups=gn_groups),
+            ]
+        )
+        self.last_conv = ConvNormAct2d(
+            nf * 4,
+            int(latent_channels),
+            kernel_size=3,
+            padding=1,
+            gn_groups=gn_groups,
+            activation="tanh",
+        )
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"StreamingFlowSmallEncoder2D 输入需为 4D，当前: {tuple(x.shape)}")
+        h = x
+        for idx, block in enumerate(self.blocks):
+            if idx in (1, 2):
+                h = self.maxpool(h)
+            h = block(h)
+        return self.last_conv(h)
+
+
+class StreamingFlowSmallDecoder2D(nn.Module):
+    """StreamingFlow 原版风格的 50x50 -> 200x200 SRVP decoder。"""
+
+    def __init__(
+        self,
+        latent_channels: int = 192,
+        out_channels: int = 64,
+        filter_size: int = 32,
+        gn_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        nf = int(filter_size)
+        self.first_conv = ConvNormAct2d(
+            int(latent_channels),
+            nf * 4,
+            kernel_size=3,
+            padding=1,
+            gn_groups=gn_groups,
+            activation="silu",
+        )
+        self.blocks = nn.ModuleList(
+            [
+                ResBlock2D(nf * 4, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf, gn_groups=gn_groups),
+                ResBlock2D(nf, nf, gn_groups=gn_groups),
+            ]
+        )
+        self.last_conv = nn.Sequential(
+            ConvNormAct2d(nf, nf, kernel_size=3, padding=1, gn_groups=gn_groups, activation="silu"),
+            nn.Conv2d(nf, int(out_channels), kernel_size=3, padding=1, bias=True),
+        )
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+
+    def _decode_flat(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.first_conv(x)
+        for idx, block in enumerate(self.blocks):
+            h = block(h)
+            if idx in (2, 3):
+                h = self.upsample(h)
+        return self.last_conv(h)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 5:
+            b, s, c, h, w = x.shape
+            y = self._decode_flat(x.reshape(b * s, c, h, w))
+            return y.view(b, s, *y.shape[1:])
+        if x.dim() == 4:
+            return self._decode_flat(x)
+        raise ValueError(f"StreamingFlowSmallDecoder2D 输入需为 4D/5D，当前: {tuple(x.shape)}")
+
+
 class BEVTo3DDecoder(nn.Module):
     """BEV latent -> 200x200x16 absolute occupancy logits。"""
 

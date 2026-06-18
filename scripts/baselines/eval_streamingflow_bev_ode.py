@@ -85,8 +85,8 @@ def _to_json_number(v: float) -> float | None:
 def _build_model(data_cfg: dict, model_cfg: dict) -> StreamingFlowBEVOdeAligner:
     return StreamingFlowBEVOdeAligner(
         num_classes=int(data_cfg["num_classes"]),
-        feat_dim=int(model_cfg.get("feat_dim", 48)),
-        hidden_dim=int(model_cfg.get("hidden_dim", 48)),
+        feat_dim=int(model_cfg.get("feat_dim", 192)),
+        hidden_dim=int(model_cfg.get("hidden_dim", 192)),
         encoder_in_channels=int(model_cfg.get("encoder_in_channels", 18)),
         free_index=int(data_cfg["free_index"]),
         pc_range=tuple(data_cfg["pc_range"]),

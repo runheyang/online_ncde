@@ -15,6 +15,8 @@ from online_ncde.baselines.streamingflow.bridge import (
     LogitsToBEVAdapter,
     SameTimeGatedFusion,
     SpatialGRURefiner2D,
+    StreamingFlowSmallDecoder2D,
+    StreamingFlowSmallEncoder2D,
 )
 from online_ncde.baselines.streamingflow.core import StreamingFlowODECore
 from online_ncde.data.time_series import compute_segment_dt, cumulative_tau
@@ -59,45 +61,73 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         self.bev_channels = int(cfg.get("bev_channels", hidden_dim))
         if int(feat_dim) != self.bev_channels or int(hidden_dim) != self.bev_channels:
             raise ValueError(
-                "StreamingFlow baseline 要求 feat_dim=hidden_dim=bev_channels=48，"
+                "StreamingFlow baseline 要求 feat_dim=hidden_dim=bev_channels=192，"
                 f"当前 feat_dim={feat_dim}, hidden_dim={hidden_dim}, bev_channels={self.bev_channels}"
             )
-        if self.bev_channels != 48:
-            raise ValueError(f"StreamingFlow baseline 主配置固定 bev_channels=48，当前 {self.bev_channels}")
+        if self.bev_channels != 192:
+            raise ValueError(f"StreamingFlow baseline 主配置固定 bev_channels=192，当前 {self.bev_channels}")
+
+        small_encoder_kind = str(cfg.get("small_encoder_kind", "streamingflow_downsample"))
+        small_decoder_kind = str(cfg.get("small_decoder_kind", "streamingflow_upsample"))
+        if small_encoder_kind not in {"streamingflow_downsample", "light_no_pool"}:
+            raise ValueError(f"未知 small_encoder_kind: {small_encoder_kind!r}")
+        if small_decoder_kind not in {"streamingflow_upsample", "light_no_pool"}:
+            raise ValueError(f"未知 small_decoder_kind: {small_decoder_kind!r}")
+        if (small_encoder_kind, small_decoder_kind) not in {
+            ("streamingflow_downsample", "streamingflow_upsample"),
+            ("light_no_pool", "light_no_pool"),
+        }:
+            raise ValueError(
+                f"small encoder/decoder kind 必须成对使用，当前 "
+                f"{small_encoder_kind!r}/{small_decoder_kind!r}"
+            )
 
         bev_resolution = tuple(cfg.get("bev_resolution", [200, 200]))
-        temporal_resolution = tuple(cfg.get("temporal_state_resolution", [200, 200]))
-        if bev_resolution != (200, 200) or temporal_resolution != (200, 200):
+        temporal_resolution = tuple(cfg.get("temporal_state_resolution", [50, 50]))
+        expected_temporal_resolution = (
+            (50, 50) if small_encoder_kind == "streamingflow_downsample" else (200, 200)
+        )
+        if bev_resolution != (200, 200) or temporal_resolution != expected_temporal_resolution:
             raise ValueError(
-                f"StreamingFlow baseline 固定 BEV/temporal resolution 为 200x200，"
+                f"StreamingFlow baseline 固定 BEV/temporal resolution 为 "
+                f"200x200/{expected_temporal_resolution[0]}x{expected_temporal_resolution[1]}，"
                 f"当前 {bev_resolution}/{temporal_resolution}"
             )
+        self.bev_resolution = (int(bev_resolution[0]), int(bev_resolution[1]))
+        self.temporal_state_resolution = (
+            int(temporal_resolution[0]),
+            int(temporal_resolution[1]),
+        )
 
         bev_stride_xy = int(cfg.get("bev_stride_xy", 1))
         if bev_stride_xy != 1:
-            raise ValueError(f"200x200 BEV baseline 要求 bev_stride_xy=1，当前 {bev_stride_xy}")
-        decoder_upsample_scale = self.grid_size[0] // int(bev_resolution[0])
+            raise ValueError(f"StreamingFlow 50x50 baseline 要求 adapter bev_stride_xy=1，当前 {bev_stride_xy}")
+        decoder_upsample_scale = self.grid_size[0] // self.bev_resolution[0]
         if (
-            self.grid_size[0] % int(bev_resolution[0]) != 0
-            or self.grid_size[1] % int(bev_resolution[1]) != 0
-            or decoder_upsample_scale != self.grid_size[1] // int(bev_resolution[1])
+            self.grid_size[0] % self.bev_resolution[0] != 0
+            or self.grid_size[1] % self.bev_resolution[1] != 0
+            or decoder_upsample_scale != self.grid_size[1] // self.bev_resolution[1]
         ):
             raise ValueError(
                 f"BEV resolution {bev_resolution} 无法整除输出 grid {self.grid_size[:2]}"
             )
 
+        self.observation_channels = int(cfg.get("observation_channels", 64))
+        self.decoded_bev_channels = int(cfg.get("decoded_bev_channels", 64))
         adapter_mid = int(cfg.get("adapter_mid_channels", 64))
         decoder_mid = int(cfg.get("decoder_mid_channels", 64))
         decoder_high = int(cfg.get("decoder_high_channels", 64))
         small_encoder_blocks = int(cfg.get("small_encoder_blocks", 3))
         small_decoder_blocks = int(cfg.get("small_decoder_blocks", 3))
+        small_encoder_filter = int(cfg.get("small_encoder_filter_size", 32))
+        small_decoder_filter = int(cfg.get("small_decoder_filter_size", 32))
         gn_groups = int(cfg.get("gn_groups", 8))
 
         self.fast_adapter = LogitsToBEVAdapter(
             num_classes=self.num_classes,
             height_bins=self.height_bins,
             mid_channels=adapter_mid,
-            out_channels=self.bev_channels,
+            out_channels=self.observation_channels,
             stride_xy=bev_stride_xy,
             gn_groups=gn_groups,
         )
@@ -105,16 +135,37 @@ class StreamingFlowBEVOdeAligner(nn.Module):
             num_classes=self.num_classes,
             height_bins=self.height_bins,
             mid_channels=adapter_mid,
-            out_channels=self.bev_channels,
+            out_channels=self.observation_channels,
             stride_xy=bev_stride_xy,
             gn_groups=gn_groups,
         )
-        self.fast_small_encoder = LightNoPoolSmallEncoder(
-            channels=self.bev_channels, num_blocks=small_encoder_blocks, gn_groups=gn_groups
-        )
-        self.slow_small_encoder = LightNoPoolSmallEncoder(
-            channels=self.bev_channels, num_blocks=small_encoder_blocks, gn_groups=gn_groups
-        )
+        if small_encoder_kind == "streamingflow_downsample":
+            self.fast_small_encoder = StreamingFlowSmallEncoder2D(
+                in_channels=self.observation_channels,
+                latent_channels=self.bev_channels,
+                filter_size=small_encoder_filter,
+                gn_groups=gn_groups,
+            )
+            self.slow_small_encoder = StreamingFlowSmallEncoder2D(
+                in_channels=self.observation_channels,
+                latent_channels=self.bev_channels,
+                filter_size=small_encoder_filter,
+                gn_groups=gn_groups,
+            )
+        elif small_encoder_kind == "light_no_pool":
+            if self.observation_channels != self.bev_channels:
+                raise ValueError(
+                    "light_no_pool small encoder 要求 observation_channels == bev_channels，"
+                    f"当前 {self.observation_channels} vs {self.bev_channels}"
+                )
+            self.fast_small_encoder = LightNoPoolSmallEncoder(
+                channels=self.bev_channels, num_blocks=small_encoder_blocks, gn_groups=gn_groups
+            )
+            self.slow_small_encoder = LightNoPoolSmallEncoder(
+                channels=self.bev_channels, num_blocks=small_encoder_blocks, gn_groups=gn_groups
+            )
+        else:
+            raise AssertionError("unreachable small_encoder_kind")
         self.same_time_fusion = SameTimeGatedFusion(channels=self.bev_channels)
 
         self.core = StreamingFlowODECore(
@@ -123,17 +174,32 @@ class StreamingFlowBEVOdeAligner(nn.Module):
             deterministic_impute=bool(cfg.get("deterministic_impute", True)),
             gn_groups=gn_groups,
         )
-        self.small_decoder = LightNoPoolSmallDecoder(
-            channels=self.bev_channels, num_blocks=small_decoder_blocks, gn_groups=gn_groups
-        )
         self.sequence_refiner = SpatialGRURefiner2D(
             channels=self.bev_channels,
             num_gru_blocks=int(cfg.get("n_spatial_gru", 1)),
             num_res_layers=int(cfg.get("n_res_layers", 1)),
             gn_groups=gn_groups,
         )
+        if small_decoder_kind == "streamingflow_upsample":
+            self.small_decoder = StreamingFlowSmallDecoder2D(
+                latent_channels=self.bev_channels,
+                out_channels=self.decoded_bev_channels,
+                filter_size=small_decoder_filter,
+                gn_groups=gn_groups,
+            )
+        elif small_decoder_kind == "light_no_pool":
+            if self.decoded_bev_channels != self.bev_channels:
+                raise ValueError(
+                    "light_no_pool small decoder 要求 decoded_bev_channels == bev_channels，"
+                    f"当前 {self.decoded_bev_channels} vs {self.bev_channels}"
+                )
+            self.small_decoder = LightNoPoolSmallDecoder(
+                channels=self.bev_channels, num_blocks=small_decoder_blocks, gn_groups=gn_groups
+            )
+        else:
+            raise AssertionError("unreachable small_decoder_kind")
         self.bev_to_3d = BEVTo3DDecoder(
-            in_channels=self.bev_channels,
+            in_channels=self.decoded_bev_channels,
             mid_channels=decoder_mid,
             high_channels=decoder_high,
             upsample_scale=decoder_upsample_scale,
@@ -216,8 +282,8 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         if bev_states.shape[1] == 0:
             b = bev_states.shape[0]
             return bev_states.new_zeros((b, 0, self.num_classes, *self.grid_size))
-        bev = self.small_decoder(bev_states)
-        bev = self.sequence_refiner(bev)
+        bev = self.sequence_refiner(bev_states)
+        bev = self.small_decoder(bev)
         return self.bev_to_3d(bev)
 
     def _diagnostics(self, bev_states: torch.Tensor) -> dict[str, torch.Tensor]:
