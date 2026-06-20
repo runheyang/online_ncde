@@ -7,6 +7,8 @@ data:
   # 训练/训练内评估过滤短历史样本（history_completeness<4）。独立评估脚本
   # 可加 --include-short-history 覆盖为 0，评估全集含短历史。
   min_history_completeness: 4
+  # 2Hz 推演：每 3 帧取 1 帧，13 帧 → 5 帧。
+  fast_frame_stride: 3
   # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
   ray_sidecar_dir: data/online_ncde_ray_sidecar
   # fast_logits_root: data/logits_opusv1t_full_postprocess
@@ -49,17 +51,13 @@ loss:
   # 设为 null 或删除此行则回退到原始 train with mask 行为。
   focal_mask_weight: 5.0
   class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
-  # Ray first-hit + depth loss（RayLoss）。pc_range / free_index 由 train 脚本
+  # Ray first-hit loss（RayLoss）。pc_range / free_index 由 train 脚本
   # 从 data 配置注入；下列参数均可注释掉走 RayLoss 默认值。
   ray:
     # SegAndRayLoss 外层权重：total = seg_total + lambda_ray * ray_total
     lambda_ray: 0.2
-    # 对齐 fast_alocc2dmini__slow_alocc3d：仅启用 hit，其余 ray 子项关闭。
-    # ray_total = lambda_hit * hit + lambda_empty * empty + lambda_pre_free * pre_free + lambda_depth * depth
+    # ray_total = lambda_hit * hit
     lambda_hit: 0.3
-    lambda_empty: 0.0
-    lambda_pre_free: 0.0
-    lambda_depth: 0.0
     # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
     step_m: 0.4
@@ -71,10 +69,6 @@ loss:
     mid_max_m: 20.0
     near_weight: 2.0
     mid_weight: 1.0
-    # 非对称 depth loss：pred 比 GT 远乘 far，比 GT 近乘 near（鼓励保守预测）
-    depth_asym_far: 2.0
-    depth_asym_near: 1.0
-    smooth_l1_beta: 1.0
     # DVR 出射距离 → center 语义的偏置补偿。null 走默认 0.5 * step_m。
     # 测试/已 center 化 GT 显式传 0.0
     gt_dist_bias_m: null

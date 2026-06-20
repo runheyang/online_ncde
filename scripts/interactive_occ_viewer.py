@@ -14,6 +14,7 @@ evolve_keyframe_sample_tokens 长度 = max_evolve+1，从老到新：
 第 2 行（slow 历史，按时间从老到新；统一到 curr ego frame）：
   - Slow (-2s keyframe)      : 倒数第 5 个 keyframe（2s 前），warp 到 curr ego
   - Slow (-1s keyframe)      : 倒数第 3 个 keyframe（1s 前），warp 到 curr ego
+                                短历史缺 -1s 时回退到最近历史帧，标题显示实际时间
   - Slow (curr keyframe)     : 倒数第 1 个 keyframe，本身在 curr ego，无需 warp
 
 所有 6 个面板共享同一坐标系：同一 voxel 索引 (i,j,k) 对应同一世界点，
@@ -209,6 +210,66 @@ def load_idx_list(path: str) -> list[int]:
     return out
 
 
+# ────────────────────────── 工具：外部 fast 离散预测 ──────────────────────────
+
+
+class SavedFastPredLoader:
+    """读取 `<root>/<scene>/<token>/<filename>` 形式的离散 fast 预测。"""
+
+    def __init__(
+        self,
+        pred_root: str,
+        grid_size: tuple[int, int, int],
+        filename: str = "pred.npz",
+        key: str = "semantics",
+        strict: bool = False,
+    ) -> None:
+        root = Path(pred_root)
+        self.pred_root = root if root.is_absolute() else (ROOT / root).resolve()
+        self.grid_size = tuple(int(x) for x in grid_size)
+        self.filename = filename
+        self.key = key
+        self.strict = bool(strict)
+        self._warned_missing = False
+
+    def _pick_array(self, data: np.lib.npyio.NpzFile, path: Path) -> np.ndarray:
+        if self.key:
+            if self.key not in data.files:
+                raise KeyError(f"{path} 缺少 key={self.key!r}, 当前 keys={data.files}")
+            return data[self.key]
+
+        for key in ("semantics", "pred", "labels", "prediction"):
+            if key in data.files:
+                return data[key]
+        if len(data.files) == 1:
+            return data[data.files[0]]
+        raise KeyError(f"{path} 未指定 key 且无法自动判断，当前 keys={data.files}")
+
+    def load(self, scene: str, token: str) -> np.ndarray | None:
+        path = self.pred_root / scene / token / self.filename
+        if not path.exists():
+            if self.strict:
+                raise FileNotFoundError(path)
+            if not self._warned_missing:
+                print(
+                    f"[viewer] WARN: saved fast pred 缺失，回退 raw logits argmax: {path}"
+                )
+                self._warned_missing = True
+            return None
+
+        with np.load(path, allow_pickle=False) as data:
+            pred = np.asarray(self._pick_array(data, path))
+
+        if tuple(pred.shape) != self.grid_size:
+            if pred.size == int(np.prod(self.grid_size)):
+                pred = pred.reshape(self.grid_size)
+            else:
+                raise ValueError(
+                    f"{path} shape={pred.shape} 与 grid_size={self.grid_size} 不一致"
+                )
+        return pred.astype(np.int32, copy=False)
+
+
 # ────────────────────────── Backend：模型 + 数据 ──────────────────────────
 
 
@@ -225,8 +286,11 @@ class SampleData:
     # 标出过去时刻自车的位置/朝向。缺失或没做 warp 时为 None。
     slow_m1_T_kf_to_curr: np.ndarray | None
     slow_m2_T_kf_to_curr: np.ndarray | None
+    slow_m1_title: str
+    slow_m2_title: str
     scene_name: str
     token: str
+    fast_source: str
     rollout_start_step: int
     evolve_keyframe_sample_tokens: list[str]
 
@@ -240,6 +304,10 @@ class Backend:
         checkpoint_path: str,
         solver: str = "euler",
         val_info_path_override: str | None = None,
+        fast_pred_root: str | None = None,
+        fast_pred_filename: str = "pred.npz",
+        fast_pred_key: str = "semantics",
+        strict_fast_pred: bool = False,
     ) -> None:
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
@@ -259,6 +327,19 @@ class Backend:
         self.pc_range = tuple(data_cfg["pc_range"])
         self.voxel_size_xyz = tuple(data_cfg["voxel_size"])
         self.voxel_size_iso = float(self.voxel_size_xyz[0])  # 渲染用各向同性
+        self.saved_fast_pred_loader: SavedFastPredLoader | None = None
+        if fast_pred_root:
+            self.saved_fast_pred_loader = SavedFastPredLoader(
+                pred_root=fast_pred_root,
+                grid_size=tuple(data_cfg["grid_size"]),
+                filename=fast_pred_filename,
+                key=fast_pred_key,
+                strict=strict_fast_pred,
+            )
+            print(
+                "[viewer] Fast panel uses saved pred: "
+                f"root={fast_pred_root}, filename={fast_pred_filename}, key={fast_pred_key}"
+            )
 
         # dataset：跟 eval_online_ncde.py 默认 min_history_completeness=0
         # logits_loader 暴露给后续用：dataset 默认取的 slow 是 anchor（最老 keyframe），
@@ -326,6 +407,12 @@ class Backend:
         meta = sample.get("meta", {})
         scene_name = str(meta.get("scene_name", ""))
         token = str(meta.get("token", ""))
+        fast_source = "raw logits argmax"
+        if self.saved_fast_pred_loader is not None:
+            saved_fast = self.saved_fast_pred_loader.load(scene_name, token)
+            if saved_fast is not None:
+                fast = saved_fast
+                fast_source = "saved official postprocess"
 
         # 直接从原始 info 读 keyframe token 列表，兼容 canonical / evolve schema
         info = self.dataset.infos[idx]
@@ -338,6 +425,16 @@ class Backend:
 
         # frame_ego2global 已按 fast_frame_stride 抽帧；ek_step_indices 也同步重映射
         frame_ego2global = sample["frame_ego2global"].cpu().numpy()  # (T_sub, 4, 4)
+        frame_timestamps = sample.get("frame_timestamps", None)
+        frame_timestamps_np = (
+            frame_timestamps.cpu().numpy()
+            if isinstance(frame_timestamps, torch.Tensor)
+            else None
+        )
+        # canonical_infos 没有显式 keyframe step，但 2Hz 分支下
+        # keyframe_sample_tokens 与抽帧后的 frame_ego2global 一一对应。
+        if not ek_step_indices and len(ek_tokens) == frame_ego2global.shape[0]:
+            ek_step_indices = list(range(len(ek_tokens)))
 
         def _load_slow_for(kf_token: str) -> np.ndarray:
             rel = f"{scene_name}/{kf_token}/logits.npz"
@@ -347,19 +444,61 @@ class Backend:
             return logits.argmax(0).numpy().astype(np.int32)
 
         # 取 keyframe token + 同位置的 step（用于查 ego2global）。
-        # ek_step_indices 缺失（canonical pkl 没这个字段）时，对应的 warp 跳过。
-        def _pick(neg_idx: int) -> tuple[str | None, int | None]:
-            if len(ek_tokens) < -neg_idx:
+        def _pick_pos(pos: int) -> tuple[str | None, int | None]:
+            if pos < 0 or pos >= len(ek_tokens):
                 return None, None
-            tok = ek_tokens[neg_idx]
+            tok = ek_tokens[pos]
             if not tok:
                 return None, None
-            step = ek_step_indices[neg_idx] if len(ek_step_indices) >= -neg_idx else None
+            step = ek_step_indices[pos] if pos < len(ek_step_indices) else None
             return tok, step
 
-        curr_kf, curr_step = _pick(-1)
-        m1_kf, m1_step = _pick(-3)
-        m2_kf, m2_step = _pick(-5)
+        def _pick_history(
+            steps_back: int,
+            fallback_to_latest_available: bool = False,
+        ) -> tuple[str | None, int | None, int | None, bool]:
+            """按 2Hz keyframe step 取历史 slow。
+
+            steps_back=2 对应约 -1s，steps_back=4 对应约 -2s。
+            短历史样本中目标位置为空时，允许 -1s 面板回退到最近的真实历史帧
+            （例如 idx 3638 的 -0.5s），但标题会显示实际时间。
+            """
+            curr_pos = len(ek_tokens) - 1
+            target_pos = curr_pos - int(steps_back)
+            tok, step = _pick_pos(target_pos)
+            if tok is not None:
+                return tok, step, target_pos, False
+            if not fallback_to_latest_available:
+                return None, None, None, False
+            for pos in range(curr_pos - 1, -1, -1):
+                tok, step = _pick_pos(pos)
+                if tok is not None:
+                    return tok, step, pos, True
+            return None, None, None, False
+
+        def _history_title(default_title: str, src_step: int | None, fallback: bool) -> str:
+            if src_step is None or curr_step is None:
+                return f"{default_title} (fallback)" if fallback else default_title
+            dt_s: float | None = None
+            if frame_timestamps_np is not None:
+                try:
+                    dt_s = abs(float(frame_timestamps_np[curr_step] - frame_timestamps_np[src_step]) / 1.0e6)
+                except Exception:
+                    dt_s = None
+            if dt_s is None:
+                dt_s = 0.5 * abs(int(curr_step) - int(src_step))
+            shown = f"Slow (-{dt_s:.1f}s keyframe)"
+            return f"{shown} fallback" if fallback else shown
+
+        curr_kf, curr_step = _pick_pos(len(ek_tokens) - 1)
+        m1_kf, m1_step, _, m1_fallback = _pick_history(
+            steps_back=2, fallback_to_latest_available=True,
+        )
+        m2_kf, m2_step, _, m2_fallback = _pick_history(
+            steps_back=4, fallback_to_latest_available=False,
+        )
+        slow_m1_title = _history_title("Slow (-1s keyframe)", m1_step, m1_fallback)
+        slow_m2_title = _history_title("Slow (-2s keyframe)", m2_step, m2_fallback)
 
         # curr 不需要 warp（它就是 dst ego frame）
         slow_curr = _load_slow_for(curr_kf) if curr_kf else _load_slow_for(token)
@@ -393,7 +532,9 @@ class Backend:
             gt=gt, gt_mask=gt_mask, fast=fast,
             slow_curr=slow_curr, slow_m1=slow_m1, slow_m2=slow_m2,
             slow_m1_T_kf_to_curr=slow_m1_T, slow_m2_T_kf_to_curr=slow_m2_T,
+            slow_m1_title=slow_m1_title, slow_m2_title=slow_m2_title,
             scene_name=scene_name, token=token,
+            fast_source=fast_source,
             rollout_start_step=int(sample["rollout_start_step"].item()),
             evolve_keyframe_sample_tokens=ek_tokens,
         )
@@ -753,12 +894,18 @@ class OccViewer(QtWidgets.QMainWindow):
         # GT 不应用 camera mask，完整显示（其他面板沿用其各自的 mask 或不 mask）
         self._render_panel("gt", sample.gt)
         self._render_panel("fast", sample.fast)
+        fast_title = (
+            "Fast (official postprocess)"
+            if sample.fast_source == "saved official postprocess"
+            else "Fast (raw logits argmax)"
+        )
+        self._panels["fast"].set_title(fast_title)
         self._render_panel("slow_curr", sample.slow_curr)
         self._panels["slow_curr"].set_title("Slow (curr keyframe)")
 
         for key in SLOW_HIST_KEYS:
             voxel = sample.slow_m2 if key == "slow_m2" else sample.slow_m1
-            base_title = "Slow (-2s keyframe)" if key == "slow_m2" else "Slow (-1s keyframe)"
+            base_title = sample.slow_m2_title if key == "slow_m2" else sample.slow_m1_title
             if voxel is None:
                 self._clear_panel(key)
                 self._panels[key].set_title(f"{base_title} (N/A)")
@@ -1029,6 +1176,15 @@ def parse_args() -> argparse.Namespace:
                              "▶/◀/spinbox 在该列表里走，按列表顺序看样本；"
                              ".txt 即 tests/online_ncde/find_top_*.py 的输出格式；"
                              ".json 接受 [int...] / {indices: [...]} / {samples: [{idx,...}]}")
+    parser.add_argument("--fast-pred-root", default=None,
+                        help="可选：Fast 面板改为读取离散预测 root，例如 "
+                             "data/preds_opusv1t_occ3d；不影响 NCDE 输入")
+    parser.add_argument("--fast-pred-filename", default="pred.npz",
+                        help="fast-pred-root 下每个 token 目录中的文件名")
+    parser.add_argument("--fast-pred-key", default="semantics",
+                        help="pred.npz 中的数组 key；传空字符串则自动猜测")
+    parser.add_argument("--strict-fast-pred", action="store_true",
+                        help="开启后 saved fast pred 缺失直接报错；默认缺失时回退 raw fast")
     # 视角微调（不传走默认值；改完后点 [↻ 重置视角] 立即生效）
     parser.add_argument("--view-az", type=float, default=None,
                         help=f"相机方位角 azimuth (默认 {OccViewer.DEFAULT_AZ}°)；"
@@ -1055,6 +1211,10 @@ def main() -> None:
     backend = Backend(
         args.config, args.checkpoint, solver=args.solver,
         val_info_path_override=args.val_info_path,
+        fast_pred_root=args.fast_pred_root,
+        fast_pred_filename=args.fast_pred_filename,
+        fast_pred_key=args.fast_pred_key,
+        strict_fast_pred=args.strict_fast_pred,
     )
     if len(backend) == 0:
         raise RuntimeError("dataset 为空，检查 config 的 val_info_path 是否正确。")

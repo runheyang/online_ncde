@@ -239,9 +239,6 @@ class Trainer:
         total_aux = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
         total_ray = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
         total_ray_hit = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
-        total_ray_empty = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
-        total_ray_pre_free = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
-        total_ray_depth = torch.zeros((), device=step_logits.device, dtype=step_logits.dtype)
         ray_sup_count = 0
         per_step_loss: dict[str, float] = {}
         per_step_count: dict[str, int] = {}
@@ -311,9 +308,6 @@ class Trainer:
                 # ray_total 已经含 lambda_ray，这里再乘以 sup 权重保持整体加权一致。
                 total_ray = total_ray + loss_i["ray_total"] * weight
                 total_ray_hit = total_ray_hit + loss_i["ray_hit"] * weight
-                total_ray_empty = total_ray_empty + loss_i["ray_empty"] * weight
-                total_ray_pre_free = total_ray_pre_free + loss_i.get("ray_pre_free", torch.zeros((), device=step_logits.device)) * weight
-                total_ray_depth = total_ray_depth + loss_i["ray_depth"] * weight
                 if int(loss_i.get("ray_valid_rays", torch.tensor(0)).item()) > 0:
                     ray_sup_count += 1
             per_step_loss[key] = float(weighted_total.detach().item())
@@ -328,9 +322,6 @@ class Trainer:
             total_aux = zero
             total_ray = zero
             total_ray_hit = zero
-            total_ray_empty = zero
-            total_ray_pre_free = zero
-            total_ray_depth = zero
 
         return {
             "total": total,
@@ -338,9 +329,6 @@ class Trainer:
             "aux": total_aux,
             "ray_total": total_ray.detach(),
             "ray_hit": total_ray_hit.detach(),
-            "ray_empty": total_ray_empty.detach(),
-            "ray_pre_free": total_ray_pre_free.detach(),
-            "ray_depth": total_ray_depth.detach(),
             "ray_sup_count": torch.tensor(ray_sup_count, device=step_logits.device),
         }, per_step_loss, per_step_count
 
@@ -530,9 +518,6 @@ class Trainer:
         total_fast_kl = 0.0
         total_ray = 0.0
         total_ray_hit = 0.0
-        total_ray_empty = 0.0
-        total_ray_pre_free = 0.0
-        total_ray_depth = 0.0
         total_ray_sup_count = 0
         total_sup_loss: Dict[str, float] = {}
         total_sup_count: Dict[str, int] = {}
@@ -568,9 +553,6 @@ class Trainer:
                 if ray_sup_cnt > 0:
                     total_ray += float(loss_dict["ray_total"].item())
                     total_ray_hit += float(loss_dict["ray_hit"].item())
-                    total_ray_empty += float(loss_dict["ray_empty"].item())
-                    total_ray_pre_free += float(loss_dict.get("ray_pre_free", torch.tensor(0.0)).item())
-                    total_ray_depth += float(loss_dict["ray_depth"].item())
                     total_ray_sup_count += ray_sup_cnt
             for key, value in sup_loss_batch.items():
                 cnt = sup_count_batch.get(key, 0)
@@ -598,9 +580,6 @@ class Trainer:
             total_fast_kl,
             total_ray,
             total_ray_hit,
-            total_ray_empty,
-            total_ray_pre_free,
-            total_ray_depth,
             float(total_ray_sup_count),
             float(total_steps),
         ])
@@ -612,9 +591,6 @@ class Trainer:
             total_fast_kl,
             total_ray,
             total_ray_hit,
-            total_ray_empty,
-            total_ray_pre_free,
-            total_ray_depth,
             total_ray_sup_count_f,
             total_steps_f,
         ) = main_stats
@@ -645,9 +621,6 @@ class Trainer:
         if total_ray_sup_count > 0:
             metrics["ray"] = total_ray / denom
             metrics["ray_hit"] = total_ray_hit / denom
-            metrics["ray_empty"] = total_ray_empty / denom
-            metrics["ray_pre_free"] = total_ray_pre_free / denom
-            metrics["ray_depth"] = total_ray_depth / denom
         for key, value in total_sup_loss.items():
             count = max(total_sup_count.get(key, 0), 1)
             metrics[key] = value / count

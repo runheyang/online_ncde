@@ -40,7 +40,6 @@ from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E4
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
-from online_ncde.models.online_ncde_aligner_ds import OnlineNcdeAlignerDS  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
 from online_ncde.utils.reproducibility import set_seed  # noqa: E402
@@ -124,12 +123,17 @@ def build_dataset(
     root_path: str,
     logits_loader,
     ray_sidecar_split: str | None = None,
+    min_history_completeness: int | None = None,
 ) -> Occ3DOnlineNcdeDataset:
     """根据 data_cfg 构造 Occ3DOnlineNcdeDataset。
 
-    训练/训练内 val 默认过滤短历史样本（history_completeness < 4），
-    可在 data_cfg 里设 min_history_completeness 覆盖。
+    默认过滤短历史样本（history_completeness < 4），可通过参数显式覆盖。
     """
+    min_hc = (
+        int(data_cfg.get("min_history_completeness", 4))
+        if min_history_completeness is None
+        else int(min_history_completeness)
+    )
     return build_online_ncde_dataset(
         data_cfg,
         info_path=info_path,
@@ -138,7 +142,7 @@ def build_dataset(
         ray_sidecar_dir=data_cfg.get("ray_sidecar_dir", None),
         ray_sidecar_split=ray_sidecar_split,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
-        min_history_completeness=int(data_cfg.get("min_history_completeness", 4)),
+        min_history_completeness=min_hc,
     )
 
 
@@ -327,17 +331,9 @@ def main() -> None:
     )
     if model_variant == "dense":
         model = OnlineNcdeAligner(**common_kwargs).to(device)
-    elif model_variant == "ds2x_oo":
-        # OpenOccupancy 等大网格分支：encoder stride=(2,2,2)，主干在 1/2 分辨率上演化。
-        model = OnlineNcdeAlignerDS(
-            encoder_downsample_stride=tuple(
-                model_cfg.get("encoder_downsample_stride", [2, 2, 2])
-            ),
-            **common_kwargs,
-        ).to(device)
     else:
         raise ValueError(
-            f"未知的 model.variant: {model_variant!r}，可选: 'dense', 'ds2x_oo'"
+            f"未知的 model.variant: {model_variant!r}，仅支持 'dense'"
         )
 
     # 先加载权重
@@ -527,9 +523,6 @@ def main() -> None:
                 ray_total_text = (
                     f" ray_total={float(train_metrics['ray']):.4f}"
                     f" ray_hit={float(train_metrics['ray_hit']):.4f}"
-                    f" ray_empty={float(train_metrics['ray_empty']):.4f}"
-                    f" ray_pre_free={float(train_metrics.get('ray_pre_free', 0.0)):.4f}"
-                    f" ray_depth={float(train_metrics['ray_depth']):.4f}"
                 )
             fast_kl_text = ""
             if "fast_kl" in train_metrics:

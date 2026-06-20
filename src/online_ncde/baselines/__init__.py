@@ -8,12 +8,16 @@ from online_ncde.baselines.neural_ode_dt_aligner import (
     NeuralOdeDtAligner,
     NeuralOdeDtSolver,
 )
-from online_ncde.baselines.no_warp_motion_attn import NoWarpMotionBiasAttnAligner
+from online_ncde.baselines.no_warp_motion_attn import (
+    NoWarpMotionBiasAttnAligner,
+    NoWarpMotionBiasAttnFusion,
+)
 from online_ncde.baselines.recurrent_warp_fusion import (
     FusionAttnNet,
     FusionNet,
     RecurrentWarpFusionAligner,
 )
+from online_ncde.baselines.streamingflow import StreamingFlowBEVOdeAligner
 from online_ncde.baselines.warp_slow_fill_fast import WarpSlowFillFastBaseline
 
 __all__ = [
@@ -21,7 +25,9 @@ __all__ = [
     "RecurrentWarpFusionAligner",
     "FusionNet",
     "FusionAttnNet",
-    "NoWarpMotionBiasAttnAligner",
     "NeuralOdeDtAligner",
     "NeuralOdeDtSolver",
+    "NoWarpMotionBiasAttnAligner",
+    "NoWarpMotionBiasAttnFusion",
+    "StreamingFlowBEVOdeAligner",
 ]
