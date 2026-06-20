@@ -78,6 +78,7 @@ def attach_occ3d_targets(
     gt_root: str,
     gt_mask_key: str = "mask_camera",
     grid_size: tuple[int, int, int] = (200, 200, 16),
+    gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """为预测记录补齐 GT/mask；已有 GT 的记录会直接复用。"""
     attached: list[dict[str, Any]] = []
@@ -93,13 +94,27 @@ def attach_occ3d_targets(
         if gt is None:
             scene_name = str(item.get("scene_name", ""))
             token = str(item.get("token", ""))
-            gt_path = os.path.join(gt_root, scene_name, token, "labels.npz")
-            if not scene_name or not token or not os.path.exists(gt_path):
+            cache_key = (scene_name, token)
+            if gt_cache is not None and cache_key in gt_cache:
+                gt, mask = gt_cache[cache_key]
+            elif not scene_name or not token:
                 missing_gt_count += 1
                 continue
-            gt_npz = load_labels_npz(gt_path)
-            gt = gt_npz["semantics"]
-            mask = gt_npz.get(gt_mask_key, np.ones(gt.shape, dtype=np.float32))
+            else:
+                gt_path = os.path.join(gt_root, scene_name, token, "labels.npz")
+                if not os.path.exists(gt_path):
+                    if gt_cache is not None:
+                        gt_cache[cache_key] = (None, None)
+                    missing_gt_count += 1
+                    continue
+                gt_npz = load_labels_npz(gt_path)
+                gt = gt_npz["semantics"]
+                mask = gt_npz.get(gt_mask_key, np.ones(gt.shape, dtype=np.float32))
+                if gt_cache is not None:
+                    gt_cache[cache_key] = (gt, mask)
+            if gt is None:
+                missing_gt_count += 1
+                continue
 
         gt_u8 = np.asarray(gt).astype(np.uint8, copy=False)
         _validate_shape("gt", gt_u8, grid_size)
@@ -181,19 +196,28 @@ def compute_dense_miou(
     }
 
 
-def compute_dense_rayiou(
+def _load_or_use_origins(
+    *,
+    sweep_pkl: str | None,
+    origins_by_token: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    if origins_by_token is not None:
+        return origins_by_token
+    if not sweep_pkl:
+        raise ValueError("计算 RayIoU 时必须提供 sweep_pkl 或 origins_by_token")
+    from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+
+    return load_origins_from_sweep_pkl(sweep_pkl)
+
+
+def _prepare_rayiou_items(
     records: list[DenseOccRecord],
     *,
-    sweep_pkl: str,
-    print_table_all: bool = True,
-) -> dict[str, Any]:
-    """从内存 dense 预测记录计算 all/per-step RayIoU。"""
-    from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-    from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator
-
-    origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
-    per_step_ray: dict[int, Any] = {}
-    ray_all = RayIouAccumulator()
+    sweep_pkl: str | None,
+    origins_by_token: Mapping[str, Any] | None = None,
+) -> tuple[list[tuple[dict[str, Any], np.ndarray, np.ndarray, Any]], dict[str, int]]:
+    origins = _load_or_use_origins(sweep_pkl=sweep_pkl, origins_by_token=origins_by_token)
+    ray_items: list[tuple[dict[str, Any], np.ndarray, np.ndarray, Any]] = []
     missing_origin_count = 0
     skipped_no_gt_count = 0
 
@@ -204,12 +228,38 @@ def compute_dense_rayiou(
             skipped_no_gt_count += 1
             continue
         token = str(item.get("token", ""))
-        origin = origins_by_token.get(token, None)
+        origin = origins.get(token, None)
         if origin is None:
             missing_origin_count += 1
             continue
-        pred = np.asarray(item["pred"])
-        gt_np = np.asarray(gt)
+        ray_items.append((item, np.asarray(item["pred"]), np.asarray(gt), origin))
+
+    return ray_items, {
+        "missing_origin_count": int(missing_origin_count),
+        "skipped_no_gt_count": int(skipped_no_gt_count),
+        "origins_count": int(len(origins)),
+    }
+
+
+def compute_dense_rayiou(
+    records: list[DenseOccRecord],
+    *,
+    sweep_pkl: str | None = None,
+    origins_by_token: Mapping[str, Any] | None = None,
+    print_table_all: bool = True,
+) -> dict[str, Any]:
+    """从内存 dense 预测记录计算 all/per-step RayIoU。"""
+    from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator
+
+    ray_items, meta = _prepare_rayiou_items(
+        records,
+        sweep_pkl=sweep_pkl,
+        origins_by_token=origins_by_token,
+    )
+    per_step_ray: dict[int, Any] = {}
+    ray_all = RayIouAccumulator()
+
+    for item, pred, gt_np, origin in ray_items:
         ray_all.add_sample(pred, gt_np, origin)
         step_idx = item.get("step_idx", None)
         if step_idx is not None:
@@ -225,10 +275,39 @@ def compute_dense_rayiou(
             for step, ray_acc in sorted(per_step_ray.items())
             if ray_acc.num_samples > 0
         },
-        "missing_origin_count": int(missing_origin_count),
-        "skipped_no_gt_count": int(skipped_no_gt_count),
-        "origins_count": int(len(origins_by_token)),
+        **meta,
     }
+
+
+def compute_dense_rayiou_with_pcds(
+    records: list[DenseOccRecord],
+    *,
+    sweep_pkl: str | None = None,
+    origins_by_token: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, list[Any], list[Any], dict[str, int]]:
+    """计算 RayIoU 并返回 raw pcd，供分箱 Ray 统计复用。"""
+    from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+
+    ray_items, meta = _prepare_rayiou_items(
+        records,
+        sweep_pkl=sweep_pkl,
+        origins_by_token=origins_by_token,
+    )
+    if not ray_items:
+        return None, [], [], meta
+
+    sem_pred_list = [pred for _, pred, _, _ in ray_items]
+    sem_gt_list = [gt for _, _, gt, _ in ray_items]
+    lidar_origin_list = [origin for _, _, _, origin in ray_items]
+    rayiou_result, raw_pcd_pred, raw_pcd_gt = calc_rayiou(
+        sem_pred_list,
+        sem_gt_list,
+        lidar_origin_list,
+        return_pcds=True,
+    )
+    rayiou_result = dict(rayiou_result)
+    rayiou_result.setdefault("num_samples", int(len(ray_items)))
+    return rayiou_result, raw_pcd_pred, raw_pcd_gt, meta
 
 
 def evaluate_dense_occ(
@@ -237,17 +316,17 @@ def evaluate_dense_occ(
     num_classes: int,
     enable_rayiou: bool = False,
     sweep_pkl: str | None = None,
+    origins_by_token: Mapping[str, Any] | None = None,
     print_rayiou_table: bool = True,
 ) -> dict[str, Any]:
     """统一计算 dense occupancy 的 mIoU/RayIoU，并合并为脚本友好的结构。"""
     miou_result = compute_dense_miou(records, num_classes=num_classes)
     ray_result = None
     if enable_rayiou:
-        if not sweep_pkl:
-            raise ValueError("enable_rayiou=True 时必须提供 sweep_pkl")
         ray_result = compute_dense_rayiou(
             records,
             sweep_pkl=sweep_pkl,
+            origins_by_token=origins_by_token,
             print_table_all=print_rayiou_table,
         )
 

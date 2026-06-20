@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -37,13 +36,11 @@ sys.path.append(str(ROOT / "src"))
 
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.metrics import MetricMiouOcc3D, build_miou_metric  # noqa: E402
+from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
-from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
@@ -257,7 +254,7 @@ def main() -> None:
     num_classes = int(data_cfg["num_classes"])
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
-    class_names = build_miou_metric(num_classes=num_classes).class_names
+    grid_size = tuple(int(v) for v in data_cfg["grid_size"])
 
     # === 推理 + 收集 buckets ===
     # buckets[T] -> list of dict(pred uint8 (X,Y,Z), token, scene, source ∈ {'main', 'fallback'})
@@ -359,11 +356,14 @@ def main() -> None:
                             )
                         local_idx = step_idx_to_local[step_int]
                         pred = step_preds[b, local_idx]
-                    buckets[T].append({
-                        "pred": np.ascontiguousarray(pred),
-                        "token": target_token,
-                        "scene": scene_name,
-                    })
+                    buckets[T].append(
+                        make_dense_occ_prediction(
+                            pred=np.ascontiguousarray(pred),
+                            token=target_token,
+                            scene_name=scene_name,
+                            step_idx=None,
+                        )
+                    )
                     if source == "main":
                         real_count[T] += 1
                     else:
@@ -404,74 +404,53 @@ def main() -> None:
 
     # === 逐桶评估 mIoU + RayIoU ===
     gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] = {}
-
-    def load_gt(scene: str, token: str) -> tuple[np.ndarray | None, np.ndarray | None]:
-        key = (scene, token)
-        if key not in gt_cache:
-            gt_path = os.path.join(gt_root, scene, token, "labels.npz")
-            if not os.path.exists(gt_path):
-                gt_cache[key] = (None, None)
-            else:
-                npz = load_labels_npz(gt_path)
-                sem = npz["semantics"]
-                mask = npz.get(gt_mask_key, np.ones(sem.shape, dtype=np.float32))
-                gt_cache[key] = (sem, mask)
-        return gt_cache[key]
-
     summary: dict[str, Any] = {}
     for T in evolution_times:
         items = buckets[T]
         print(f"\n[bucket T={T}s] 收集到 {len(items)} 个样本，开始评估 mIoU + RayIoU")
-        metric = build_miou_metric(
-            num_classes=num_classes,
-            use_image_mask=True,
-            use_lidar_mask=False,
+        attached_items, missing_gt = attach_occ3d_targets(
+            items,
+            gt_root=gt_root,
+            gt_mask_key=gt_mask_key,
+            grid_size=grid_size,
+            gt_cache=gt_cache,
         )
-        sem_pred_list: list[np.ndarray] = []
-        sem_gt_list: list[np.ndarray] = []
-        lidar_origin_list: list[Any] = []
-        missing_gt = 0
-        missing_origin = 0
-
-        for it in items:
-            sem, mask = load_gt(it["scene"], it["token"])
-            if sem is None or mask is None:
-                missing_gt += 1
-                continue
-            metric.add_batch(
-                semantics_pred=it["pred"],
-                semantics_gt=sem,
-                mask_lidar=None,
-                mask_camera=mask,
+        dense_eval = evaluate_dense_occ(
+            attached_items,
+            num_classes=num_classes,
+            enable_rayiou=enable_rayiou,
+            sweep_pkl=sweep_info_path if enable_rayiou and not origins_by_token else None,
+            origins_by_token=origins_by_token if enable_rayiou else None,
+            print_rayiou_table=True,
+        )
+        dense_all = dense_eval["all"]
+        if int(dense_all.get("num_keyframes", 0)) > 0:
+            miou = dense_all["miou"]
+            miou_d = dense_all["miou_d"]
+            per_class = dense_all.get("per_class_iou", [])
+            class_names = dense_all.get("class_names", [])
+            print(
+                f"[bucket T={T}s] miou={float(miou):.2f} "
+                f"miou_d={float(miou_d):.2f} num={dense_all['num_keyframes']}"
             )
-            if enable_rayiou:
-                origin = origins_by_token.get(it["token"], None)
-                if origin is None:
-                    missing_origin += 1
-                    continue
-                sem_pred_list.append(it["pred"])
-                sem_gt_list.append(sem)
-                lidar_origin_list.append(origin)
-
-        if metric.cnt > 0:
-            miou = float(metric.count_miou(verbose=False))
-            miou_d = float(metric.count_miou_d(verbose=False))
-            per_class = np.nan_to_num(metric.get_per_class_iou(), nan=0.0).tolist()
-            print(f"[bucket T={T}s] miou={miou:.2f} miou_d={miou_d:.2f} num={metric.cnt}")
             for name, value in zip(class_names, per_class):
                 print(f"  {name}: {float(value):.2f}")
         else:
-            miou, miou_d, per_class = float("nan"), float("nan"), []
+            miou, miou_d, per_class = None, None, []
+            class_names = dense_all.get("class_names", [])
             print(f"[bucket T={T}s] no samples")
 
-        rayiou_result: dict[str, Any] | None = None
-        if enable_rayiou and len(sem_pred_list) > 0:
-            rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
-            print(f"[bucket T={T}s] RayIoU={rayiou_result['RayIoU']:.4f} "
-                  f"@1={rayiou_result['RayIoU@1']:.4f} "
-                  f"@2={rayiou_result['RayIoU@2']:.4f} "
-                  f"@4={rayiou_result['RayIoU@4']:.4f} "
-                  f"num={rayiou_result.get('num_samples', len(sem_pred_list))}")
+        rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
+        missing_origin = int(rayiou_meta.get("missing_origin_count", 0))
+        rayiou_result = dense_all.get("rayiou", None)
+        if enable_rayiou and rayiou_result is not None:
+            print(
+                f"[bucket T={T}s] RayIoU={rayiou_result['RayIoU']:.4f} "
+                f"@1={rayiou_result['RayIoU@1']:.4f} "
+                f"@2={rayiou_result['RayIoU@2']:.4f} "
+                f"@4={rayiou_result['RayIoU@4']:.4f} "
+                f"num={rayiou_result.get('num_samples', 0)}"
+            )
         elif enable_rayiou:
             print(f"[bucket T={T}s] RayIoU no samples")
 
@@ -481,9 +460,9 @@ def main() -> None:
             "num_fallback": int(fallback_count[T]),
             "num_too_short": int(skip_too_short[T]),
             "num_no_gt_token": int(skip_no_gt_token[T]),
-            "num_miou_samples": int(metric.cnt),
-            "miou": _to_json_number(miou),
-            "miou_d": _to_json_number(miou_d),
+            "num_miou_samples": int(dense_all.get("num_keyframes", 0)),
+            "miou": miou,
+            "miou_d": miou_d,
             "per_class_iou": [float(v) for v in per_class],
             "class_names": class_names,
             "rayiou": _to_json_safe(rayiou_result) if rayiou_result is not None else None,

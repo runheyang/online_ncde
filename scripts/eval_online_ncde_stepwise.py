@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -29,13 +28,11 @@ sys.path.append(str(ROOT / "src"))
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
-from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.metrics import MetricMiouOcc3D, build_miou_metric  # noqa: E402
+from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
-from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
-from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator  # noqa: E402
+from online_ncde.metrics import build_miou_metric  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
@@ -181,26 +178,13 @@ def main() -> None:
     num_classes = int(data_cfg["num_classes"])
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
+    grid_size = tuple(int(v) for v in data_cfg["grid_size"])
     class_names = build_miou_metric(num_classes=num_classes).class_names
 
-    per_step_metrics: dict[int, MetricMiouOcc3D] = {}
-    metric_all = build_miou_metric(
-        num_classes=num_classes,
-        use_image_mask=True,
-        use_lidar_mask=False,
-    )
-
-    # RayIoU：每个 step 独立累积器 + 跨 step 合并累积器（内部只存计数，内存可忽略）
+    predictions: list[dict[str, Any]] = []
     enable_rayiou = not args.no_rayiou
-    per_step_ray: dict[int, RayIouAccumulator] = {}
-    ray_acc_all: RayIouAccumulator | None = None
-    origins_by_token: dict[str, Any] = {}
-    missing_origin_count = 0
     if enable_rayiou:
-        print(f"[rayiou] 加载 lidar origins: {sweep_info_path}")
-        origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)
-        print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
-        ray_acc_all = RayIouAccumulator()
+        print(f"[rayiou] sweep pkl: {sweep_info_path}")
 
     step_time_sum = defaultdict(float)
     step_time_count = defaultdict(int)
@@ -218,7 +202,6 @@ def main() -> None:
     all_warp_sum = 0.0
     all_solver_sum = 0.0
     all_decode_sum = 0.0
-    missing_gt_count = 0
     no_scene_count = 0
     no_frame_tokens_count = 0
 
@@ -244,6 +227,9 @@ def main() -> None:
             step_decode_ms = cast(torch.Tensor, outputs["step_decode_ms"])  # (B, S)
             step_indices = cast(torch.Tensor, outputs["step_indices"])  # (S,)
             step_indices_list = [int(v) for v in step_indices.detach().cpu().tolist()]
+            step_preds = step_logits.argmax(dim=2).to(torch.uint8).cpu().numpy()
+            if tuple(step_preds.shape[-3:]) != grid_size:
+                raise ValueError(f"step_preds shape={step_preds.shape[-3:]} 与 grid_size={grid_size} 不一致")
 
             meta_list = cast(list[dict[str, Any]], sample["meta"])
             for b, meta in enumerate(meta_list):
@@ -284,48 +270,14 @@ def main() -> None:
                     gt_token = keyframe_steps.get(step_idx, None)
                     if gt_token is None:
                         continue
-
-                    gt_path = os.path.join(gt_root, scene_name, gt_token, "labels.npz")
-                    if not os.path.exists(gt_path):
-                        missing_gt_count += 1
-                        continue
-
-                    gt_npz = load_labels_npz(gt_path)
-                    gt_semantics = gt_npz["semantics"]
-                    gt_mask = gt_npz.get(gt_mask_key, np.ones(gt_semantics.shape, dtype=np.float32))
-                    preds = step_logits[b, local_step_idx].argmax(dim=0).detach().cpu().numpy()
-
-                    metric = per_step_metrics.setdefault(
-                        step_idx,
-                        build_miou_metric(
-                            num_classes=num_classes,
-                            use_image_mask=True,
-                            use_lidar_mask=False,
-                        ),
+                    predictions.append(
+                        make_dense_occ_prediction(
+                            pred=step_preds[b, local_step_idx],
+                            scene_name=scene_name,
+                            token=str(gt_token),
+                            step_idx=step_idx,
+                        )
                     )
-                    metric.add_batch(
-                        semantics_pred=preds,
-                        semantics_gt=gt_semantics,
-                        mask_lidar=None,
-                        mask_camera=gt_mask,
-                    )
-                    metric_all.add_batch(
-                        semantics_pred=preds,
-                        semantics_gt=gt_semantics,
-                        mask_lidar=None,
-                        mask_camera=gt_mask,
-                    )
-                    # RayIoU：复用本步已有的 preds / gt_semantics，立即 raycast + 累加，
-                    # 不额外保留 dense 预测，内存开销与 mIoU 累加器相同量级。
-                    if enable_rayiou:
-                        origin = origins_by_token.get(gt_token, None)
-                        if origin is None:
-                            missing_origin_count += 1
-                        else:
-                            ray_acc = per_step_ray.setdefault(step_idx, RayIouAccumulator())
-                            ray_acc.add_sample(preds, gt_semantics, origin)
-                            assert ray_acc_all is not None  # enable_rayiou 下一定存在
-                            ray_acc_all.add_sample(preds, gt_semantics, origin)
                     t_ms = step_times_list[local_step_idx]
                     keyframe_time_sum += t_ms
                     keyframe_warp_sum += step_warp_list[local_step_idx]
@@ -378,12 +330,29 @@ def main() -> None:
             f"decode={step_decode_avg[step_idx]:.4f} count={step_time_count[step_idx]}"
         )
 
-    per_step_results: dict[str, Any] = {}
+    predictions_with_gt, missing_gt_count = attach_occ3d_targets(
+        predictions,
+        gt_root=gt_root,
+        gt_mask_key=gt_mask_key,
+        grid_size=grid_size,
+    )
+    print(f"[target] attached_gt={len(predictions_with_gt)} missing_gt_count={missing_gt_count}")
+    dense_eval = evaluate_dense_occ(
+        predictions_with_gt,
+        num_classes=num_classes,
+        enable_rayiou=enable_rayiou,
+        sweep_pkl=sweep_info_path if enable_rayiou else None,
+        print_rayiou_table=True,
+    )
+    del predictions, predictions_with_gt
+
+    per_step_results: dict[str, Any] = dict(dense_eval["per_step"])
     for step_idx in sorted(step_time_avg.keys()):
-        metric = per_step_metrics.get(step_idx, None)
-        if metric is None or metric.cnt == 0:
+        step_key = str(step_idx)
+        step_payload = per_step_results.get(step_key, None)
+        if step_payload is None or int(step_payload.get("num_keyframes", 0)) == 0:
             print(f"[keyframe][step={step_idx}] no samples")
-            per_step_results[str(step_idx)] = {
+            per_step_results[step_key] = {
                 "num_keyframes": 0,
                 "miou": None,
                 "miou_d": None,
@@ -398,21 +367,20 @@ def main() -> None:
             }
             continue
 
-        step_miou = float(metric.count_miou(verbose=False))
-        step_miou_d = float(metric.count_miou_d(verbose=False))
-        step_per_class = np.nan_to_num(metric.get_per_class_iou(), nan=0.0).tolist()
+        step_miou = step_payload["miou"]
+        step_miou_d = step_payload["miou_d"]
+        step_per_class = step_payload.get("per_class_iou", [])
         print(
             f"[keyframe][step={step_idx}] "
-            f"num={metric.cnt} miou={step_miou:.2f} miou_d={step_miou_d:.2f}"
+            f"num={step_payload['num_keyframes']} miou={float(step_miou):.2f} "
+            f"miou_d={float(step_miou_d):.2f}"
         )
         for name, value in zip(class_names, step_per_class):
             print(f"  {name}: {float(value):.2f}")
 
-        step_rayiou_result: dict[str, Any] | None = None
+        step_rayiou_result = step_payload.get("rayiou", None)
         if enable_rayiou:
-            ray_acc = per_step_ray.get(step_idx, None)
-            if ray_acc is not None and ray_acc.num_samples > 0:
-                step_rayiou_result = ray_acc.finalize(print_table=False)
+            if step_rayiou_result is not None:
                 print(
                     f"[rayiou][step={step_idx}] num={step_rayiou_result['num_samples']} "
                     f"RayIoU={step_rayiou_result['RayIoU']:.4f} "
@@ -423,37 +391,30 @@ def main() -> None:
             else:
                 print(f"[rayiou][step={step_idx}] no samples")
 
-        per_step_results[str(step_idx)] = {
-            "num_keyframes": int(metric.cnt),
-            "miou": float(step_miou),
-            "miou_d": _to_json_number(step_miou_d),
-            "per_class_iou": [float(v) for v in step_per_class],
-            "class_names": class_names,
+        step_payload.update({
             "avg_time_ms": float(step_time_avg[step_idx]),
             "avg_warp_ms": float(step_warp_avg[step_idx]),
             "avg_solver_ms": float(step_solver_avg[step_idx]),
             "avg_decode_ms": float(step_decode_avg[step_idx]),
             "num_step_preds": int(step_time_count[step_idx]),
-            "rayiou": step_rayiou_result,
-        }
+        })
+        per_step_results[step_key] = step_payload
 
-    if metric_all.cnt > 0:
-        all_miou = float(metric_all.count_miou(verbose=False))
-        all_miou_d = float(metric_all.count_miou_d(verbose=False))
-        all_per_class = np.nan_to_num(metric_all.get_per_class_iou(), nan=0.0).tolist()
-        print(f"[keyframe][all] num={metric_all.cnt} miou={all_miou:.2f} miou_d={all_miou_d:.2f}")
+    all_result = dense_eval["all"]
+    if int(all_result.get("num_keyframes", 0)) > 0:
+        print(
+            f"[keyframe][all] num={all_result['num_keyframes']} "
+            f"miou={float(all_result['miou']):.2f} miou_d={float(all_result['miou_d']):.2f}"
+        )
+        all_per_class = all_result.get("per_class_iou", [])
         for name, value in zip(class_names, all_per_class):
             print(f"  {name}: {float(value):.2f}")
     else:
-        all_miou = float("nan")
-        all_miou_d = float("nan")
-        all_per_class = []
         print("[keyframe][all] no samples")
 
-    all_rayiou_result: dict[str, Any] | None = None
-    if enable_rayiou and ray_acc_all is not None:
-        if ray_acc_all.num_samples > 0:
-            all_rayiou_result = ray_acc_all.finalize(print_table=True)
+    all_rayiou_result = all_result.get("rayiou", None)
+    if enable_rayiou:
+        if all_rayiou_result is not None:
             print(
                 f"[rayiou][all] num={all_rayiou_result['num_samples']} "
                 f"RayIoU={all_rayiou_result['RayIoU']:.4f} "
@@ -464,6 +425,8 @@ def main() -> None:
         else:
             print("[rayiou][all] no samples")
 
+    rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
+    missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
     print(
         f"[meta] missing_gt={missing_gt_count} "
         f"no_scene={no_scene_count} no_frame_tokens={no_frame_tokens_count} "
@@ -488,14 +451,7 @@ def main() -> None:
                 "per_step_count": {str(k): int(v) for k, v in step_time_count.items()},
             },
             "keyframe_per_step": per_step_results,
-            "keyframe_all": {
-                "num_keyframes": int(metric_all.cnt),
-                "miou": _to_json_number(all_miou),
-                "miou_d": _to_json_number(all_miou_d),
-                "per_class_iou": [float(v) for v in all_per_class],
-                "class_names": class_names,
-                "rayiou": all_rayiou_result,
-            },
+            "keyframe_all": all_result,
             "meta": {
                 "missing_gt_count": int(missing_gt_count),
                 "no_scene_count": int(no_scene_count),
