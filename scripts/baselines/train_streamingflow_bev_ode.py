@@ -42,6 +42,7 @@ from train_online_ncde import (  # noqa: E402
 from online_ncde.baselines import StreamingFlowBEVOdeAligner  # noqa: E402
 from online_ncde.config import load_config, load_config_with_base, merge_dict  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
+from online_ncde.evaluation import evaluate_dense_occ  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint, save_checkpoint  # noqa: E402
@@ -90,49 +91,6 @@ def _assert_occ3d(data_cfg: dict) -> None:
         raise ValueError("StreamingFlow baseline 只支持 Occ3D num_classes=18")
     if tuple(data_cfg["grid_size"]) != (200, 200, 16):
         raise ValueError("StreamingFlow baseline 只支持 Occ3D grid_size=(200,200,16)")
-
-
-def _compute_epoch_rayiou(
-    predictions: list[dict],
-    sweep_pkl: str,
-    epoch: int,
-    start_epoch: int,
-) -> dict | None:
-    """复用 OnlineNCDE 训练脚本的 RayIoU 评估逻辑。"""
-    from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-    from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
-
-    if epoch == start_epoch:
-        print(f"[rayiou] sweep pkl: {sweep_pkl}")
-
-    origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
-    sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
-    skipped = 0
-    for item in predictions:
-        token = item["token"]
-        if token not in origins_by_token:
-            skipped += 1
-            continue
-        sem_pred_list.append(item["pred"])
-        sem_gt_list.append(item["gt"])
-        lidar_origin_list.append(origins_by_token[token])
-
-    if skipped:
-        print(f"[rayiou] epoch={epoch} 跳过 {skipped} 个样本（无对应 lidar origin）")
-    print(f"[rayiou] epoch={epoch} {len(sem_pred_list)} 个样本参与计算")
-    if not sem_pred_list:
-        print(f"[rayiou] epoch={epoch} 无有效样本，跳过 RayIoU")
-        return None
-
-    rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
-    print(
-        f"[rayiou] epoch={epoch} "
-        f"RayIoU={rayiou_result['RayIoU']:.4f} "
-        f"RayIoU@1={rayiou_result['RayIoU@1']:.4f} "
-        f"RayIoU@2={rayiou_result['RayIoU@2']:.4f} "
-        f"RayIoU@4={rayiou_result['RayIoU@4']:.4f}"
-    )
-    return rayiou_result
 
 
 def _load_config_with_streamingflow_overlay(config_path: str) -> dict:
@@ -380,25 +338,52 @@ def main() -> None:
         val_metrics = None
         if is_main and val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
             enable_rayiou = not args.no_rayiou
-            val_metrics = trainer.evaluate(val_loader, collect_predictions=enable_rayiou)
+            val_metrics = trainer.evaluate(
+                val_loader,
+                collect_predictions=True,
+                compute_miou=False,
+            )
             _cleanup_gpu_cache()
+            sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
+            sweep_path = Path(sweep_rel)
+            sweep_pkl = str(
+                sweep_path if sweep_path.is_absolute() else (Path(root_path) / sweep_path).resolve()
+            )
+            if enable_rayiou and epoch == start_epoch:
+                print(f"[rayiou] sweep pkl: {sweep_pkl}")
+            dense_eval = evaluate_dense_occ(
+                val_metrics.get("predictions", []),
+                num_classes=int(data_cfg["num_classes"]),
+                enable_rayiou=enable_rayiou,
+                sweep_pkl=sweep_pkl if enable_rayiou else None,
+                print_rayiou_table=True,
+            )
+            dense_all = dense_eval["all"]
+            val_metrics["miou"] = (
+                dense_all["miou"] if dense_all.get("miou", None) is not None else float("nan")
+            )
+            val_metrics["miou_d"] = (
+                dense_all["miou_d"] if dense_all.get("miou_d", None) is not None else float("nan")
+            )
+            val_metrics["per_class_iou"] = dense_all.get("per_class_iou", [])
+            val_metrics["class_names"] = dense_all.get("class_names", [])
             print(
                 f"[eval] epoch={epoch} loss={val_metrics['loss']:.4f} "
                 f"miou={val_metrics['miou']:.4f} miou_d={val_metrics.get('miou_d', float('nan')):.4f}"
             )
-            rayiou_result = None
-            if enable_rayiou:
-                sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
-                sweep_path = Path(sweep_rel)
-                sweep_pkl = str(
-                    sweep_path if sweep_path.is_absolute() else (Path(root_path) / sweep_path).resolve()
+            rayiou_result = dense_all.get("rayiou", None)
+            if rayiou_result is not None:
+                print(
+                    f"[rayiou] epoch={epoch} "
+                    f"RayIoU={rayiou_result['RayIoU']:.4f} "
+                    f"RayIoU@1={rayiou_result['RayIoU@1']:.4f} "
+                    f"RayIoU@2={rayiou_result['RayIoU@2']:.4f} "
+                    f"RayIoU@4={rayiou_result['RayIoU@4']:.4f}"
                 )
-                rayiou_result = _compute_epoch_rayiou(
-                    predictions=val_metrics.get("predictions", []),
-                    sweep_pkl=sweep_pkl,
-                    epoch=epoch,
-                    start_epoch=start_epoch,
-                )
+            rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
+            missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
+            if missing_origin_count:
+                print(f"[rayiou] epoch={epoch} 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
             if run is not None:
                 payload = {f"val/{k}": float(v) for k, v in val_metrics.items() if isinstance(v, (int, float))}
                 payload["epoch"] = float(epoch)
