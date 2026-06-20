@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""StreamingFlow-style BEV GRU-ODE baseline 逐步评估脚本。"""
+"""StreamingFlow-style BEV GRU-ODE baseline 评估脚本。"""
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, cast
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
@@ -29,8 +30,7 @@ from online_ncde.config import load_config, load_config_with_base, merge_dict, r
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
-from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
-from online_ncde.metrics import build_miou_metric  # noqa: E402
+from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dump-json", default="")
     parser.add_argument("--val-info-path", default="")
     parser.add_argument("--exclude-short-history", action="store_true")
+    parser.add_argument("--stepwise", action="store_true", help="评估所有 keyframe step；默认只评估当前时刻")
     parser.add_argument("--no-rayiou", action="store_true")
     return parser.parse_args()
 
@@ -78,15 +79,11 @@ def _safe_avg(value_sum: float, count: int) -> float:
     return value_sum / max(int(count), 1)
 
 
-def _to_json_number(v: float) -> float | None:
-    return float(v) if np.isfinite(v) else None
-
-
 def _build_model(data_cfg: dict, model_cfg: dict) -> StreamingFlowBEVOdeAligner:
     return StreamingFlowBEVOdeAligner(
         num_classes=int(data_cfg["num_classes"]),
-        feat_dim=int(model_cfg.get("feat_dim", 48)),
-        hidden_dim=int(model_cfg.get("hidden_dim", 48)),
+        feat_dim=int(model_cfg.get("feat_dim", 192)),
+        hidden_dim=int(model_cfg.get("hidden_dim", 192)),
         encoder_in_channels=int(model_cfg.get("encoder_in_channels", 18)),
         free_index=int(data_cfg["free_index"]),
         pc_range=tuple(data_cfg["pc_range"]),
@@ -97,16 +94,65 @@ def _build_model(data_cfg: dict, model_cfg: dict) -> StreamingFlowBEVOdeAligner:
     )
 
 
-def main() -> None:
-    args = parse_args()
-    cfg = _load_config_with_streamingflow_overlay(args.config)
-    data_cfg = cfg["data"]
-    model_cfg = cfg["model"]
-    eval_cfg = cfg["eval"]
-    loader_cfg = cfg.get("dataloader", {})
-    root_path = cfg["root_path"]
-    _assert_occ3d(data_cfg)
+def _empty_timing_stats() -> dict[str, Any]:
+    return {
+        "time_sum": defaultdict(float),
+        "warp_sum": defaultdict(float),
+        "solver_sum": defaultdict(float),
+        "decode_sum": defaultdict(float),
+        "count": defaultdict(int),
+    }
 
+
+def _add_timing(stats: dict[str, Any], step_idx: int, t_ms: float, w_ms: float, s_ms: float, d_ms: float) -> None:
+    stats["time_sum"][step_idx] += t_ms
+    stats["warp_sum"][step_idx] += w_ms
+    stats["solver_sum"][step_idx] += s_ms
+    stats["decode_sum"][step_idx] += d_ms
+    stats["count"][step_idx] += 1
+
+
+def _print_timing(stats: dict[str, Any], *, final_only: bool = False) -> dict[str, dict[str, float | int]]:
+    timing_results: dict[str, dict[str, float | int]] = {}
+    print("[timing]")
+    for step_idx in sorted(stats["count"].keys()):
+        count = int(stats["count"][step_idx])
+        avg_ms = _safe_avg(float(stats["time_sum"][step_idx]), count)
+        avg_warp = _safe_avg(float(stats["warp_sum"][step_idx]), count)
+        avg_solver = _safe_avg(float(stats["solver_sum"][step_idx]), count)
+        avg_decode = _safe_avg(float(stats["decode_sum"][step_idx]), count)
+        timing_key = "current" if final_only and int(step_idx) == 0 else str(step_idx)
+        timing_label = "current" if timing_key == "current" else f"step={step_idx}"
+        if timing_key == "current":
+            print(f"  {timing_label} avg_ms={avg_ms:.4f} count={count}")
+            timing_results[timing_key] = {
+                "avg_time_ms": avg_ms,
+                "num_predictions": count,
+            }
+            continue
+        print(
+            f"  {timing_label} avg_ms={avg_ms:.4f} warp={avg_warp:.4f} "
+            f"solver={avg_solver:.4f} decode={avg_decode:.4f} count={count}"
+        )
+        timing_results[timing_key] = {
+            "avg_time_ms": avg_ms,
+            "avg_warp_ms": avg_warp,
+            "avg_solver_ms": avg_solver,
+            "avg_decode_ms": avg_decode,
+            "num_step_preds": count,
+        }
+    return timing_results
+
+
+def _build_eval_loader_and_model(
+    *,
+    args: argparse.Namespace,
+    data_cfg: dict,
+    model_cfg: dict,
+    eval_cfg: dict,
+    loader_cfg: dict,
+    root_path: str,
+) -> tuple[DataLoader, StreamingFlowBEVOdeAligner, torch.device]:
     logits_loader = build_logits_loader(data_cfg, root_path)
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     info_path = args.val_info_path or data_cfg.get("val_info_path", data_cfg["info_path"])
@@ -132,13 +178,119 @@ def main() -> None:
     )
     if num_workers > 0:
         loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-        loader_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
+        loader_kwargs["persistent_workers"] = False
     loader = DataLoader(dataset, **loader_kwargs)
 
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
     model = _build_model(data_cfg, model_cfg).to(device)
     load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
     model.eval()
+    return loader, model, device
+
+
+def _measure_forward_ms(device: torch.device, fn) -> tuple[Any, float]:
+    if device.type == "cuda":
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        result = fn()
+        end.record()
+        torch.cuda.synchronize(device=device)
+        return result, float(start.elapsed_time(end))
+    t0 = time.perf_counter()
+    result = fn()
+    return result, (time.perf_counter() - t0) * 1000.0
+
+
+def _collect_streamingflow_final_predictions(
+    *,
+    args: argparse.Namespace,
+    data_cfg: dict,
+    model_cfg: dict,
+    eval_cfg: dict,
+    loader_cfg: dict,
+    root_path: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+    loader, model, device = _build_eval_loader_and_model(
+        args=args,
+        data_cfg=data_cfg,
+        model_cfg=model_cfg,
+        eval_cfg=eval_cfg,
+        loader_cfg=loader_cfg,
+        root_path=root_path,
+    )
+
+    grid_size = tuple(int(v) for v in data_cfg["grid_size"])
+    timing_stats = _empty_timing_stats()
+    predictions: list[dict[str, Any]] = []
+    missing_meta_count = 0
+
+    iterator = (
+        progressbar.progressbar(loader, max_value=len(loader), prefix="[infer sf-final] ")
+        if progressbar is not None
+        else loader
+    )
+    with torch.inference_mode():
+        for sample in iterator:
+            sample = move_to_device(sample, device)
+            outputs, forward_ms = _measure_forward_ms(
+                device,
+                lambda: model(
+                    fast_logits=sample["fast_logits"],
+                    slow_logits=sample["slow_logits"],
+                    frame_ego2global=sample["frame_ego2global"],
+                    frame_timestamps=sample.get("frame_timestamps", None),
+                    frame_dt=sample.get("frame_dt", None),
+                    rollout_start_step=sample.get("rollout_start_step", None),
+                ),
+            )
+            aligned = cast(torch.Tensor, outputs["aligned"])
+            preds = aligned.argmax(dim=1).to(torch.uint8).cpu().numpy()
+            if tuple(preds.shape[-3:]) != grid_size:
+                raise ValueError(f"preds shape={preds.shape[-3:]} 与 grid_size={grid_size} 不一致")
+
+            batch_size = int(preds.shape[0])
+            avg_ms = float(forward_ms) / max(batch_size, 1)
+            for _ in range(batch_size):
+                _add_timing(timing_stats, 0, avg_ms, 0.0, avg_ms, 0.0)
+
+            meta_list = cast("list[dict[str, Any]]", sample["meta"])
+            for b, meta in enumerate(meta_list):
+                scene_name = str(meta.get("scene_name", ""))
+                token = str(meta.get("token", ""))
+                if not scene_name or not token:
+                    missing_meta_count += 1
+                    continue
+                predictions.append(
+                    make_dense_occ_prediction(
+                        pred=preds[b],
+                        scene_name=scene_name,
+                        token=token,
+                        step_idx=None,
+                    )
+                )
+
+    print(f"[pred] collected {len(predictions)} current-frame uint8 predictions in memory")
+    return predictions, timing_stats, missing_meta_count
+
+
+def _collect_streamingflow_stepwise_predictions(
+    *,
+    args: argparse.Namespace,
+    data_cfg: dict,
+    model_cfg: dict,
+    eval_cfg: dict,
+    loader_cfg: dict,
+    root_path: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+    loader, model, device = _build_eval_loader_and_model(
+        args=args,
+        data_cfg=data_cfg,
+        model_cfg=model_cfg,
+        eval_cfg=eval_cfg,
+        loader_cfg=loader_cfg,
+        root_path=root_path,
+    )
 
     nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)
     sweep_info_path = resolve_path(root_path, args.sweep_info_path)
@@ -148,37 +300,13 @@ def main() -> None:
         sweep_info_path=sweep_info_path,
     )
 
-    num_classes = int(data_cfg["num_classes"])
-    gt_root = resolve_path(root_path, data_cfg["gt_root"])
-    gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
-    class_names = build_miou_metric(num_classes=num_classes).class_names
-
-    metric_all = build_miou_metric(num_classes=num_classes, use_image_mask=True, use_lidar_mask=False)
-    per_step_metrics = {}
-
-    enable_rayiou = not args.no_rayiou
-    per_step_ray: dict[int, Any] = {}
-    ray_acc_all: Any | None = None
-    origins_by_token = {}
-    RayIouAccumulator = None
-    if enable_rayiou:
-        from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-        from online_ncde.ops.dvr.ray_metrics import RayIouAccumulator as _RayIouAccumulator
-
-        RayIouAccumulator = _RayIouAccumulator
-        ray_acc_all = RayIouAccumulator()
-        origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)
-    missing_origin_count = 0
-
-    step_time_sum = defaultdict(float)
-    step_warp_sum = defaultdict(float)
-    step_solver_sum = defaultdict(float)
-    step_decode_sum = defaultdict(float)
-    step_time_count = defaultdict(int)
-    missing_gt_count = 0
+    grid_size = tuple(int(v) for v in data_cfg["grid_size"])
+    timing_stats = _empty_timing_stats()
+    predictions: list[dict[str, Any]] = []
+    missing_keyframe_count = 0
 
     iterator = (
-        progressbar.progressbar(loader, max_value=len(loader), prefix="[eval sf] ")
+        progressbar.progressbar(loader, max_value=len(loader), prefix="[infer sf] ")
         if progressbar is not None
         else loader
     )
@@ -199,6 +327,9 @@ def main() -> None:
             step_solver_ms = cast(torch.Tensor, outputs["step_solver_ms"])
             step_decode_ms = cast(torch.Tensor, outputs["step_decode_ms"])
             step_indices = [int(v) for v in cast(torch.Tensor, outputs["step_indices"]).cpu().tolist()]
+            step_preds = step_logits.argmax(dim=2).to(torch.uint8).cpu().numpy()
+            if tuple(step_preds.shape[-3:]) != grid_size:
+                raise ValueError(f"step_preds shape={step_preds.shape[-3:]} 与 grid_size={grid_size} 不一致")
 
             meta_list = cast("list[dict[str, Any]]", sample["meta"])
             for b, meta in enumerate(meta_list):
@@ -213,95 +344,130 @@ def main() -> None:
                     w_ms = float(step_warp_ms[b, local_idx].detach().cpu().item())
                     s_ms = float(step_solver_ms[b, local_idx].detach().cpu().item())
                     d_ms = float(step_decode_ms[b, local_idx].detach().cpu().item())
-                    step_time_sum[step_idx] += t_ms
-                    step_warp_sum[step_idx] += w_ms
-                    step_solver_sum[step_idx] += s_ms
-                    step_decode_sum[step_idx] += d_ms
-                    step_time_count[step_idx] += 1
+                    _add_timing(timing_stats, step_idx, t_ms, w_ms, s_ms, d_ms)
 
                     gt_token = keyframe_steps.get(step_idx, None)
                     if gt_token is None:
+                        missing_keyframe_count += 1
                         continue
-                    gt_path = os.path.join(gt_root, scene_name, gt_token, "labels.npz")
-                    if not os.path.exists(gt_path):
-                        missing_gt_count += 1
-                        continue
-
-                    gt_npz = load_labels_npz(gt_path)
-                    gt_semantics = gt_npz["semantics"]
-                    gt_mask = gt_npz.get(gt_mask_key, np.ones(gt_semantics.shape, dtype=np.float32))
-                    preds = step_logits[b, local_idx].argmax(dim=0).detach().cpu().numpy()
-
-                    metric = per_step_metrics.setdefault(
-                        step_idx,
-                        build_miou_metric(num_classes=num_classes, use_image_mask=True, use_lidar_mask=False),
+                    predictions.append(
+                        make_dense_occ_prediction(
+                            pred=step_preds[b, local_idx],
+                            scene_name=scene_name,
+                            token=str(gt_token),
+                            step_idx=step_idx,
+                        )
                     )
-                    metric.add_batch(preds, gt_semantics, mask_lidar=None, mask_camera=gt_mask)
-                    metric_all.add_batch(preds, gt_semantics, mask_lidar=None, mask_camera=gt_mask)
 
-                    if enable_rayiou:
-                        origin = origins_by_token.get(gt_token, None)
-                        if origin is None:
-                            missing_origin_count += 1
-                        else:
-                            assert RayIouAccumulator is not None
-                            ray_acc = per_step_ray.setdefault(step_idx, RayIouAccumulator())
-                            ray_acc.add_sample(preds, gt_semantics, origin)
-                            assert ray_acc_all is not None
-                            ray_acc_all.add_sample(preds, gt_semantics, origin)
+    print(f"[pred] collected {len(predictions)} uint8 predictions in memory")
+    return predictions, timing_stats, missing_keyframe_count
 
-    print("[timing]")
-    per_step_results: dict[str, Any] = {}
-    for step_idx in sorted(step_time_count.keys()):
-        avg_ms = _safe_avg(step_time_sum[step_idx], step_time_count[step_idx])
-        avg_warp = _safe_avg(step_warp_sum[step_idx], step_time_count[step_idx])
-        avg_solver = _safe_avg(step_solver_sum[step_idx], step_time_count[step_idx])
-        avg_decode = _safe_avg(step_decode_sum[step_idx], step_time_count[step_idx])
+
+def main() -> None:
+    args = parse_args()
+    cfg = _load_config_with_streamingflow_overlay(args.config)
+    data_cfg = cfg["data"]
+    model_cfg = cfg["model"]
+    eval_cfg = cfg["eval"]
+    loader_cfg = cfg.get("dataloader", {})
+    root_path = cfg["root_path"]
+    _assert_occ3d(data_cfg)
+
+    eval_mode = "stepwise" if args.stepwise else "final"
+    collect_fn = (
+        _collect_streamingflow_stepwise_predictions
+        if args.stepwise
+        else _collect_streamingflow_final_predictions
+    )
+    predictions, timing_stats, missing_pred_meta_count = collect_fn(
+        args=args,
+        data_cfg=data_cfg,
+        model_cfg=model_cfg,
+        eval_cfg=eval_cfg,
+        loader_cfg=loader_cfg,
+        root_path=root_path,
+    )
+    sweep_info_path = resolve_path(root_path, args.sweep_info_path)
+    gt_root = resolve_path(root_path, data_cfg["gt_root"])
+    predictions_with_gt, missing_gt_count = attach_occ3d_targets(
+        predictions,
+        gt_root=gt_root,
+        gt_mask_key=data_cfg.get("gt_mask_key", "mask_camera"),
+        grid_size=tuple(int(v) for v in data_cfg["grid_size"]),
+    )
+    print(f"[target] attached_gt={len(predictions_with_gt)} missing_gt_count={missing_gt_count}")
+
+    result = evaluate_dense_occ(
+        predictions_with_gt,
+        num_classes=int(data_cfg["num_classes"]),
+        enable_rayiou=not args.no_rayiou,
+        sweep_pkl=sweep_info_path if not args.no_rayiou else None,
+        print_rayiou_table=True,
+    )
+    num_predictions = int(len(predictions))
+    num_evaluated_predictions = int(len(predictions_with_gt))
+    del predictions, predictions_with_gt
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    timing_results = _print_timing(timing_stats, final_only=not args.stepwise)
+    per_step_results = dict(result["per_step"])
+    class_names = result["all"].get("class_names", [])
+    if args.stepwise:
+        for step_idx, timing in timing_results.items():
+            payload = per_step_results.setdefault(
+                step_idx,
+                {
+                    "num_keyframes": 0,
+                    "miou": None,
+                    "miou_d": None,
+                    "per_class_iou": [],
+                    "class_names": class_names,
+                    "rayiou": None,
+                },
+            )
+            payload.update(timing)
+
+    for step_idx in sorted(per_step_results.keys(), key=lambda x: int(x)):
+        step_payload = per_step_results[step_idx]
+        if int(step_payload.get("num_keyframes", 0)) > 0:
+            print(
+                f"[keyframe][step={step_idx}] num={step_payload['num_keyframes']} "
+                f"miou={float(step_payload['miou']):.2f} "
+                f"miou_d={float(step_payload['miou_d']):.2f}"
+            )
+        ray_result = step_payload.get("rayiou", None)
+        if ray_result is not None:
+            print(
+                f"[rayiou][step={step_idx}] num={ray_result['num_samples']} "
+                f"RayIoU={ray_result['RayIoU']:.4f}"
+            )
+
+    all_result = result["all"]
+    if int(all_result.get("num_keyframes", 0)) > 0:
         print(
-            f"  step={step_idx} avg_ms={avg_ms:.4f} warp={avg_warp:.4f} "
-            f"solver={avg_solver:.4f} decode={avg_decode:.4f} count={step_time_count[step_idx]}"
+            f"[keyframe][all] num={all_result['num_keyframes']} "
+            f"miou={float(all_result['miou']):.2f} "
+            f"miou_d={float(all_result['miou_d']):.2f}"
+        )
+    else:
+        print("[keyframe][all] no samples")
+    if all_result.get("rayiou", None) is not None:
+        all_ray = all_result["rayiou"]
+        print(
+            f"[rayiou][all] num={all_ray['num_samples']} "
+            f"RayIoU={all_ray['RayIoU']:.4f} "
+            f"@1={all_ray['RayIoU@1']:.4f} "
+            f"@2={all_ray['RayIoU@2']:.4f} "
+            f"@4={all_ray['RayIoU@4']:.4f}"
         )
 
-        metric = per_step_metrics.get(step_idx)
-        if metric is None or metric.cnt == 0:
-            continue
-        miou = float(metric.count_miou(verbose=False))
-        miou_d = float(metric.count_miou_d(verbose=False))
-        per_class = np.nan_to_num(metric.get_per_class_iou(), nan=0.0).tolist()
-        print(f"[keyframe][step={step_idx}] num={metric.cnt} miou={miou:.2f} miou_d={miou_d:.2f}")
-        ray_result = None
-        if enable_rayiou and step_idx in per_step_ray and per_step_ray[step_idx].num_samples > 0:
-            ray_result = per_step_ray[step_idx].finalize(print_table=False)
-            print(f"[rayiou][step={step_idx}] RayIoU={ray_result['RayIoU']:.4f}")
-        per_step_results[str(step_idx)] = {
-            "num_keyframes": int(metric.cnt),
-            "miou": miou,
-            "miou_d": _to_json_number(miou_d),
-            "per_class_iou": [float(v) for v in per_class],
-            "class_names": class_names,
-            "avg_time_ms": avg_ms,
-            "avg_warp_ms": avg_warp,
-            "avg_solver_ms": avg_solver,
-            "avg_decode_ms": avg_decode,
-            "rayiou": ray_result,
-        }
-
-    if metric_all.cnt > 0:
-        all_miou = float(metric_all.count_miou(verbose=False))
-        all_miou_d = float(metric_all.count_miou_d(verbose=False))
-        all_per_class = np.nan_to_num(metric_all.get_per_class_iou(), nan=0.0).tolist()
-        print(f"[keyframe][all] num={metric_all.cnt} miou={all_miou:.2f} miou_d={all_miou_d:.2f}")
-    else:
-        all_miou = float("nan")
-        all_miou_d = float("nan")
-        all_per_class = []
-        print("[keyframe][all] no samples")
-
-    all_ray = None
-    if enable_rayiou and ray_acc_all is not None and ray_acc_all.num_samples > 0:
-        all_ray = ray_acc_all.finalize(print_table=True)
-        print(f"[rayiou][all] RayIoU={all_ray['RayIoU']:.4f}")
-
+    rayiou_meta = result.get("rayiou_meta", None) or {}
+    missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
+    if missing_pred_meta_count:
+        warn_key = "missing_keyframe_count" if args.stepwise else "missing_meta_count"
+        print(f"[warn] {warn_key}={missing_pred_meta_count}")
     if missing_gt_count:
         print(f"[warn] missing_gt_count={missing_gt_count}")
     if missing_origin_count:
@@ -310,15 +476,15 @@ def main() -> None:
     if args.dump_json:
         payload = {
             "model_kind": "streamingflow-bev-ode",
-            "all": {
-                "num_keyframes": int(metric_all.cnt),
-                "miou": _to_json_number(all_miou),
-                "miou_d": _to_json_number(all_miou_d),
-                "per_class_iou": [float(v) for v in all_per_class],
-                "class_names": class_names,
-                "rayiou": all_ray,
-            },
+            "eval_mode": eval_mode,
+            "all": all_result,
             "per_step": per_step_results,
+            "timing": timing_results,
+            "num_predictions": num_predictions,
+            "num_evaluated_predictions": num_evaluated_predictions,
+            "missing_prediction_meta_count": int(missing_pred_meta_count),
+            "missing_gt_count": int(missing_gt_count),
+            "missing_origin_count": int(missing_origin_count),
         }
         os.makedirs(os.path.dirname(os.path.abspath(args.dump_json)), exist_ok=True)
         with open(args.dump_json, "w", encoding="utf-8") as f:

@@ -112,6 +112,101 @@ class LightNoPoolSmallDecoder(nn.Module):
         return self.net(x)
 
 
+class StreamingFlowSmallEncoder2D(nn.Module):
+    """StreamingFlow 原版风格的 200x200 -> 50x50 SRVP encoder。"""
+
+    def __init__(
+        self,
+        in_channels: int = 64,
+        latent_channels: int = 192,
+        filter_size: int = 32,
+        gn_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        nf = int(filter_size)
+        self.blocks = nn.ModuleList(
+            [
+                ResBlock2D(int(in_channels), nf, gn_groups=gn_groups),
+                ResBlock2D(nf, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 4, gn_groups=gn_groups),
+            ]
+        )
+        self.last_conv = ConvNormAct2d(
+            nf * 4,
+            int(latent_channels),
+            kernel_size=3,
+            padding=1,
+            gn_groups=gn_groups,
+            activation="tanh",
+        )
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"StreamingFlowSmallEncoder2D 输入需为 4D，当前: {tuple(x.shape)}")
+        h = x
+        for idx, block in enumerate(self.blocks):
+            if idx in (1, 2):
+                h = self.maxpool(h)
+            h = block(h)
+        return self.last_conv(h)
+
+
+class StreamingFlowSmallDecoder2D(nn.Module):
+    """StreamingFlow 原版风格的 50x50 -> 200x200 SRVP decoder。"""
+
+    def __init__(
+        self,
+        latent_channels: int = 192,
+        out_channels: int = 64,
+        filter_size: int = 32,
+        gn_groups: int = 8,
+    ) -> None:
+        super().__init__()
+        nf = int(filter_size)
+        self.first_conv = ConvNormAct2d(
+            int(latent_channels),
+            nf * 4,
+            kernel_size=3,
+            padding=1,
+            gn_groups=gn_groups,
+            activation="silu",
+        )
+        self.blocks = nn.ModuleList(
+            [
+                ResBlock2D(nf * 4, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf * 2, gn_groups=gn_groups),
+                ResBlock2D(nf * 2, nf, gn_groups=gn_groups),
+                ResBlock2D(nf, nf, gn_groups=gn_groups),
+            ]
+        )
+        self.last_conv = nn.Sequential(
+            ConvNormAct2d(nf, nf, kernel_size=3, padding=1, gn_groups=gn_groups, activation="silu"),
+            nn.Conv2d(nf, int(out_channels), kernel_size=3, padding=1, bias=True),
+        )
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+
+    def _decode_flat(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.first_conv(x)
+        for idx, block in enumerate(self.blocks):
+            h = block(h)
+            if idx in (2, 3):
+                h = self.upsample(h)
+        return self.last_conv(h)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 5:
+            b, s, c, h, w = x.shape
+            y = self._decode_flat(x.reshape(b * s, c, h, w))
+            return y.view(b, s, *y.shape[1:])
+        if x.dim() == 4:
+            return self._decode_flat(x)
+        raise ValueError(f"StreamingFlowSmallDecoder2D 输入需为 4D/5D，当前: {tuple(x.shape)}")
+
+
 class BEVTo3DDecoder(nn.Module):
     """BEV latent -> 200x200x16 absolute occupancy logits。"""
 
@@ -163,123 +258,6 @@ class BEVTo3DDecoder(nn.Module):
         if x.dim() == 4:
             return self._decode_flat(x)
         raise ValueError(f"BEVTo3DDecoder 输入需为 4D/5D，当前: {tuple(x.shape)}")
-
-
-class FastConditionedBEVTo3DDecoder(nn.Module):
-    """用当前快系统 logits 条件化的 BEV -> 3D absolute decoder。"""
-
-    def __init__(
-        self,
-        in_channels: int = 64,
-        mid_channels: int = 96,
-        high_channels: int = 128,
-        fast_condition_channels: int = 96,
-        upsample_scale: int = 2,
-        num_classes: int = 18,
-        height_bins: int = 16,
-        gn_groups: int = 8,
-    ) -> None:
-        super().__init__()
-        self.num_classes = int(num_classes)
-        self.height_bins = int(height_bins)
-        self.upsample_scale = int(upsample_scale)
-        if self.upsample_scale < 1:
-            raise ValueError(f"upsample_scale 必须 >= 1，当前 {upsample_scale}")
-        cond_c = int(fast_condition_channels)
-        mid_c = int(mid_channels)
-
-        self.stem = ConvNormAct2d(
-            int(in_channels), int(high_channels), kernel_size=3, padding=1, gn_groups=gn_groups
-        )
-        self.high_block = ResBlock2D(int(high_channels), int(high_channels), gn_groups=gn_groups)
-        self.mid = ConvNormAct2d(
-            int(high_channels), mid_c, kernel_size=3, padding=1, gn_groups=gn_groups
-        )
-        self.mid_block = ResBlock2D(mid_c, mid_c, gn_groups=gn_groups)
-
-        # fast logits 只作为 decoder 条件，不做输出残差。
-        self.fast_adapter = ConvNormAct2d(
-            self.num_classes * self.height_bins,
-            cond_c,
-            kernel_size=1,
-            padding=0,
-            gn_groups=gn_groups,
-            activation="silu",
-        )
-        self.fast_to_mid = (
-            nn.Identity()
-            if cond_c == mid_c
-            else ConvNormAct2d(
-                cond_c,
-                mid_c,
-                kernel_size=1,
-                padding=0,
-                gn_groups=gn_groups,
-                activation="silu",
-            )
-        )
-        self.fusion_gate = nn.Conv2d(mid_c * 2, mid_c, kernel_size=1, bias=True)
-        self.out_conv = nn.Conv2d(mid_c, self.num_classes * self.height_bins, kernel_size=1, bias=True)
-
-    def _flatten_fast_logits(self, fast_logits: torch.Tensor) -> torch.Tensor:
-        if fast_logits.dim() != 5:
-            raise ValueError(
-                f"fast_logits 需要 (N,C,X,Y,Z)，当前: {tuple(fast_logits.shape)}"
-            )
-        n, c, x_size, y_size, z_size = fast_logits.shape
-        if c != self.num_classes or z_size != self.height_bins:
-            raise ValueError(
-                f"fast_logits 仅支持 C={self.num_classes}, Z={self.height_bins}，"
-                f"当前 C={c}, Z={z_size}"
-            )
-        fast_2d = fast_logits.permute(0, 1, 4, 2, 3).contiguous()
-        return fast_2d.view(n, c * z_size, x_size, y_size)
-
-    def _decode_flat(self, x: torch.Tensor, fast_logits: torch.Tensor) -> torch.Tensor:
-        x = self.high_block(self.stem(x))
-        if self.upsample_scale != 1:
-            x = F.interpolate(
-                x, scale_factor=self.upsample_scale, mode="bilinear", align_corners=False
-            )
-        x = self.mid_block(self.mid(x))
-
-        fast_cond = self.fast_adapter(self._flatten_fast_logits(fast_logits))
-        fast_cond = self.fast_to_mid(fast_cond)
-        if fast_cond.shape[-2:] != x.shape[-2:]:
-            raise ValueError(
-                f"fast condition 分辨率 {tuple(fast_cond.shape[-2:])} 与 decoder feature "
-                f"{tuple(x.shape[-2:])} 不一致"
-            )
-        gate = torch.sigmoid(self.fusion_gate(torch.cat([x, fast_cond], dim=1)))
-        x = x + gate * fast_cond
-
-        x = self.out_conv(x)
-        n, _, x_size, y_size = x.shape
-        x = x.view(n, self.num_classes, self.height_bins, x_size, y_size)
-        return x.permute(0, 1, 3, 4, 2).contiguous()
-
-    def forward(self, x: torch.Tensor, fast_logits: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 5:
-            if fast_logits.dim() != 6:
-                raise ValueError(
-                    f"sequence fast_logits 需要 (B,S,C,X,Y,Z)，当前: {tuple(fast_logits.shape)}"
-                )
-            b, s, c, h, w = x.shape
-            if fast_logits.shape[:2] != (b, s):
-                raise ValueError(
-                    f"BEV state 与 fast condition step 不一致: {tuple(x.shape[:2])} vs "
-                    f"{tuple(fast_logits.shape[:2])}"
-                )
-            y = self._decode_flat(
-                x.reshape(b * s, c, h, w),
-                fast_logits.reshape(b * s, *fast_logits.shape[2:]),
-            )
-            return y.view(b, s, *y.shape[1:])
-        if x.dim() == 4:
-            return self._decode_flat(x, fast_logits)
-        raise ValueError(
-            f"FastConditionedBEVTo3DDecoder 输入需为 4D/5D，当前: {tuple(x.shape)}"
-        )
 
 
 class SameTimeGatedFusion(nn.Module):

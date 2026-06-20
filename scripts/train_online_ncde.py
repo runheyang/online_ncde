@@ -38,6 +38,7 @@ from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
+from online_ncde.evaluation import compute_dense_rayiou_with_pcds, evaluate_dense_occ  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
@@ -550,8 +551,51 @@ def main() -> None:
         # eval / checkpoint 仅 rank 0 执行，其他 rank 在 barrier 处等待
         if is_main:
             if val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
-                val_metrics = trainer.evaluate(val_loader, collect_predictions=True)
+                val_metrics = trainer.evaluate(
+                    val_loader,
+                    collect_predictions=True,
+                    compute_miou=False,
+                )
                 _cleanup_gpu_cache()
+                predictions = val_metrics["predictions"]
+                sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
+                sweep_path = Path(sweep_rel)
+                sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
+                if epoch == start_epoch:
+                    print(f"[rayiou] sweep pkl: {sweep_pkl}")
+
+                binned_ray_result = None
+                need_pcds = args.save_metrics_json
+                if need_pcds:
+                    dense_eval = evaluate_dense_occ(
+                        predictions,
+                        num_classes=int(data_cfg["num_classes"]),
+                        enable_rayiou=False,
+                    )
+                    rayiou_result, raw_pcd_pred, raw_pcd_gt, rayiou_meta = compute_dense_rayiou_with_pcds(
+                        predictions,
+                        sweep_pkl=sweep_pkl,
+                    )
+                    dense_eval["all"]["rayiou"] = rayiou_result
+                    dense_eval["rayiou_meta"] = rayiou_meta
+                else:
+                    dense_eval = evaluate_dense_occ(
+                        predictions,
+                        num_classes=int(data_cfg["num_classes"]),
+                        enable_rayiou=True,
+                        sweep_pkl=sweep_pkl,
+                        print_rayiou_table=True,
+                    )
+                    rayiou_result = dense_eval["all"].get("rayiou", None)
+                    rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
+
+                dense_all = dense_eval["all"]
+                val_metrics.update({
+                    "miou": dense_all["miou"],
+                    "miou_d": dense_all["miou_d"],
+                    "per_class_iou": dense_all["per_class_iou"],
+                    "class_names": dense_all["class_names"],
+                })
                 val_sup_parts = []
                 for key, value in val_metrics.items():
                     if isinstance(key, str) and key.startswith("sup_loss_t"):
@@ -573,51 +617,21 @@ def main() -> None:
                     for name, value in zip(class_names, per_class):
                         print(f"===> {name} - IoU = {round(float(value), 2)}")
 
-                # --- RayIoU ---
-                binned_ray_result = None
-                from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-                from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
-
-                sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
-                sweep_path = Path(sweep_rel)
-                sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
-                if epoch == start_epoch:
-                    print(f"[rayiou] sweep pkl: {sweep_pkl}")
-
-                origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
-                predictions = val_metrics["predictions"]
-                sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
-                skipped = 0
-                for item in predictions:
-                    token = item["token"]
-                    if token not in origins_by_token:
-                        skipped += 1
-                        continue
-                    sem_pred_list.append(item["pred"])
-                    sem_gt_list.append(item["gt"])
-                    lidar_origin_list.append(origins_by_token[token])
-
-                if skipped:
-                    print(f"[rayiou] epoch={epoch} 跳过 {skipped} 个样本（无对应 lidar origin）")
-                print(f"[rayiou] epoch={epoch} {len(sem_pred_list)} 个样本参与计算")
-
-                # return_pcds=True 以便分箱统计复用 raycasting 结果
-                need_pcds = args.save_metrics_json
-                if need_pcds:
-                    rayiou_result, raw_pcd_pred, raw_pcd_gt = calc_rayiou(
-                        sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=True)
-                else:
-                    rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
-                print(
-                    f"[rayiou] epoch={epoch} "
-                    f"RayIoU={rayiou_result['RayIoU']:.4f} "
-                    f"RayIoU@1={rayiou_result['RayIoU@1']:.4f} "
-                    f"RayIoU@2={rayiou_result['RayIoU@2']:.4f} "
-                    f"RayIoU@4={rayiou_result['RayIoU@4']:.4f}"
-                )
+                missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
+                if missing_origin_count:
+                    print(f"[rayiou] epoch={epoch} 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
+                if rayiou_result is not None:
+                    print(
+                        f"[rayiou] epoch={epoch} "
+                        f"num={rayiou_result.get('num_samples', 0)} "
+                        f"RayIoU={rayiou_result['RayIoU']:.4f} "
+                        f"RayIoU@1={rayiou_result['RayIoU@1']:.4f} "
+                        f"RayIoU@2={rayiou_result['RayIoU@2']:.4f} "
+                        f"RayIoU@4={rayiou_result['RayIoU@4']:.4f}"
+                    )
 
                 # 分箱 ray 统计
-                if need_pcds:
+                if need_pcds and rayiou_result is not None:
                     from online_ncde.ops.dvr.binned_ray_stats import compute_binned_ray_stats
                     binned_ray_result = compute_binned_ray_stats(raw_pcd_pred, raw_pcd_gt)
                     for bk in ["0-10m", "10-20m", "20-40m"]:
@@ -630,6 +644,8 @@ def main() -> None:
                             f"false_hit={bs['false_hit_rate']:.4f}"
                         )
                     del raw_pcd_pred, raw_pcd_gt
+                if "predictions" in val_metrics:
+                    del val_metrics["predictions"]
 
                 if run is not None:
                     payload = {"epoch": float(epoch)}
@@ -647,8 +663,9 @@ def main() -> None:
                             score = to_float(value)
                             if score is not None:
                                 payload[f"val/iou_{name}"] = score
-                    for key in ("RayIoU", "RayIoU@1", "RayIoU@2", "RayIoU@4"):
-                        payload[f"val/{key}"] = float(rayiou_result[key])
+                    if rayiou_result is not None:
+                        for key in ("RayIoU", "RayIoU@1", "RayIoU@2", "RayIoU@4"):
+                            payload[f"val/{key}"] = float(rayiou_result[key])
                     run.log(payload, commit=True)
 
             # 保存指标 JSON（每次 eval 覆盖，最终保留最后 epoch 结果）
@@ -670,9 +687,13 @@ def main() -> None:
                         k: v for k, v in ray_cfg.items()
                         if isinstance(v, (int, float, str, bool))
                     }
-                metrics_json["rayiou"] = {
-                    k: float(v) for k, v in rayiou_result.items()
-                }
+                if rayiou_result is not None:
+                    metrics_json["rayiou"] = {
+                        k: float(rayiou_result[k])
+                        for k in ("RayIoU", "RayIoU@1", "RayIoU@2", "RayIoU@4")
+                    }
+                    if "num_samples" in rayiou_result:
+                        metrics_json["rayiou"]["num_samples"] = int(rayiou_result["num_samples"])
                 if binned_ray_result is not None:
                     metrics_json["binned_ray"] = binned_ray_result
                 json_path = os.path.join(output_dir, "metrics.json")

@@ -632,7 +632,8 @@ class Trainer:
         loader: DataLoader,
         collect_predictions: bool = False,
         use_ema: bool = True,
-    ) -> Dict[str, float | list[str] | list[float]]:
+        compute_miou: bool = True,
+    ) -> Dict[str, Any]:
         """评估并返回 loss + mIoU。
 
         Args:
@@ -640,12 +641,13 @@ class Trainer:
                 用于后续 RayIoU 等需要完整预测结果的指标计算。
                 结果存于返回字典的 ``"predictions"`` 键。
             use_ema: 若为 True 且 self.ema 存在，则用 EMA 权重评估。
+            compute_miou: 若为 False，只做推理/loss/预测收集，mIoU 留给统一评估 helper。
         """
         original_model = self.model
         if use_ema and self.ema is not None:
             self.model = self.ema.module
         try:
-            return self._evaluate_impl(loader, collect_predictions)
+            return self._evaluate_impl(loader, collect_predictions, compute_miou)
         finally:
             self.model = original_model
 
@@ -654,7 +656,8 @@ class Trainer:
         self,
         loader: DataLoader,
         collect_predictions: bool,
-    ) -> Dict[str, float | list[str] | list[float]]:
+        compute_miou: bool,
+    ) -> Dict[str, Any]:
         self.model.eval()
         total_loss = 0.0
         total_focal = 0.0
@@ -662,10 +665,14 @@ class Trainer:
         total_sup_loss: Dict[str, float] = {}
         total_sup_count: Dict[str, int] = {}
         collected: list[dict] = []
-        metric = build_miou_metric(
-            num_classes=self.num_classes,
-            use_image_mask=True,
-            use_lidar_mask=False,
+        metric = (
+            build_miou_metric(
+                num_classes=self.num_classes,
+                use_image_mask=True,
+                use_lidar_mask=False,
+            )
+            if compute_miou
+            else None
         )
 
         total_steps = len(loader)
@@ -697,13 +704,14 @@ class Trainer:
             preds_np = preds.detach().cpu().numpy()
             gt_np = gt_labels_rs.detach().cpu().numpy()
             mask_np = gt_mask_rs.detach().cpu().numpy() if gt_mask_rs is not None else None
-            for b in range(preds_np.shape[0]):
-                metric.add_batch(
-                    semantics_pred=preds_np[b],
-                    semantics_gt=gt_np[b],
-                    mask_lidar=None,
-                    mask_camera=mask_np[b] if mask_np is not None else None,
-                )
+            if metric is not None:
+                for b in range(preds_np.shape[0]):
+                    metric.add_batch(
+                        semantics_pred=preds_np[b],
+                        semantics_gt=gt_np[b],
+                        mask_lidar=None,
+                        mask_camera=mask_np[b] if mask_np is not None else None,
+                    )
 
             # 收集 dense 预测用于 RayIoU 等后续指标
             if collect_predictions:
@@ -711,11 +719,16 @@ class Trainer:
                 if isinstance(meta_list, dict):
                     meta_list = [meta_list]
                 for b in range(preds_np.shape[0]):
-                    token = meta_list[b].get("token", "") if b < len(meta_list) else ""
+                    meta = meta_list[b] if b < len(meta_list) else {}
                     collected.append({
                         "pred": preds_np[b].astype(np.uint8),
                         "gt": gt_np[b].astype(np.uint8),
-                        "token": token,
+                        "mask_camera": (
+                            mask_np[b].astype(np.uint8) if mask_np is not None else None
+                        ),
+                        "token": meta.get("token", ""),
+                        "scene_name": meta.get("scene_name", ""),
+                        "step_idx": None,
                     })
 
             if pbar is not None:
@@ -727,19 +740,24 @@ class Trainer:
             pbar.finish()
 
         denom = max(total_steps, 1)
-        miou = metric.count_miou(verbose=False)
-        miou_d = metric.count_miou_d(verbose=False)
-        per_class = metric.get_per_class_iou()
-        per_class = np.nan_to_num(per_class, nan=0.0).tolist()
-        metrics: Dict[str, float | list[str] | list[float]] = {
+        metrics: Dict[str, Any] = {
             "loss": total_loss / denom,
             "focal": total_focal / denom,
             "aux": total_aux / denom,
-            "miou": miou,
-            "miou_d": miou_d,
-            "per_class_iou": per_class,
-            "class_names": metric.class_names,
         }
+        if metric is not None:
+            miou = metric.count_miou(verbose=False)
+            miou_d = metric.count_miou_d(verbose=False)
+            per_class = metric.get_per_class_iou()
+            per_class = np.nan_to_num(per_class, nan=0.0).tolist()
+            metrics.update({
+                "miou": miou,
+                "miou_d": miou_d,
+                "per_class_iou": per_class,
+                "class_names": metric.class_names,
+            })
+        else:
+            metrics["class_names"] = build_miou_metric(num_classes=self.num_classes).class_names
         for key, value in total_sup_loss.items():
             count = max(total_sup_count.get(key, 0), 1)
             metrics[key] = value / count

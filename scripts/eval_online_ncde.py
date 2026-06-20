@@ -21,6 +21,7 @@ from online_ncde.config import load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
+from online_ncde.evaluation import evaluate_dense_occ  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner          # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
@@ -159,8 +160,24 @@ def main() -> None:
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
     )
 
-    # 单次推理：mIoU + 收集 predictions 用于 RayIoU
-    metrics = trainer.evaluate(loader, collect_predictions=True)
+    # 单次推理只收集 dense prediction；mIoU/RayIoU 统一在推理后计算。
+    metrics = trainer.evaluate(loader, collect_predictions=True, compute_miou=False)
+    sweep_pkl = resolve_sweep_pkl(args, cfg)
+    print(f"[rayiou] sweep pkl: {sweep_pkl}")
+    dense_eval = evaluate_dense_occ(
+        metrics["predictions"],
+        num_classes=int(data_cfg["num_classes"]),
+        enable_rayiou=True,
+        sweep_pkl=sweep_pkl,
+        print_rayiou_table=True,
+    )
+    dense_all = dense_eval["all"]
+    metrics.update({
+        "miou": dense_all["miou"],
+        "miou_d": dense_all["miou_d"],
+        "per_class_iou": dense_all["per_class_iou"],
+        "class_names": dense_all["class_names"],
+    })
 
     # --- mIoU 结果 ---
     print(
@@ -176,38 +193,19 @@ def main() -> None:
         for name, value in zip(class_names, class_iou):
             print(f"{name}: {float(value):.2f}")
 
-    # --- RayIoU ---
-    print("\n[rayiou] 加载 lidar origins...")
-    sweep_pkl = resolve_sweep_pkl(args, cfg)
-    print(f"[rayiou] sweep pkl: {sweep_pkl}")
-
-    from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-    origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
-    print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
-
-    from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
-
-    predictions = metrics["predictions"]
-    sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
-    skipped = 0
-    for item in predictions:
-        token = item["token"]
-        if token not in origins_by_token:
-            skipped += 1
-            continue
-        sem_pred_list.append(item["pred"])
-        sem_gt_list.append(item["gt"])
-        lidar_origin_list.append(origins_by_token[token])
-
-    if skipped:
-        print(f"[rayiou] 跳过 {skipped} 个样本（无对应 lidar origin）")
-    print(f"[rayiou] {len(sem_pred_list)} 个样本参与计算")
-
-    rayiou_result = calc_rayiou(sem_pred_list, sem_gt_list, lidar_origin_list)
-    print(f"\n[rayiou] RayIoU={rayiou_result['RayIoU']:.4f}")
-    print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
-    print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
-    print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
+    rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
+    missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
+    if missing_origin_count:
+        print(f"[rayiou] 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
+    rayiou_result = dense_all.get("rayiou", None)
+    if rayiou_result is not None:
+        print(
+            f"\n[rayiou] num={rayiou_result['num_samples']} "
+            f"RayIoU={rayiou_result['RayIoU']:.4f}"
+        )
+        print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
+        print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
+        print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
 
 
 if __name__ == "__main__":

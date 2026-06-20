@@ -9,29 +9,28 @@ data:
 
 model:
   variant: sf_ode_bev
-  feat_dim: 48
-  hidden_dim: 48
+  feat_dim: 192
+  hidden_dim: 192
   encoder_in_channels: 18
   output_mode: absolute
   decoder_init_scale: null
   streamingflow:
     bev_resolution: [200, 200]
-    temporal_state_resolution: [200, 200]
-    bev_channels: 48
+    temporal_state_resolution: [50, 50]
+    observation_channels: 64
+    decoded_bev_channels: 64
+    bev_channels: 192
     bev_stride_xy: 1
     adapter_kind: matched_stride1
     adapter_mid_channels: 64
-    small_encoder_kind: light_no_pool
-    small_encoder_blocks: 3
-    small_encoder_spatial_downsample: false
-    small_decoder_kind: light_no_pool
-    small_decoder_blocks: 3
+    small_encoder_kind: streamingflow_downsample
+    small_encoder_filter_size: 32
+    small_decoder_kind: streamingflow_upsample
+    small_decoder_filter_size: 32
     bev_to_3d_decoder_kind: matched_no_upsample
     decoder_high_channels: 64
     decoder_mid_channels: 64
-    decoder_fast_condition: false
-    decoder_fast_condition_channels: 64
-    n_spatial_gru: 1
+    n_spatial_gru: 2
     n_res_layers: 1
     impute: true
     deterministic_impute: true
