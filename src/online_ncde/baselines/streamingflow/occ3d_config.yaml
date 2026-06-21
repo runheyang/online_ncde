@@ -9,24 +9,24 @@ data:
 
 model:
   variant: sf_ode_bev
-  feat_dim: 192
-  hidden_dim: 192
+  feat_dim: 96
+  hidden_dim: 96
   encoder_in_channels: 18
   output_mode: absolute
   decoder_init_scale: null
   streamingflow:
     bev_resolution: [200, 200]
-    temporal_state_resolution: [50, 50]
+    temporal_state_resolution: [100, 100]
     observation_channels: 64
     decoded_bev_channels: 64
-    bev_channels: 192
+    bev_channels: 96
     bev_stride_xy: 1
     adapter_kind: matched_stride1
     adapter_mid_channels: 64
     small_encoder_kind: streamingflow_downsample
-    small_encoder_filter_size: 32
+    small_encoder_filter_size: 24
     small_decoder_kind: streamingflow_upsample
-    small_decoder_filter_size: 32
+    small_decoder_filter_size: 24
     bev_to_3d_decoder_kind: matched_no_upsample
     decoder_high_channels: 64
     decoder_mid_channels: 64
@@ -38,6 +38,8 @@ model:
 
 train:
   epochs: 10
+  # batch_size=1 下每 2 个 micro-batch 更新一次，模拟 batch_size=2。
+  gradient_accumulation_steps: 2
   # StreamingFlow baseline 输出 absolute logits，不使用 fast residual KL。
   lambda_fast_kl: 0.0
 

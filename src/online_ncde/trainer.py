@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, Dict, cast
 
 import numpy as np
@@ -98,6 +99,7 @@ class Trainer:
         is_main: bool = True,
         ema: ModelEMA | None = None,
         lambda_fast_kl: float = 0.0,
+        gradient_accumulation_steps: int = 1,
     ) -> None:
         self.model = model
         self.is_main = is_main
@@ -143,6 +145,11 @@ class Trainer:
             None if resolved_step_max is None else int(resolved_step_max)
         )
         self.lambda_fast_kl = float(lambda_fast_kl)
+        self.gradient_accumulation_steps = int(gradient_accumulation_steps)
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError(
+                f"gradient_accumulation_steps 必须 >= 1，当前 {gradient_accumulation_steps}"
+            )
         _underlying = getattr(self.model, "module", self.model)
         if hasattr(_underlying, "_fast_kl_active"):
             _underlying._fast_kl_active = self.lambda_fast_kl > 0.0
@@ -525,6 +532,8 @@ class Trainer:
         total_steps = len(loader)
         _pb = make_pbar(total_steps, prefix=f"[train][epoch={epoch}] ") if (make_pbar is not None and self.is_main) else None
         pbar = _pb.start() if _pb is not None else None
+        accum_steps = self.gradient_accumulation_steps
+        self.optimizer.zero_grad(set_to_none=True)
         for step, sample in enumerate(loader, start=1):
             sample = move_to_device(sample, self.device)
             outputs, loss_dict, sup_loss_batch, sup_count_batch, _, _, _ = (
@@ -536,12 +545,23 @@ class Trainer:
                 total_fast_kl += float(fast_kl_tensor.detach().item())
                 loss = loss + self.lambda_fast_kl * fast_kl_tensor
 
-            self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
-            self.optimizer.step()
-            if self.ema is not None:
-                self.ema.update(self.model)
+            window_start = ((step - 1) // accum_steps) * accum_steps + 1
+            window_end = min(window_start + accum_steps - 1, total_steps)
+            window_size = window_end - window_start + 1
+            should_step = step == window_end
+            sync_context = (
+                self.model.no_sync()
+                if accum_steps > 1 and not should_step and hasattr(self.model, "no_sync")
+                else nullcontext()
+            )
+            with sync_context:
+                (loss / float(window_size)).backward()
+            if should_step:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_norm)
+                self.optimizer.step()
+                if self.ema is not None:
+                    self.ema.update(self.model)
+                self.optimizer.zero_grad(set_to_none=True)
 
             total_loss += float(loss.item())
             total_focal += float(loss_dict["focal"].item())

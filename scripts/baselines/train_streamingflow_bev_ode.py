@@ -276,6 +276,7 @@ def main() -> None:
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
         is_main=is_main,
         ema=ema,
+        gradient_accumulation_steps=int(train_cfg.get("gradient_accumulation_steps", 1)),
     )
 
     if args.resume:

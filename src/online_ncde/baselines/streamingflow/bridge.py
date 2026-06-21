@@ -113,13 +113,13 @@ class LightNoPoolSmallDecoder(nn.Module):
 
 
 class StreamingFlowSmallEncoder2D(nn.Module):
-    """StreamingFlow 原版风格的 200x200 -> 50x50 SRVP encoder。"""
+    """StreamingFlow 风格的 200x200 -> 100x100 SRVP encoder。"""
 
     def __init__(
         self,
         in_channels: int = 64,
-        latent_channels: int = 192,
-        filter_size: int = 32,
+        latent_channels: int = 96,
+        filter_size: int = 24,
         gn_groups: int = 8,
     ) -> None:
         super().__init__()
@@ -148,20 +148,20 @@ class StreamingFlowSmallEncoder2D(nn.Module):
             raise ValueError(f"StreamingFlowSmallEncoder2D 输入需为 4D，当前: {tuple(x.shape)}")
         h = x
         for idx, block in enumerate(self.blocks):
-            if idx in (1, 2):
+            if idx == 1:
                 h = self.maxpool(h)
             h = block(h)
         return self.last_conv(h)
 
 
 class StreamingFlowSmallDecoder2D(nn.Module):
-    """StreamingFlow 原版风格的 50x50 -> 200x200 SRVP decoder。"""
+    """StreamingFlow 风格的 100x100 -> 200x200 SRVP decoder。"""
 
     def __init__(
         self,
-        latent_channels: int = 192,
+        latent_channels: int = 96,
         out_channels: int = 64,
-        filter_size: int = 32,
+        filter_size: int = 24,
         gn_groups: int = 8,
     ) -> None:
         super().__init__()
@@ -193,7 +193,7 @@ class StreamingFlowSmallDecoder2D(nn.Module):
         h = self.first_conv(x)
         for idx, block in enumerate(self.blocks):
             h = block(h)
-            if idx in (2, 3):
+            if idx == 2:
                 h = self.upsample(h)
         return self.last_conv(h)
 
