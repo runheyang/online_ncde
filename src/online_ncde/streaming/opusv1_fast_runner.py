@@ -1,7 +1,7 @@
 """OPUSv1-T 在线 fast runner.
 
-只服务 scripts/streaming/eval_streaming_realistic_opusv1.py，不改动现有
-alocc2d_mini FastRunner。runner 复用 OPUS 自己的 dataset/model 构建逻辑，
+只服务 scripts/streaming/opusv1 下的入口，不改动现有 alocc2d_mini FastRunner。
+runner 复用 OPUS 自己的 dataset/model 构建逻辑，
 但不调用 dataset.evaluate / RayIoU，只把当前 keyframe 转成 NCDE 需要的
 dense logits: (C, X, Y, Z)。
 """

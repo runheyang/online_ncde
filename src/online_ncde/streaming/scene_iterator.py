@@ -71,6 +71,44 @@ def build_sample_meta_index(
     return out
 
 
+def build_opus_sample_meta_index(
+    meta_pkl_path: str,
+    slow_logit_root: str,
+    gt_root: str,
+) -> dict:
+    """OPUS sweep pkl -> sample_token 到 KeyframeMeta 的索引.
+
+    OPUS 的 nuscenes_infos_val_sweep.pkl 里 CAM_FRONT 可能没有 sample_data_token，
+    streaming 只依赖 sample_token/scene/timestamp/ego/slow/gt，因此 frame_token 用
+    data_path basename 兜底。
+    """
+    with open(meta_pkl_path, "rb") as f:
+        data = pickle.load(f)
+    out = {}
+    for e in data["infos"]:
+        sample_token = e["token"]
+        cam_front = e.get("cams", {}).get("CAM_FRONT", {})
+        frame_token = (
+            cam_front.get("sample_data_token")
+            or cam_front.get("token")
+            or os.path.splitext(os.path.basename(cam_front.get("data_path", "")))[0]
+            or sample_token
+        )
+        scene_name = e["scene_name"]
+        ego = _ego2global_matrix(e["ego2global_translation"], e["ego2global_rotation"])
+        out[sample_token] = KeyframeMeta(
+            sample_token=sample_token,
+            frame_token=frame_token,
+            scene_name=scene_name,
+            scene_token=e["scene_token"],
+            timestamp_us=int(e["timestamp"]),
+            ego2global=ego,
+            slow_logit_path=os.path.join(slow_logit_root, scene_name, sample_token, "logits.npz"),
+            gt_label_path=os.path.join(gt_root, scene_name, sample_token, "labels.npz"),
+        )
+    return out
+
+
 def iter_scenes(
     occ_dataset,
     sample_meta_index: dict,
