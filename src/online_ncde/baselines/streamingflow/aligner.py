@@ -61,11 +61,11 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         self.bev_channels = int(cfg.get("bev_channels", hidden_dim))
         if int(feat_dim) != self.bev_channels or int(hidden_dim) != self.bev_channels:
             raise ValueError(
-                "StreamingFlow baseline 要求 feat_dim=hidden_dim=bev_channels=192，"
+                "StreamingFlow baseline 要求 feat_dim=hidden_dim=bev_channels，"
                 f"当前 feat_dim={feat_dim}, hidden_dim={hidden_dim}, bev_channels={self.bev_channels}"
             )
-        if self.bev_channels != 192:
-            raise ValueError(f"StreamingFlow baseline 主配置固定 bev_channels=192，当前 {self.bev_channels}")
+        if self.bev_channels != 96:
+            raise ValueError(f"StreamingFlow 100x100 baseline 固定 bev_channels=96，当前 {self.bev_channels}")
 
         small_encoder_kind = str(cfg.get("small_encoder_kind", "streamingflow_downsample"))
         small_decoder_kind = str(cfg.get("small_decoder_kind", "streamingflow_upsample"))
@@ -83,9 +83,9 @@ class StreamingFlowBEVOdeAligner(nn.Module):
             )
 
         bev_resolution = tuple(cfg.get("bev_resolution", [200, 200]))
-        temporal_resolution = tuple(cfg.get("temporal_state_resolution", [50, 50]))
+        temporal_resolution = tuple(cfg.get("temporal_state_resolution", [100, 100]))
         expected_temporal_resolution = (
-            (50, 50) if small_encoder_kind == "streamingflow_downsample" else (200, 200)
+            (100, 100) if small_encoder_kind == "streamingflow_downsample" else (200, 200)
         )
         if bev_resolution != (200, 200) or temporal_resolution != expected_temporal_resolution:
             raise ValueError(
@@ -101,7 +101,7 @@ class StreamingFlowBEVOdeAligner(nn.Module):
 
         bev_stride_xy = int(cfg.get("bev_stride_xy", 1))
         if bev_stride_xy != 1:
-            raise ValueError(f"StreamingFlow 50x50 baseline 要求 adapter bev_stride_xy=1，当前 {bev_stride_xy}")
+            raise ValueError(f"StreamingFlow 100x100 baseline 要求 adapter bev_stride_xy=1，当前 {bev_stride_xy}")
         decoder_upsample_scale = self.grid_size[0] // self.bev_resolution[0]
         if (
             self.grid_size[0] % self.bev_resolution[0] != 0
