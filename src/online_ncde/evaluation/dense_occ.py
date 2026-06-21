@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Union
 
 import numpy as np
 
@@ -34,7 +34,7 @@ class DenseOccPrediction:
         }
 
 
-DenseOccRecord = DenseOccPrediction | Mapping[str, Any]
+DenseOccRecord = Union[DenseOccPrediction, Mapping[str, Any]]
 
 
 def make_dense_occ_prediction(
