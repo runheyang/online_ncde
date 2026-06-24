@@ -38,7 +38,7 @@ from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
+from online_ncde.evaluation import attach_dense_occ_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
@@ -255,6 +255,8 @@ def main() -> None:
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
     grid_size = tuple(int(v) for v in data_cfg["grid_size"])
+    dataset_variant = str(data_cfg.get("dataset_variant", "occ3d"))
+    metric_variant = str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d")))
 
     # === 推理 + 收集 buckets ===
     # buckets[T] -> list of dict(pred uint8 (X,Y,Z), token, scene, source ∈ {'main', 'fallback'})
@@ -408,16 +410,20 @@ def main() -> None:
     for T in evolution_times:
         items = buckets[T]
         print(f"\n[bucket T={T}s] 收集到 {len(items)} 个样本，开始评估 mIoU + RayIoU")
-        attached_items, missing_gt = attach_occ3d_targets(
+        attached_items, missing_gt = attach_dense_occ_targets(
             items,
+            dataset_variant=dataset_variant,
             gt_root=gt_root,
             gt_mask_key=gt_mask_key,
             grid_size=grid_size,
+            nuscenes_root=nusc_dataroot,
+            nuscenes_version=args.nusc_version,
             gt_cache=gt_cache,
         )
         dense_eval = evaluate_dense_occ(
             attached_items,
             num_classes=num_classes,
+            metric_variant=metric_variant,
             enable_rayiou=enable_rayiou,
             sweep_pkl=sweep_info_path if enable_rayiou and not origins_by_token else None,
             origins_by_token=origins_by_token if enable_rayiou else None,

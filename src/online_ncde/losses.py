@@ -48,6 +48,11 @@ class FocalLoss(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.gamma = gamma
+        if class_weights is not None and len(class_weights) != int(num_classes):
+            raise ValueError(
+                f"class_weights 长度必须等于 num_classes，"
+                f"当前 {len(class_weights)} vs {num_classes}"
+            )
         self.class_weights = class_weights
         self.eps = eps
 

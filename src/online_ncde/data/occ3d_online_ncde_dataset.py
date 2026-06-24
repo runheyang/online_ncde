@@ -155,6 +155,8 @@ class Occ3DOnlineNcdeDataset(Dataset):
             # 索引与 aligner 的 step_indices（抽帧后坐标）保持一致。
             if "frame_tokens" in info_view:
                 info_view["frame_tokens"] = list(info["frame_tokens"])[::stride]
+            if "frame_sample_tokens" in info_view:
+                info_view["frame_sample_tokens"] = list(info["frame_sample_tokens"])[::stride]
             # rollout_start_step 在抽帧后也要重映射，要求与 stride 整除
             if "rollout_start_step" in info_view:
                 rss = int(info_view["rollout_start_step"])

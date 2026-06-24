@@ -100,6 +100,7 @@ class Trainer:
         ema: ModelEMA | None = None,
         lambda_fast_kl: float = 0.0,
         gradient_accumulation_steps: int = 1,
+        metric_variant: str = "occ3d",
     ) -> None:
         self.model = model
         self.is_main = is_main
@@ -145,6 +146,7 @@ class Trainer:
             None if resolved_step_max is None else int(resolved_step_max)
         )
         self.lambda_fast_kl = float(lambda_fast_kl)
+        self.metric_variant = str(metric_variant).strip().lower()
         self.gradient_accumulation_steps = int(gradient_accumulation_steps)
         if self.gradient_accumulation_steps < 1:
             raise ValueError(
@@ -690,6 +692,7 @@ class Trainer:
                 num_classes=self.num_classes,
                 use_image_mask=True,
                 use_lidar_mask=False,
+                variant=self.metric_variant,
             )
             if compute_miou
             else None
@@ -777,7 +780,10 @@ class Trainer:
                 "class_names": metric.class_names,
             })
         else:
-            metrics["class_names"] = build_miou_metric(num_classes=self.num_classes).class_names
+            metrics["class_names"] = build_miou_metric(
+                num_classes=self.num_classes,
+                variant=self.metric_variant,
+            ).class_names
         for key, value in total_sup_loss.items():
             count = max(total_sup_count.get(key, 0), 1)
             metrics[key] = value / count

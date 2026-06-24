@@ -30,7 +30,7 @@ from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E4
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
+from online_ncde.evaluation import attach_dense_occ_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.metrics import build_miou_metric  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
@@ -179,7 +179,12 @@ def main() -> None:
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
     grid_size = tuple(int(v) for v in data_cfg["grid_size"])
-    class_names = build_miou_metric(num_classes=num_classes).class_names
+    dataset_variant = str(data_cfg.get("dataset_variant", "occ3d"))
+    metric_variant = str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d")))
+    class_names = build_miou_metric(
+        num_classes=num_classes,
+        variant=metric_variant,
+    ).class_names
 
     predictions: list[dict[str, Any]] = []
     enable_rayiou = not args.no_rayiou
@@ -330,16 +335,20 @@ def main() -> None:
             f"decode={step_decode_avg[step_idx]:.4f} count={step_time_count[step_idx]}"
         )
 
-    predictions_with_gt, missing_gt_count = attach_occ3d_targets(
+    predictions_with_gt, missing_gt_count = attach_dense_occ_targets(
         predictions,
+        dataset_variant=dataset_variant,
         gt_root=gt_root,
         gt_mask_key=gt_mask_key,
         grid_size=grid_size,
+        nuscenes_root=nusc_dataroot,
+        nuscenes_version=args.nusc_version,
     )
     print(f"[target] attached_gt={len(predictions_with_gt)} missing_gt_count={missing_gt_count}")
     dense_eval = evaluate_dense_occ(
         predictions_with_gt,
         num_classes=num_classes,
+        metric_variant=metric_variant,
         enable_rayiou=enable_rayiou,
         sweep_pkl=sweep_info_path if enable_rayiou else None,
         print_rayiou_table=True,

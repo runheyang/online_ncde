@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -10,6 +11,9 @@ import numpy as np
 
 from online_ncde.data.labels_io import load_labels_npz
 from online_ncde.metrics import build_miou_metric
+
+
+_SURROUNDOCC_LIDAR_INDEX_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 
 @dataclass
@@ -72,6 +76,27 @@ def _validate_shape(name: str, arr: np.ndarray, grid_size: tuple[int, int, int])
         raise ValueError(f"{name} shape={arr.shape} 与 grid_size={grid_size} 不一致")
 
 
+def _finalize_attached_item(
+    item: dict[str, Any],
+    *,
+    pred: np.ndarray,
+    gt: np.ndarray,
+    mask: np.ndarray | None,
+    grid_size: tuple[int, int, int],
+) -> dict[str, Any]:
+    gt_u8 = np.asarray(gt).astype(np.uint8, copy=False)
+    _validate_shape("gt", gt_u8, grid_size)
+    item["pred"] = pred
+    item["gt"] = gt_u8
+    if mask is not None:
+        mask_np = np.asarray(mask)
+        _validate_shape("mask_camera", mask_np, grid_size)
+        item["mask_camera"] = mask_np
+    else:
+        item["mask_camera"] = None
+    return item
+
+
 def attach_occ3d_targets(
     records: list[DenseOccRecord],
     *,
@@ -116,17 +141,207 @@ def attach_occ3d_targets(
                 missing_gt_count += 1
                 continue
 
-        gt_u8 = np.asarray(gt).astype(np.uint8, copy=False)
-        _validate_shape("gt", gt_u8, grid_size)
-        item["gt"] = gt_u8
-        if mask is not None:
-            mask_np = np.asarray(mask)
-            _validate_shape("mask_camera", mask_np, grid_size)
-            item["mask_camera"] = mask_np
-        else:
-            item["mask_camera"] = None
-        attached.append(item)
+        attached.append(
+            _finalize_attached_item(
+                item,
+                pred=pred,
+                gt=np.asarray(gt),
+                mask=None if mask is None else np.asarray(mask),
+                grid_size=grid_size,
+            )
+        )
     return attached, missing_gt_count
+
+
+def _build_surroundocc_lidar_filename_index(
+    *,
+    nuscenes_root: str,
+    nuscenes_version: str,
+) -> dict[str, str]:
+    """建立 sample_token -> LIDAR_TOP 文件名索引。"""
+    cache_key = (os.path.abspath(nuscenes_root), str(nuscenes_version))
+    cached = _SURROUNDOCC_LIDAR_INDEX_CACHE.get(cache_key, None)
+    if cached is not None:
+        return cached
+
+    table_dir = os.path.join(nuscenes_root, nuscenes_version)
+    sample_path = os.path.join(table_dir, "sample.json")
+    sample_data_path = os.path.join(table_dir, "sample_data.json")
+    calibrated_sensor_path = os.path.join(table_dir, "calibrated_sensor.json")
+    sensor_path = os.path.join(table_dir, "sensor.json")
+    for table_path in (sample_path, sample_data_path, calibrated_sensor_path, sensor_path):
+        if not os.path.exists(table_path):
+            raise FileNotFoundError(f"缺少 nuScenes table: {table_path}")
+
+    with open(sample_path, "r", encoding="utf-8") as f:
+        sample = json.load(f)
+    with open(sample_data_path, "r", encoding="utf-8") as f:
+        sample_data = json.load(f)
+    with open(calibrated_sensor_path, "r", encoding="utf-8") as f:
+        calibrated_sensor = json.load(f)
+    with open(sensor_path, "r", encoding="utf-8") as f:
+        sensor = json.load(f)
+
+    sensor_by_token = {str(rec["token"]): rec for rec in sensor}
+    calibrated_by_token = {str(rec["token"]): rec for rec in calibrated_sensor}
+    sample_ts_by_token = {str(rec["token"]): int(rec["timestamp"]) for rec in sample}
+
+    candidates: dict[str, list[tuple[int, bool, str]]] = {}
+    for rec in sample_data:
+        calibrated = calibrated_by_token.get(str(rec.get("calibrated_sensor_token", "")), {})
+        sensor_rec = sensor_by_token.get(str(calibrated.get("sensor_token", "")), {})
+        if sensor_rec.get("channel") != "LIDAR_TOP":
+            continue
+        sample_token = str(rec.get("sample_token", ""))
+        filename = str(rec.get("filename", ""))
+        if not sample_token or not filename:
+            continue
+        target_ts = sample_ts_by_token.get(sample_token, int(rec.get("timestamp", 0)))
+        dt = abs(int(rec.get("timestamp", 0)) - int(target_ts))
+        candidates.setdefault(sample_token, []).append(
+            (dt, bool(rec.get("is_key_frame", False)), os.path.basename(filename))
+        )
+
+    index: dict[str, str] = {}
+    for sample_token, items in candidates.items():
+        items_sorted = sorted(items, key=lambda item: (not item[1], item[0]))
+        index[sample_token] = items_sorted[0][2]
+    if not index:
+        raise RuntimeError(f"未能从 {sample_data_path} 建立 LIDAR_TOP 索引")
+    _SURROUNDOCC_LIDAR_INDEX_CACHE[cache_key] = index
+    return index
+
+
+def _load_surroundocc_dense_gt(
+    *,
+    gt_root: str,
+    lidar_filename: str,
+    grid_size: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    gt_path = os.path.join(gt_root, "samples", f"{lidar_filename}.npy")
+    if not os.path.exists(gt_path):
+        raise FileNotFoundError(gt_path)
+    sparse = np.load(gt_path)
+    if sparse.ndim != 2 or sparse.shape[1] < 4:
+        raise ValueError(f"SurroundOcc GT 形状异常: {gt_path}, shape={sparse.shape}")
+
+    coords = sparse[:, :3].astype(np.int64, copy=False)
+    labels = sparse[:, 3].astype(np.uint8, copy=False)
+    bounds = np.asarray(grid_size, dtype=np.int64)
+    valid = np.all((coords >= 0) & (coords < bounds), axis=1)
+    if not bool(np.all(valid)):
+        bad_count = int((~valid).sum())
+        raise ValueError(f"SurroundOcc GT 坐标越界: {gt_path}, bad={bad_count}")
+
+    occ = np.zeros(grid_size, dtype=np.uint8)
+    occ[coords[:, 0], coords[:, 1], coords[:, 2]] = labels
+    # 对齐 OccStudio: dense 中 label 0 视为 free，再压缩 1..17 -> 0..16。
+    occ[occ == 0] = 17
+    occ = occ - 1
+    mask = np.ones(grid_size, dtype=np.float32)
+    return occ.astype(np.uint8, copy=False), mask
+
+
+def attach_surroundocc_targets(
+    records: list[DenseOccRecord],
+    *,
+    gt_root: str,
+    nuscenes_root: str,
+    nuscenes_version: str = "v1.0-trainval",
+    grid_size: tuple[int, int, int] = (200, 200, 16),
+    gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """为预测记录补齐 SurroundOcc GT/mask；record token 必须是 sample_token。"""
+    lidar_index = _build_surroundocc_lidar_filename_index(
+        nuscenes_root=nuscenes_root,
+        nuscenes_version=nuscenes_version,
+    )
+    attached: list[dict[str, Any]] = []
+    missing_gt_count = 0
+    for record in records:
+        item = _record_to_dict(record)
+        pred = np.asarray(item["pred"]).astype(np.uint8, copy=False)
+        _validate_shape("pred", pred, grid_size)
+
+        gt = item.get("gt", None)
+        mask = item.get("mask_camera", None)
+        if gt is None:
+            token = str(item.get("token", ""))
+            cache_key = ("surroundocc", token)
+            if gt_cache is not None and cache_key in gt_cache:
+                gt, mask = gt_cache[cache_key]
+            elif not token:
+                missing_gt_count += 1
+                continue
+            else:
+                lidar_filename = lidar_index.get(token, "")
+                if not lidar_filename:
+                    if gt_cache is not None:
+                        gt_cache[cache_key] = (None, None)
+                    missing_gt_count += 1
+                    continue
+                try:
+                    gt, mask = _load_surroundocc_dense_gt(
+                        gt_root=gt_root,
+                        lidar_filename=lidar_filename,
+                        grid_size=grid_size,
+                    )
+                except FileNotFoundError:
+                    if gt_cache is not None:
+                        gt_cache[cache_key] = (None, None)
+                    missing_gt_count += 1
+                    continue
+                if gt_cache is not None:
+                    gt_cache[cache_key] = (gt, mask)
+            if gt is None:
+                missing_gt_count += 1
+                continue
+
+        attached.append(
+            _finalize_attached_item(
+                item,
+                pred=pred,
+                gt=np.asarray(gt),
+                mask=None if mask is None else np.asarray(mask),
+                grid_size=grid_size,
+            )
+        )
+    return attached, missing_gt_count
+
+
+def attach_dense_occ_targets(
+    records: list[DenseOccRecord],
+    *,
+    dataset_variant: str,
+    gt_root: str,
+    gt_mask_key: str = "mask_camera",
+    grid_size: tuple[int, int, int] = (200, 200, 16),
+    nuscenes_root: str | None = None,
+    nuscenes_version: str = "v1.0-trainval",
+    gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """按数据集类型为 dense 预测补齐 GT。"""
+    variant = str(dataset_variant).strip().lower()
+    if variant == "occ3d":
+        return attach_occ3d_targets(
+            records,
+            gt_root=gt_root,
+            gt_mask_key=gt_mask_key,
+            grid_size=grid_size,
+            gt_cache=gt_cache,
+        )
+    if variant == "surroundocc":
+        if not nuscenes_root:
+            raise ValueError("attach_dense_occ_targets(surroundocc) 需要 nuscenes_root")
+        return attach_surroundocc_targets(
+            records,
+            gt_root=gt_root,
+            nuscenes_root=nuscenes_root,
+            nuscenes_version=nuscenes_version,
+            grid_size=grid_size,
+            gt_cache=gt_cache,
+        )
+    raise ValueError(f"未知 dataset_variant: {dataset_variant!r}")
 
 
 def _metric_payload(metric: Any, class_names: list[str]) -> dict[str, Any]:
@@ -156,15 +371,20 @@ def compute_dense_miou(
     num_classes: int,
     use_image_mask: bool = True,
     use_lidar_mask: bool = False,
+    metric_variant: str = "occ3d",
 ) -> dict[str, Any]:
     """从内存 dense 预测记录计算 all/per-step mIoU。"""
     metric_all = build_miou_metric(
         num_classes=num_classes,
         use_image_mask=use_image_mask,
         use_lidar_mask=use_lidar_mask,
+        variant=metric_variant,
     )
     per_step_metrics: dict[int, Any] = {}
-    class_names = build_miou_metric(num_classes=num_classes).class_names
+    class_names = build_miou_metric(
+        num_classes=num_classes,
+        variant=metric_variant,
+    ).class_names
 
     for record in records:
         item = _record_to_dict(record)
@@ -183,6 +403,7 @@ def compute_dense_miou(
                     num_classes=num_classes,
                     use_image_mask=use_image_mask,
                     use_lidar_mask=use_lidar_mask,
+                    variant=metric_variant,
                 ),
             )
             metric.add_batch(pred, gt, mask_lidar=None, mask_camera=mask_camera)
@@ -314,13 +535,18 @@ def evaluate_dense_occ(
     records: list[DenseOccRecord],
     *,
     num_classes: int,
+    metric_variant: str = "occ3d",
     enable_rayiou: bool = False,
     sweep_pkl: str | None = None,
     origins_by_token: Mapping[str, Any] | None = None,
     print_rayiou_table: bool = True,
 ) -> dict[str, Any]:
     """统一计算 dense occupancy 的 mIoU/RayIoU，并合并为脚本友好的结构。"""
-    miou_result = compute_dense_miou(records, num_classes=num_classes)
+    miou_result = compute_dense_miou(
+        records,
+        num_classes=num_classes,
+        metric_variant=metric_variant,
+    )
     ray_result = None
     if enable_rayiou:
         ray_result = compute_dense_rayiou(

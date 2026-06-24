@@ -435,6 +435,7 @@ def main() -> None:
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
         is_main=is_main,
         ema=ema,
+        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
     )
 
     # --- 推导 output_dir：resume 时复用原目录，否则新建时间戳目录 ---
@@ -558,18 +559,22 @@ def main() -> None:
                 )
                 _cleanup_gpu_cache()
                 predictions = val_metrics["predictions"]
-                sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
-                sweep_path = Path(sweep_rel)
-                sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
-                if epoch == start_epoch:
+                enable_rayiou = bool(eval_cfg.get("enable_rayiou", True))
+                sweep_pkl = None
+                if enable_rayiou:
+                    sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
+                    sweep_path = Path(sweep_rel)
+                    sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
+                if enable_rayiou and epoch == start_epoch:
                     print(f"[rayiou] sweep pkl: {sweep_pkl}")
 
                 binned_ray_result = None
-                need_pcds = args.save_metrics_json
+                need_pcds = args.save_metrics_json and enable_rayiou
                 if need_pcds:
                     dense_eval = evaluate_dense_occ(
                         predictions,
                         num_classes=int(data_cfg["num_classes"]),
+                        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
                         enable_rayiou=False,
                     )
                     rayiou_result, raw_pcd_pred, raw_pcd_gt, rayiou_meta = compute_dense_rayiou_with_pcds(
@@ -582,7 +587,8 @@ def main() -> None:
                     dense_eval = evaluate_dense_occ(
                         predictions,
                         num_classes=int(data_cfg["num_classes"]),
-                        enable_rayiou=True,
+                        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
+                        enable_rayiou=enable_rayiou,
                         sweep_pkl=sweep_pkl,
                         print_rayiou_table=True,
                     )
@@ -618,9 +624,9 @@ def main() -> None:
                         print(f"===> {name} - IoU = {round(float(value), 2)}")
 
                 missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
-                if missing_origin_count:
+                if enable_rayiou and missing_origin_count:
                     print(f"[rayiou] epoch={epoch} 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
-                if rayiou_result is not None:
+                if enable_rayiou and rayiou_result is not None:
                     print(
                         f"[rayiou] epoch={epoch} "
                         f"num={rayiou_result.get('num_samples', 0)} "

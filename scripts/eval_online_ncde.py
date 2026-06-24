@@ -158,16 +158,21 @@ def main() -> None:
         rollout_mode=str(train_cfg.get("rollout_mode", "full")),
         primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
+        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
     )
 
     # 单次推理只收集 dense prediction；mIoU/RayIoU 统一在推理后计算。
     metrics = trainer.evaluate(loader, collect_predictions=True, compute_miou=False)
-    sweep_pkl = resolve_sweep_pkl(args, cfg)
-    print(f"[rayiou] sweep pkl: {sweep_pkl}")
+    enable_rayiou = bool(eval_cfg.get("enable_rayiou", True))
+    sweep_pkl = None
+    if enable_rayiou:
+        sweep_pkl = resolve_sweep_pkl(args, cfg)
+        print(f"[rayiou] sweep pkl: {sweep_pkl}")
     dense_eval = evaluate_dense_occ(
         metrics["predictions"],
         num_classes=int(data_cfg["num_classes"]),
-        enable_rayiou=True,
+        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
+        enable_rayiou=enable_rayiou,
         sweep_pkl=sweep_pkl,
         print_rayiou_table=True,
     )
@@ -193,19 +198,20 @@ def main() -> None:
         for name, value in zip(class_names, class_iou):
             print(f"{name}: {float(value):.2f}")
 
-    rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
-    missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
-    if missing_origin_count:
-        print(f"[rayiou] 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
-    rayiou_result = dense_all.get("rayiou", None)
-    if rayiou_result is not None:
-        print(
-            f"\n[rayiou] num={rayiou_result['num_samples']} "
-            f"RayIoU={rayiou_result['RayIoU']:.4f}"
-        )
-        print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
-        print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
-        print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
+    if enable_rayiou:
+        rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
+        missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
+        if missing_origin_count:
+            print(f"[rayiou] 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
+        rayiou_result = dense_all.get("rayiou", None)
+        if rayiou_result is not None:
+            print(
+                f"\n[rayiou] num={rayiou_result['num_samples']} "
+                f"RayIoU={rayiou_result['RayIoU']:.4f}"
+            )
+            print(f"[rayiou] RayIoU@1={rayiou_result['RayIoU@1']:.4f}")
+            print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
+            print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
 
 
 if __name__ == "__main__":

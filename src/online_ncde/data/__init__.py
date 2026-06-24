@@ -8,14 +8,15 @@ from online_ncde.data.logits_loader import (
     OpusSparseFullLoader,
 )
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset
+from online_ncde.data.surroundocc_online_ncde_dataset import SurroundOccOnlineNcdeDataset
 
 __all__ = [
     "Occ3DOnlineNcdeDataset",
+    "SurroundOccOnlineNcdeDataset",
     "LogitsLoader",
     "AloccDenseTopkLoader",
     "OpusSparseFullLoader",
     "CompositeLogitsLoader",
     "build_logits_loader",
 ]
-
 

@@ -6,6 +6,26 @@ import numpy as np
 import torch
 
 OCC3D_DYNAMIC_OBJECT_IDX = (2, 3, 4, 5, 6, 7, 9, 10)
+SURROUNDOCC_DYNAMIC_OBJECT_IDX = (1, 2, 3, 4, 5, 6, 8, 9)
+SURROUNDOCC_CLASS_NAMES = [
+    "barrier",
+    "bicycle",
+    "bus",
+    "car",
+    "construction_vehicle",
+    "motorcycle",
+    "pedestrian",
+    "traffic_cone",
+    "trailer",
+    "truck",
+    "driveable_surface",
+    "other_flat",
+    "sidewalk",
+    "terrain",
+    "manmade",
+    "vegetation",
+    "free",
+]
 
 
 def apply_free_threshold(logits: torch.Tensor, free_index: int, conf_thresh: float) -> torch.Tensor:
@@ -187,6 +207,39 @@ class MetricMiouOcc3D:
         return mIoU
 
 
-def build_miou_metric(num_classes: int, **kwargs) -> MetricMiouOcc3D:
-    """构造 Occ3D / 通用 mIoU metric。"""
-    return MetricMiouOcc3D(num_classes=num_classes, **kwargs)
+class MetricMiouSurroundOcc(MetricMiouOcc3D):
+    """OccStudio SurroundOcc 口径的 mIoU 统计。"""
+
+    def __init__(
+        self,
+        num_classes: int = 17,
+        use_lidar_mask: bool = False,
+        use_image_mask: bool = True,
+        dynamic_object_idx: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
+        if num_classes != 17:
+            raise ValueError(f"SurroundOcc metric 需要 num_classes=17，当前为 {num_classes}")
+        if dynamic_object_idx is None:
+            dynamic_object_idx = list(SURROUNDOCC_DYNAMIC_OBJECT_IDX)
+        super().__init__(
+            num_classes=num_classes,
+            use_lidar_mask=use_lidar_mask,
+            use_image_mask=use_image_mask,
+            dynamic_object_idx=dynamic_object_idx,
+        )
+        self.class_names = list(SURROUNDOCC_CLASS_NAMES)
+
+
+def build_miou_metric(
+    num_classes: int,
+    *,
+    variant: str = "occ3d",
+    **kwargs,
+) -> MetricMiouOcc3D:
+    """构造 Occ3D / SurroundOcc mIoU metric。"""
+    variant = str(variant).strip().lower()
+    if variant == "surroundocc":
+        return MetricMiouSurroundOcc(num_classes=num_classes, **kwargs)
+    if variant == "occ3d":
+        return MetricMiouOcc3D(num_classes=num_classes, **kwargs)
+    raise ValueError(f"未知 metric variant: {variant!r}")
