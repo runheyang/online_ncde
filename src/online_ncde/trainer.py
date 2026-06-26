@@ -523,7 +523,6 @@ class Trainer:
         total_loss = 0.0
         total_focal = 0.0
         total_aux = 0.0
-        total_delta = 0.0
         total_fast_kl = 0.0
         total_ray = 0.0
         total_ray_hit = 0.0
@@ -583,9 +582,6 @@ class Trainer:
                 total_sup_loss[key] = total_sup_loss.get(key, 0.0) + float(value) * float(cnt)
                 total_sup_count[key] = total_sup_count.get(key, 0) + int(cnt)
 
-            diag = self._pack_diag(cast(list[dict[str, torch.Tensor]], outputs.get("diagnostics", [])))
-            total_delta += diag.get("delta_scene_abs_mean", 0.0)
-
             if pbar is not None:
                 pbar.update(step)
             elif self.is_main and (step % self.log_interval == 0 or step == total_steps):
@@ -598,7 +594,6 @@ class Trainer:
             total_loss,
             total_focal,
             total_aux,
-            total_delta,
             total_fast_kl,
             total_ray,
             total_ray_hit,
@@ -609,7 +604,6 @@ class Trainer:
             total_loss,
             total_focal,
             total_aux,
-            total_delta,
             total_fast_kl,
             total_ray,
             total_ray_hit,
@@ -636,7 +630,6 @@ class Trainer:
             "loss": total_loss / denom,
             "focal": total_focal / denom,
             "aux": total_aux / denom,
-            "delta_scene_abs_mean": total_delta / denom,
         }
         if self.lambda_fast_kl > 0.0:
             metrics["fast_kl"] = total_fast_kl / denom
