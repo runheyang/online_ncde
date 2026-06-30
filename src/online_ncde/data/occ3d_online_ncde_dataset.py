@@ -316,6 +316,7 @@ class Occ3DOnlineNcdeDataset(Dataset):
                 "scene_name": scene_name,
                 "token": token,
                 "frame_tokens": info.get("frame_tokens", []),
+                "frame_sample_tokens": info.get("frame_sample_tokens", []),
                 "logits_path": info.get("logits_path", ""),
                 "slow_logit_path": info.get("slow_logit_path", ""),
                 "supervision_labels": self.supervision_labels,

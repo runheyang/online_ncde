@@ -8,9 +8,20 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 import torch
+from pyquaternion import Quaternion
 
 from online_ncde.config import resolve_path
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset
+
+LidarInfo = Tuple[str, int, np.ndarray]
+
+
+def _pose_matrix(translation: Any, rotation: Any) -> np.ndarray:
+    """构建 4x4 刚体变换矩阵。"""
+    pose = np.eye(4, dtype=np.float32)
+    pose[:3, :3] = Quaternion(rotation).rotation_matrix.astype(np.float32)
+    pose[:3, 3] = np.asarray(translation, dtype=np.float32)
+    return pose
 
 
 class SurroundOccOnlineNcdeDataset(Occ3DOnlineNcdeDataset):
@@ -30,16 +41,23 @@ class SurroundOccOnlineNcdeDataset(Occ3DOnlineNcdeDataset):
         super().__init__(*args, **kwargs)
         self.nuscenes_root = resolve_path(self.root_path, nuscenes_root)
         self.nuscenes_version = str(version)
-        self._lidar_filename_by_sample = self._build_lidar_filename_index()
+        self._lidar_info_by_sample = self._build_lidar_info_index()
 
-    def _build_lidar_filename_index(self) -> dict[str, str]:
-        """建立 sample_token -> LIDAR_TOP 文件名索引。"""
+    def _build_lidar_info_index(self) -> dict[str, LidarInfo]:
+        """建立 sample_token -> (LIDAR_TOP 文件名, timestamp, lidar2global) 索引。"""
         table_dir = os.path.join(self.nuscenes_root, self.nuscenes_version)
         sample_path = os.path.join(table_dir, "sample.json")
         sample_data_path = os.path.join(table_dir, "sample_data.json")
         calibrated_sensor_path = os.path.join(table_dir, "calibrated_sensor.json")
         sensor_path = os.path.join(table_dir, "sensor.json")
-        for table_path in (sample_path, sample_data_path, calibrated_sensor_path, sensor_path):
+        ego_pose_path = os.path.join(table_dir, "ego_pose.json")
+        for table_path in (
+            sample_path,
+            sample_data_path,
+            calibrated_sensor_path,
+            sensor_path,
+            ego_pose_path,
+        ):
             if not os.path.exists(table_path):
                 raise FileNotFoundError(f"缺少 nuScenes table: {table_path}")
 
@@ -51,12 +69,15 @@ class SurroundOccOnlineNcdeDataset(Occ3DOnlineNcdeDataset):
             calibrated_sensor = json.load(f)
         with open(sensor_path, "r", encoding="utf-8") as f:
             sensor = json.load(f)
+        with open(ego_pose_path, "r", encoding="utf-8") as f:
+            ego_pose = json.load(f)
 
         sensor_by_token = {str(rec["token"]): rec for rec in sensor}
         calibrated_by_token = {str(rec["token"]): rec for rec in calibrated_sensor}
+        ego_pose_by_token = {str(rec["token"]): rec for rec in ego_pose}
         sample_ts_by_token = {str(rec["token"]): int(rec["timestamp"]) for rec in sample}
 
-        candidates: dict[str, list[tuple[int, bool, str]]] = {}
+        candidates: dict[str, list[tuple[int, bool, str, int, np.ndarray]]] = {}
         for rec in sample_data:
             calibrated = calibrated_by_token.get(str(rec.get("calibrated_sensor_token", "")), {})
             sensor_rec = sensor_by_token.get(str(calibrated.get("sensor_token", "")), {})
@@ -66,25 +87,77 @@ class SurroundOccOnlineNcdeDataset(Occ3DOnlineNcdeDataset):
             filename = str(rec.get("filename", ""))
             if sample_token and filename:
                 target_ts = sample_ts_by_token.get(sample_token, int(rec.get("timestamp", 0)))
+                timestamp = int(rec.get("timestamp", 0))
                 dt = abs(int(rec.get("timestamp", 0)) - int(target_ts))
+                pose_rec = ego_pose_by_token[str(rec["ego_pose_token"])]
+                ego2global = _pose_matrix(pose_rec["translation"], pose_rec["rotation"])
+                lidar2ego = _pose_matrix(calibrated["translation"], calibrated["rotation"])
+                lidar2global = (ego2global @ lidar2ego).astype(np.float32)
                 candidates.setdefault(sample_token, []).append(
-                    (dt, bool(rec.get("is_key_frame", False)), os.path.basename(filename))
+                    (
+                        dt,
+                        bool(rec.get("is_key_frame", False)),
+                        os.path.basename(filename),
+                        timestamp,
+                        lidar2global,
+                    )
                 )
 
-        index: dict[str, str] = {}
+        index: dict[str, LidarInfo] = {}
         for sample_token, items in candidates.items():
             # 优先 keyframe；若表里没有标记，则退回到 timestamp 最近。
             items_sorted = sorted(items, key=lambda item: (not item[1], item[0]))
-            index[sample_token] = items_sorted[0][2]
+            _, _, filename, timestamp, lidar2global = items_sorted[0]
+            index[sample_token] = (filename, timestamp, lidar2global)
         if not index:
             raise RuntimeError(f"未能从 {sample_data_path} 建立 LIDAR_TOP 索引")
         return index
 
+    def _lidar_info_from_sample_token(self, sample_token: str) -> LidarInfo:
+        """查询 sample_token 对应的 LIDAR_TOP 元信息。"""
+        info = self._lidar_info_by_sample.get(str(sample_token), None)
+        if info is None:
+            raise KeyError(f"sample_token={sample_token} 缺少 LIDAR_TOP 索引")
+        return info
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """返回 SurroundOcc 样本，并把 warp pose 切到 LIDAR_TOP 坐标系。"""
+        sample = super().__getitem__(idx)
+        frame_sample_tokens = [
+            str(token) for token in sample["meta"].get("frame_sample_tokens", [])
+        ]
+        num_frames = int(sample["fast_logits"].shape[0])
+        if len(frame_sample_tokens) != num_frames:
+            raise ValueError(
+                "SurroundOcc 需要 stride 后的 frame_sample_tokens 与 fast_logits 对齐："
+                f" tokens={len(frame_sample_tokens)}, frames={num_frames}"
+            )
+
+        real_tokens = [token for token in frame_sample_tokens if token]
+        if not real_tokens:
+            raise KeyError("SurroundOcc 样本缺少有效 frame_sample_tokens，无法构造 LIDAR_TOP pose")
+        pad_token = real_tokens[0]
+
+        poses: list[np.ndarray] = []
+        timestamps: list[int] = []
+        for token in frame_sample_tokens:
+            query_token = token or pad_token
+            _, timestamp, lidar2global = self._lidar_info_from_sample_token(query_token)
+            poses.append(lidar2global)
+            timestamps.append(timestamp)
+
+        pose_np = np.stack(poses, axis=0).astype(np.float32)
+        ts_np = np.asarray(timestamps, dtype=np.int64)
+        dt_np = ((ts_np - ts_np[-1]).astype(np.float64) * 1.0e-6).astype(np.float32)
+
+        sample["frame_ego2global"] = torch.from_numpy(pose_np).float()
+        sample["frame_timestamps"] = torch.from_numpy(ts_np).long()
+        sample["frame_dt"] = torch.from_numpy(dt_np).float()
+        return sample
+
     def _gt_path_from_sample_token(self, sample_token: str) -> str:
         """由 sample token 定位 SurroundOcc sparse GT 文件。"""
-        filename = self._lidar_filename_by_sample.get(str(sample_token), "")
-        if not filename:
-            raise KeyError(f"sample_token={sample_token} 缺少 LIDAR_TOP 文件索引")
+        filename = self._lidar_info_from_sample_token(sample_token)[0]
         return os.path.join(self.gt_root, "samples", f"{filename}.npy")
 
     def _load_surroundocc_gt(self, sample_token: str) -> Tuple[torch.Tensor, torch.Tensor]:
