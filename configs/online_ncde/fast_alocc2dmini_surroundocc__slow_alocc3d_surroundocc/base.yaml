@@ -29,8 +29,8 @@ data:
   nuscenes_version: v1.0-trainval
   num_classes: 17
   free_index: 16
-  pc_range: [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
-  voxel_size: [0.4, 0.4, 0.4]
+  pc_range: [-50.0, -50.0, -5.0, 50.0, 50.0, 3.0]
+  voxel_size: [0.5, 0.5, 0.5]
   grid_size: [200, 200, 16]
   gt_mask_key: mask_camera
   timestamp_scale: 1.0e-6
