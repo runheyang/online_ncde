@@ -605,11 +605,16 @@ def main() -> None:
                     "per_class_iou": dense_all["per_class_iou"],
                     "class_names": dense_all["class_names"],
                 })
+                if dense_all.get("occupied_iou", None) is not None:
+                    val_metrics["occupied_iou"] = dense_all["occupied_iou"]
                 val_sup_parts = []
                 for key, value in val_metrics.items():
                     if isinstance(key, str) and key.startswith("sup_loss_t"):
                         val_sup_parts.append(f"{key}={float(value):.4f}")
                 val_sup_text = (" " + " ".join(val_sup_parts)) if val_sup_parts else ""
+                occupied_text = ""
+                if val_metrics.get("occupied_iou", None) is not None:
+                    occupied_text = f" occupied_iou={float(val_metrics['occupied_iou']):.4f}"
                 print(
                     f"[eval] epoch={epoch} "
                     f"loss={val_metrics['loss']:.4f} "
@@ -617,6 +622,7 @@ def main() -> None:
                     f"aux={val_metrics['aux']:.4f} "
                     f"miou={val_metrics['miou']:.4f} "
                     f"miou_d={val_metrics.get('miou_d', float('nan')):.4f}"
+                    f"{occupied_text}"
                     f"{val_sup_text}"
                 )
                 class_names = val_metrics.get("class_names", [])
@@ -658,7 +664,7 @@ def main() -> None:
 
                 if run is not None:
                     payload = {"epoch": float(epoch)}
-                    for key in ("loss", "focal", "aux", "miou", "miou_d"):
+                    for key in ("loss", "focal", "aux", "miou", "miou_d", "occupied_iou"):
                         value = to_float(val_metrics.get(key, None))
                         if value is not None:
                             payload[f"val/{key}"] = value
@@ -685,6 +691,8 @@ def main() -> None:
                     "mIoU_d": float(val_metrics.get("miou_d", 0.0)),
                     "loss": float(val_metrics["loss"]),
                 }
+                if val_metrics.get("occupied_iou", None) is not None:
+                    metrics_json["occupied_iou"] = float(val_metrics["occupied_iou"])
                 # Fast-KL 诊断
                 if "fast_kl" in train_metrics:
                     metrics_json["fast_kl"] = {

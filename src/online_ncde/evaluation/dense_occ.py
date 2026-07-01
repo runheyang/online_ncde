@@ -346,23 +346,30 @@ def attach_dense_occ_targets(
 
 def _metric_payload(metric: Any, class_names: list[str]) -> dict[str, Any]:
     if metric.cnt <= 0:
-        return {
+        payload = {
             "num_keyframes": 0,
             "miou": None,
             "miou_d": None,
             "per_class_iou": [],
             "class_names": class_names,
         }
+        if hasattr(metric, "count_occupied_iou"):
+            payload["occupied_iou"] = None
+        return payload
     miou = float(metric.count_miou(verbose=False))
     miou_d = float(metric.count_miou_d(verbose=False))
     per_class = np.nan_to_num(metric.get_per_class_iou(), nan=0.0).tolist()
-    return {
+    payload = {
         "num_keyframes": int(metric.cnt),
         "miou": _to_json_number(miou),
         "miou_d": _to_json_number(miou_d),
         "per_class_iou": [float(v) for v in per_class],
         "class_names": class_names,
     }
+    if hasattr(metric, "count_occupied_iou"):
+        occupied_iou = float(metric.count_occupied_iou(verbose=False))
+        payload["occupied_iou"] = _to_json_number(occupied_iou)
+    return payload
 
 
 def compute_dense_miou(

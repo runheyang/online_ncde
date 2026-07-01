@@ -183,14 +183,20 @@ def main() -> None:
         "per_class_iou": dense_all["per_class_iou"],
         "class_names": dense_all["class_names"],
     })
+    if dense_all.get("occupied_iou", None) is not None:
+        metrics["occupied_iou"] = dense_all["occupied_iou"]
 
     # --- mIoU 结果 ---
+    occupied_text = ""
+    if metrics.get("occupied_iou", None) is not None:
+        occupied_text = f" occupied_iou={float(metrics['occupied_iou']):.4f}"
     print(
         f"[eval] loss={metrics['loss']:.4f} "
         f"focal={metrics['focal']:.4f} "
         f"aux={metrics['aux']:.4f} "
         f"miou={metrics['miou']:.4f} "
         f"miou_d={metrics.get('miou_d', float('nan')):.4f}"
+        f"{occupied_text}"
     )
     class_names = metrics.get("class_names", [])
     class_iou = metrics.get("per_class_iou", [])

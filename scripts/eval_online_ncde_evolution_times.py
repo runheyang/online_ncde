@@ -435,15 +435,20 @@ def main() -> None:
             miou_d = dense_all["miou_d"]
             per_class = dense_all.get("per_class_iou", [])
             class_names = dense_all.get("class_names", [])
+            occupied_iou = dense_all.get("occupied_iou", None)
+            occupied_text = ""
+            if occupied_iou is not None:
+                occupied_text = f" occupied_iou={float(occupied_iou):.2f}"
             print(
                 f"[bucket T={T}s] miou={float(miou):.2f} "
-                f"miou_d={float(miou_d):.2f} num={dense_all['num_keyframes']}"
+                f"miou_d={float(miou_d):.2f}{occupied_text} num={dense_all['num_keyframes']}"
             )
             for name, value in zip(class_names, per_class):
                 print(f"  {name}: {float(value):.2f}")
         else:
             miou, miou_d, per_class = None, None, []
             class_names = dense_all.get("class_names", [])
+            occupied_iou = None
             print(f"[bucket T={T}s] no samples")
 
         rayiou_meta = dense_eval.get("rayiou_meta", None) or {}
@@ -475,6 +480,10 @@ def main() -> None:
             "missing_gt": int(missing_gt),
             "missing_origin": int(missing_origin),
         }
+        if "occupied_iou" in dense_all:
+            summary[str(T)]["occupied_iou"] = (
+                None if occupied_iou is None else float(occupied_iou)
+            )
         # 释放本桶引用
         items.clear()
 

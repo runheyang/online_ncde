@@ -345,7 +345,7 @@ def main() -> None:
     print(f"===> error = {counts.get('error', 0)}")
     print(f"===> mIoU = {round(miou, 4)}")
     print(f"===> mIoU_D = {round(miou_d, 4)}")
-    print(f"===> occupied IoU = {round(occupied_iou, 4)}")
+    print(f"===> occupied_iou = {round(occupied_iou, 4)}")
     print("===> per class IoU:")
     for idx, name in enumerate(SURROUNDOCC_CLASS_NAMES[: args.num_classes]):
         value = class_iou[idx]

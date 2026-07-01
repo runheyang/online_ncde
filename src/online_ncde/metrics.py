@@ -228,6 +228,56 @@ class MetricMiouSurroundOcc(MetricMiouOcc3D):
             dynamic_object_idx=dynamic_object_idx,
         )
         self.class_names = list(SURROUNDOCC_CLASS_NAMES)
+        self.free_index = self.num_classes - 1
+        self.hist_occ = np.zeros((2, 2), dtype=np.float64)
+
+    def add_batch(
+        self,
+        semantics_pred: np.ndarray,
+        semantics_gt: np.ndarray,
+        mask_lidar: np.ndarray | None = None,
+        mask_camera: np.ndarray | None = None,
+    ) -> None:
+        """累计语义 IoU 与 OccStudio occupied IoU。"""
+        if self.use_image_mask and mask_camera is not None:
+            mask = mask_camera.astype(bool)
+            occ_pred_src = semantics_pred[mask]
+            occ_gt_src = semantics_gt[mask]
+        elif self.use_lidar_mask and mask_lidar is not None:
+            mask = mask_lidar.astype(bool)
+            occ_pred_src = semantics_pred[mask]
+            occ_gt_src = semantics_gt[mask]
+        else:
+            occ_pred_src = semantics_pred
+            occ_gt_src = semantics_gt
+
+        keep = (occ_gt_src >= 0) & (occ_gt_src < self.num_classes)
+        occ_pred = (occ_pred_src[keep] != self.free_index).astype(np.int64, copy=False)
+        occ_gt = (occ_gt_src[keep] != self.free_index).astype(np.int64, copy=False)
+        if occ_pred.size > 0:
+            self.hist_occ += np.bincount(
+                2 * occ_gt + occ_pred,
+                minlength=4,
+            ).reshape(2, 2)
+
+        super().add_batch(
+            semantics_pred=semantics_pred,
+            semantics_gt=semantics_gt,
+            mask_lidar=mask_lidar,
+            mask_camera=mask_camera,
+        )
+
+    def count_occupied_iou(self, verbose: bool = True) -> float:
+        """输出并返回 occupied IoU（百分比）。"""
+        occ_iou = self.per_class_iu(self.hist_occ)
+        occupied_iou = float(round(occ_iou[1] * 100, 2))
+        if verbose and np.isfinite(occupied_iou):
+            print(f"===> occupied - IoU = {occupied_iou}")
+        return occupied_iou
+
+    def get_occupied_iou(self) -> float:
+        """返回 occupied IoU（百分比）。"""
+        return self.count_occupied_iou(verbose=False)
 
 
 def build_miou_metric(

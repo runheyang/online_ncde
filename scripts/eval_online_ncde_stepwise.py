@@ -181,6 +181,7 @@ def main() -> None:
     grid_size = tuple(int(v) for v in data_cfg["grid_size"])
     dataset_variant = str(data_cfg.get("dataset_variant", "occ3d"))
     metric_variant = str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d")))
+    has_occupied_iou = metric_variant.strip().lower() == "surroundocc"
     class_names = build_miou_metric(
         num_classes=num_classes,
         variant=metric_variant,
@@ -374,15 +375,22 @@ def main() -> None:
                 "num_step_preds": int(step_time_count[step_idx]),
                 "rayiou": None,
             }
+            if has_occupied_iou:
+                per_step_results[step_key]["occupied_iou"] = None
             continue
 
         step_miou = step_payload["miou"]
         step_miou_d = step_payload["miou_d"]
         step_per_class = step_payload.get("per_class_iou", [])
+        step_occupied_iou = step_payload.get("occupied_iou", None)
+        occupied_text = ""
+        if step_occupied_iou is not None:
+            occupied_text = f" occupied_iou={float(step_occupied_iou):.2f}"
         print(
             f"[keyframe][step={step_idx}] "
             f"num={step_payload['num_keyframes']} miou={float(step_miou):.2f} "
             f"miou_d={float(step_miou_d):.2f}"
+            f"{occupied_text}"
         )
         for name, value in zip(class_names, step_per_class):
             print(f"  {name}: {float(value):.2f}")
@@ -411,9 +419,14 @@ def main() -> None:
 
     all_result = dense_eval["all"]
     if int(all_result.get("num_keyframes", 0)) > 0:
+        all_occupied_iou = all_result.get("occupied_iou", None)
+        occupied_text = ""
+        if all_occupied_iou is not None:
+            occupied_text = f" occupied_iou={float(all_occupied_iou):.2f}"
         print(
             f"[keyframe][all] num={all_result['num_keyframes']} "
             f"miou={float(all_result['miou']):.2f} miou_d={float(all_result['miou_d']):.2f}"
+            f"{occupied_text}"
         )
         all_per_class = all_result.get("per_class_iou", [])
         for name, value in zip(class_names, all_per_class):

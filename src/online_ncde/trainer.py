@@ -772,6 +772,10 @@ class Trainer:
                 "per_class_iou": per_class,
                 "class_names": metric.class_names,
             })
+            if hasattr(metric, "count_occupied_iou"):
+                occupied_iou = metric.count_occupied_iou(verbose=False)
+                if np.isfinite(occupied_iou):
+                    metrics["occupied_iou"] = float(occupied_iou)
         else:
             metrics["class_names"] = build_miou_metric(
                 num_classes=self.num_classes,
