@@ -174,6 +174,155 @@ class OnlineNcdeLoss(nn.Module):
         }
 
 
+class OccupancyDiceSemCeLoss(nn.Module):
+    """SurroundOcc dense GT loss：占用 BCE/Dice + 非 free 语义 CE/Dice。"""
+
+    def __init__(
+        self,
+        num_classes: int,
+        free_index: int,
+        class_weights: list[float] | None = None,
+        lambda_occ_bce: float = 1.0,
+        lambda_occ_dice: float = 1.0,
+        lambda_sem_ce: float = 1.0,
+        lambda_sem_dice: float = 0.0,
+        eps: float = 1.0e-6,
+    ) -> None:
+        super().__init__()
+        self.num_classes = int(num_classes)
+        self.free_index = int(free_index)
+        if not 0 <= self.free_index < self.num_classes:
+            raise ValueError(
+                f"free_index 必须在 [0, {self.num_classes}) 内，当前 {self.free_index}"
+            )
+        if class_weights is not None and len(class_weights) not in (
+            self.num_classes,
+            self.num_classes - 1,
+        ):
+            raise ValueError(
+                "class_weights 长度必须等于 num_classes 或 num_classes-1，"
+                f"当前 {len(class_weights)} vs {self.num_classes}"
+            )
+        self.class_weights = class_weights
+        self.lambda_occ_bce = float(lambda_occ_bce)
+        self.lambda_occ_dice = float(lambda_occ_dice)
+        self.lambda_sem_ce = float(lambda_sem_ce)
+        self.lambda_sem_dice = float(lambda_sem_dice)
+        self.eps = float(eps)
+
+    def _nonfree_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        parts = []
+        if self.free_index > 0:
+            parts.append(logits[:, : self.free_index])
+        if self.free_index + 1 < self.num_classes:
+            parts.append(logits[:, self.free_index + 1 :])
+        if not parts:
+            raise ValueError("num_classes 至少需要包含一个非 free 类")
+        return torch.cat(parts, dim=1)
+
+    def _semantic_targets(self, targets: torch.Tensor) -> torch.Tensor:
+        sem_targets = targets.clone()
+        sem_targets = torch.where(
+            sem_targets > self.free_index,
+            sem_targets - 1,
+            sem_targets,
+        )
+        return sem_targets
+
+    def _semantic_weights(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+        if self.class_weights is None:
+            return None
+        weights = torch.tensor(self.class_weights, device=device, dtype=dtype)
+        if weights.numel() == self.num_classes:
+            keep = torch.ones(self.num_classes, device=device, dtype=torch.bool)
+            keep[self.free_index] = False
+            weights = weights[keep]
+        return weights
+
+    def _semantic_dice(
+        self,
+        sem_logits: torch.Tensor,
+        sem_targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """只对当前 batch 出现的 non-free 类计算 Dice。"""
+        probs = F.softmax(sem_logits, dim=1)
+        one_hot = F.one_hot(
+            sem_targets,
+            num_classes=self.num_classes - 1,
+        ).to(dtype=probs.dtype)
+        present = one_hot.sum(dim=0) > 0
+        if not bool(present.any()):
+            return sem_logits.sum() * 0.0
+        probs = probs[:, present]
+        one_hot = one_hot[:, present]
+        inter = (probs * one_hot).sum(dim=0)
+        denom = probs.sum(dim=0) + one_hot.sum(dim=0)
+        dice = 1.0 - (2.0 * inter + self.eps) / (denom + self.eps)
+        return dice.mean()
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> dict[str, torch.Tensor]:
+        targets, mask = resize_labels_and_mask_to_logits(logits, targets, mask)
+        valid = torch.ones_like(targets, dtype=torch.bool) if mask is None else mask > 0.5
+        valid_f = valid.to(dtype=logits.dtype)
+        denom = valid_f.sum().clamp_min(self.eps)
+
+        nonfree_logits = self._nonfree_logits(logits)
+        free_logits = logits[:, self.free_index]
+        occ_logits = torch.logsumexp(nonfree_logits, dim=1) - free_logits
+        target_occ = (targets != self.free_index).to(dtype=logits.dtype)
+
+        occ_bce_raw = F.binary_cross_entropy_with_logits(
+            occ_logits,
+            target_occ,
+            reduction="none",
+        )
+        occ_bce = (occ_bce_raw * valid_f).sum() / denom
+
+        # Dice 只刻画 occupied overlap，避免 dense free 直接主导语义类梯度。
+        occ_prob = torch.sigmoid(occ_logits)
+        occ_prob_valid = occ_prob * valid_f
+        target_occ_valid = target_occ * valid_f
+        inter = (occ_prob_valid * target_occ_valid).sum()
+        occ_dice = 1.0 - (2.0 * inter + self.eps) / (
+            occ_prob_valid.sum() + target_occ_valid.sum() + self.eps
+        )
+
+        sem_valid = valid & (targets != self.free_index)
+        if bool(sem_valid.any()):
+            sem_logits = nonfree_logits.permute(0, 2, 3, 4, 1)[sem_valid]
+            sem_targets = self._semantic_targets(targets)[sem_valid].long()
+            sem_ce = F.cross_entropy(
+                sem_logits,
+                sem_targets,
+                weight=self._semantic_weights(logits.device, logits.dtype),
+            )
+            sem_dice = self._semantic_dice(sem_logits, sem_targets)
+        else:
+            sem_ce = logits.sum() * 0.0
+            sem_dice = logits.sum() * 0.0
+
+        occ_total = self.lambda_occ_bce * occ_bce + self.lambda_occ_dice * occ_dice
+        sem_total = self.lambda_sem_ce * sem_ce + self.lambda_sem_dice * sem_dice
+        total = occ_total + sem_total
+        return {
+            "total": total,
+            # 兼容 Trainer 现有日志：focal 表示 occupancy 部分，aux 表示语义部分。
+            "focal": occ_total,
+            "aux": sem_total,
+            "occ_bce_raw": occ_bce,
+            "occ_dice_raw": occ_dice,
+            "sem_ce_raw": sem_ce,
+            "sem_dice_raw": sem_dice,
+            "focal_raw": occ_total,
+            "aux_raw": sem_ce,
+        }
+
+
 class SegAndRayLoss(nn.Module):
     """seg loss + ray first-hit loss 的组合包装。
 
@@ -241,16 +390,31 @@ class SegAndRayLoss(nn.Module):
 def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
     """根据配置构建 loss 函数。"""
     loss_type = loss_cfg.get("type", "focal_lovasz")
-    if loss_type != "focal_lovasz":
-        raise ValueError(f"未知 loss type: {loss_type!r}，仅支持 'focal_lovasz'")
-    seg = OnlineNcdeLoss(
-        num_classes=num_classes,
-        gamma=loss_cfg.get("gamma", 2.0),
-        class_weights=loss_cfg.get("class_weights", None),
-        lambda_focal=loss_cfg.get("lambda_focal", 1.0),
-        lambda_lovasz=loss_cfg.get("lambda_lovasz", 1.0),
-        focal_mask_weight=loss_cfg.get("focal_mask_weight", None),
-    )
+    if loss_type == "focal_lovasz":
+        seg = OnlineNcdeLoss(
+            num_classes=num_classes,
+            gamma=loss_cfg.get("gamma", 2.0),
+            class_weights=loss_cfg.get("class_weights", None),
+            lambda_focal=loss_cfg.get("lambda_focal", 1.0),
+            lambda_lovasz=loss_cfg.get("lambda_lovasz", 1.0),
+            focal_mask_weight=loss_cfg.get("focal_mask_weight", None),
+        )
+    elif loss_type == "occ_bce_dice_sem_ce":
+        seg = OccupancyDiceSemCeLoss(
+            num_classes=num_classes,
+            free_index=int(loss_cfg.get("free_index", num_classes - 1)),
+            class_weights=loss_cfg.get("class_weights", None),
+            lambda_occ_bce=loss_cfg.get("lambda_occ_bce", 1.0),
+            lambda_occ_dice=loss_cfg.get("lambda_occ_dice", 1.0),
+            lambda_sem_ce=loss_cfg.get("lambda_sem_ce", 1.0),
+            lambda_sem_dice=loss_cfg.get("lambda_sem_dice", 0.0),
+            eps=loss_cfg.get("eps", 1.0e-6),
+        )
+    else:
+        raise ValueError(
+            f"未知 loss type: {loss_type!r}，"
+            "支持 'focal_lovasz' / 'occ_bce_dice_sem_ce'"
+        )
 
     ray_cfg = loss_cfg.get("ray", None)
     if not ray_cfg:

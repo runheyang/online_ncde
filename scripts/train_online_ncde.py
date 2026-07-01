@@ -410,6 +410,7 @@ def main() -> None:
                 scheduler.step()
 
     # 给 build_loss 注入 ray 需要的几何常量（yaml 里不重复填）。
+    loss_cfg.setdefault("free_index", int(data_cfg["free_index"]))
     ray_cfg = loss_cfg.get("ray", None)
     if ray_cfg is not None:
         ray_cfg.setdefault("pc_range", list(data_cfg["pc_range"]))
@@ -466,8 +467,11 @@ def main() -> None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join(output_base, f"{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
+    save_checkpoints = bool(train_cfg.get("save_checkpoints", True))
     if is_main:
         print(f"[ckpt] output_dir: {output_dir}")
+        if not save_checkpoints:
+            print("[ckpt] save_checkpoints=false，跳过 epoch 权重保存")
 
     # --- wandb 初始化：resume 时续接同一个 run ---
     run = None
@@ -706,12 +710,13 @@ def main() -> None:
                     json.dump(metrics_json, f, indent=2, ensure_ascii=False)
                 print(f"[metrics] saved -> {json_path}")
 
-            ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
-            ckpt_extra = {}
-            if run is not None:
-                ckpt_extra["wandb_run_id"] = run.id
-            trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
-            print(f"[ckpt] saved -> {ckpt_path}")
+            if save_checkpoints:
+                ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
+                ckpt_extra = {}
+                if run is not None:
+                    ckpt_extra["wandb_run_id"] = run.id
+                trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
+                print(f"[ckpt] saved -> {ckpt_path}")
 
         # 同步所有 rank，等待 rank 0 完成 eval/checkpoint
         if use_ddp:

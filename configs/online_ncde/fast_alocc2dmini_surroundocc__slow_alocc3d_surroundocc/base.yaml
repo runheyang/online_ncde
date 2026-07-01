@@ -1,4 +1,5 @@
 # Canonical config for SurroundOcc: fast=alocc2d_mini, slow=alocc3d.
+# Loss: occupancy Dice + non-free semantic CE/Dice.
 
 data:
   dataset_variant: surroundocc
@@ -46,12 +47,12 @@ model:
   func_g_gn_groups: 8
 
 loss:
-  gamma: 2.0
-  lambda_focal: 1.0
-  lambda_lovasz: 0.5
-  # SurroundOcc dense GT 当前使用全 1 mask，不做 Occ3D 的 camera-mask 内外重权。
-  focal_mask_weight: null
-  class_weights: [50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
+  type: occ_bce_dice_sem_ce
+  lambda_occ_bce: 0.0
+  lambda_occ_dice: 1.0
+  lambda_sem_ce: 1.0
+  lambda_sem_dice: 1.0
+  class_weights: null
   ray: null
 
 train:
@@ -68,6 +69,7 @@ train:
   supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
   supervision_weights: [0.15, 0.20, 0.25, 0.40]
   supervision_weight_normalize: true
+  save_checkpoints: true
   ema:
     enabled: true
     decay: 0.999
