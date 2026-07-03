@@ -1,29 +1,29 @@
-"""ALOcc2DMini fast + OnlineNCDE streaming eval."""
+"""ALOcc2DMini fast + StreamingFlow streaming eval."""
 from __future__ import annotations
 
 import argparse
 import os
 import sys
 import warnings
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
 SCRIPT_DIR = os.path.dirname(__file__)
 REPO_ROOT = "/root/autodl-tmp/online_ncde"
-sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "src")))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "src")))
 
 import torch
 
-from online_ncde.streaming.aligner_factory import (
-    build_online_ncde_aligner,
-    resolve_repo_path,
-    resolve_slow_root,
-)
+from online_ncde.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
 from online_ncde.streaming.eval_loop import run_streaming_eval
 from online_ncde.streaming.fast_runner import FastRunner
 from online_ncde.streaming.scene_iterator import build_sample_meta_index, iter_scenes
 from online_ncde.streaming.slow_cache import build_slow_decoder_fn
-from online_ncde.streaming.stream_aligner import StreamAligner
+from online_ncde.streaming.streamingflow_aligner import (
+    StreamingFlowStreamAligner,
+    build_streamingflow_model,
+)
 
 
 OCC_ROOT = "/root/autodl-tmp/online_ncde/third_party/OccStudio"
@@ -32,15 +32,17 @@ OCC_CKPT = "ckpts/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.pth"
 BDV2_PKL = "/root/autodl-tmp/data/nuscenes/bevdetv2-nuscenes_infos_val.pkl"
 GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
 DEFAULT_SWEEP_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
+STREAMINGFLOW_OVERLAY = (
+    Path(REPO_ROOT) / "src" / "online_ncde" / "baselines" / "streamingflow" / "occ3d_config.yaml"
+)
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--aligner-cfg", required=True)
-    p.add_argument("--aligner-ckpt", required=True)
+    p.add_argument("--config", required=True)
+    p.add_argument("--checkpoint", required=True)
     p.add_argument("--slow-intervals", type=float, nargs="+", required=True)
     p.add_argument("--limit-scenes", type=int, default=None)
-    p.add_argument("--solver", choices=["euler", "heun"], default="euler")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--preload-slow", action="store_true")
@@ -70,14 +72,19 @@ def build_fast_runner(data_cfg):
 def main():
     args = parse_args()
     os.chdir(REPO_ROOT)
+    args.config = resolve_repo_path(args.config, REPO_ROOT)
+    args.checkpoint = resolve_repo_path(args.checkpoint, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
 
-    print("[1] aligner build & load ckpt ...")
-    aligner, data_cfg = build_online_ncde_aligner(
-        args.aligner_cfg, args.aligner_ckpt, device, solver=args.solver
+    print("[1] StreamingFlow build & load ckpt ...")
+    model, data_cfg = build_streamingflow_model(
+        args.config,
+        args.checkpoint,
+        str(STREAMINGFLOW_OVERLAY),
+        device,
     )
-    stream_aligner = StreamAligner(aligner)
+    stream_aligner = StreamingFlowStreamAligner(model)
 
     print("[2] ALOcc2DMini fast runner build ...")
     fast = build_fast_runner(data_cfg)
@@ -104,6 +111,8 @@ def main():
         sweep_pkl=args.sweep_pkl,
         out_json=args.out_json,
         fast_backend="alocc2dmini",
+        aligner_label="StreamingFlow",
+        extra_out={"aligner": "streamingflow_bev_ode"},
     )
 
 

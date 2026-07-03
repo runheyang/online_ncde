@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 
 SCRIPT_DIR = os.path.dirname(__file__)
 REPO_ROOT = "/root/autodl-tmp/online_ncde"
-sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "src")))
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "src")))
 
 import torch
 

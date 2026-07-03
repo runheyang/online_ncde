@@ -293,6 +293,7 @@ def run_streaming_eval(
     sweep_pkl: str,
     out_json: Optional[str],
     fast_backend: str,
+    aligner_label: str = "NCDE",
     delayed: bool = False,
     slow_delay_keyframes: int = 0,
     extra_out: Optional[dict] = None,
@@ -318,7 +319,7 @@ def run_streaming_eval(
     fast_only_cnt = {it: 0 for it in slow_intervals}
 
     mode_label = "delayed slow" if delayed else "stream"
-    print(f"\n[5] Phase 1: per-scene fast + NCDE {mode_label} ...")
+    print(f"\n[5] Phase 1: per-scene fast + {aligner_label} {mode_label} ...")
     t_overall = time.time()
     for s_i, (scene_name, kf_list) in enumerate(scenes_meta):
         scene_fast_cache = cache_one_scene_fast(fast, kf_list, loader_iter)
