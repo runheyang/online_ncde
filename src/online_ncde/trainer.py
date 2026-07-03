@@ -100,6 +100,7 @@ class Trainer:
         ema: ModelEMA | None = None,
         lambda_fast_kl: float = 0.0,
         gradient_accumulation_steps: int = 1,
+        metric_variant: str = "occ3d",
     ) -> None:
         self.model = model
         self.is_main = is_main
@@ -145,6 +146,7 @@ class Trainer:
             None if resolved_step_max is None else int(resolved_step_max)
         )
         self.lambda_fast_kl = float(lambda_fast_kl)
+        self.metric_variant = str(metric_variant).strip().lower()
         self.gradient_accumulation_steps = int(gradient_accumulation_steps)
         if self.gradient_accumulation_steps < 1:
             raise ValueError(
@@ -521,7 +523,6 @@ class Trainer:
         total_loss = 0.0
         total_focal = 0.0
         total_aux = 0.0
-        total_delta = 0.0
         total_fast_kl = 0.0
         total_ray = 0.0
         total_ray_hit = 0.0
@@ -581,9 +582,6 @@ class Trainer:
                 total_sup_loss[key] = total_sup_loss.get(key, 0.0) + float(value) * float(cnt)
                 total_sup_count[key] = total_sup_count.get(key, 0) + int(cnt)
 
-            diag = self._pack_diag(cast("list[dict[str, torch.Tensor]]", outputs.get("diagnostics", [])))
-            total_delta += diag.get("delta_scene_abs_mean", 0.0)
-
             if pbar is not None:
                 pbar.update(step)
             elif self.is_main and (step % self.log_interval == 0 or step == total_steps):
@@ -596,7 +594,6 @@ class Trainer:
             total_loss,
             total_focal,
             total_aux,
-            total_delta,
             total_fast_kl,
             total_ray,
             total_ray_hit,
@@ -607,7 +604,6 @@ class Trainer:
             total_loss,
             total_focal,
             total_aux,
-            total_delta,
             total_fast_kl,
             total_ray,
             total_ray_hit,
@@ -634,7 +630,6 @@ class Trainer:
             "loss": total_loss / denom,
             "focal": total_focal / denom,
             "aux": total_aux / denom,
-            "delta_scene_abs_mean": total_delta / denom,
         }
         if self.lambda_fast_kl > 0.0:
             metrics["fast_kl"] = total_fast_kl / denom
@@ -690,6 +685,7 @@ class Trainer:
                 num_classes=self.num_classes,
                 use_image_mask=True,
                 use_lidar_mask=False,
+                variant=self.metric_variant,
             )
             if compute_miou
             else None
@@ -776,8 +772,15 @@ class Trainer:
                 "per_class_iou": per_class,
                 "class_names": metric.class_names,
             })
+            if hasattr(metric, "count_occupied_iou"):
+                occupied_iou = metric.count_occupied_iou(verbose=False)
+                if np.isfinite(occupied_iou):
+                    metrics["occupied_iou"] = float(occupied_iou)
         else:
-            metrics["class_names"] = build_miou_metric(num_classes=self.num_classes).class_names
+            metrics["class_names"] = build_miou_metric(
+                num_classes=self.num_classes,
+                variant=self.metric_variant,
+            ).class_names
         for key, value in total_sup_loss.items():
             count = max(total_sup_count.get(key, 0), 1)
             metrics[key] = value / count

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -34,12 +33,9 @@ sys.path.append(str(ROOT / "src"))
 
 from online_ncde.baselines import WarpSlowFillFastBaseline  # noqa: E402
 from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
+from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
-from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
-from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
-from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou  # noqa: E402
+from online_ncde.metrics import build_miou_metric  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
 
 try:
@@ -120,10 +116,19 @@ def main() -> None:
     eval_cfg = cfg["eval"]
     loader_cfg = cfg.get("dataloader", {})
     root_path = cfg["root_path"]
+    dataset_variant = str(data_cfg.get("dataset_variant", "occ3d")).strip().lower()
+    metric_variant = str(data_cfg.get("metric_variant", dataset_variant)).strip().lower()
 
-    # baseline 只用 fast_logits[-1]，用 wrapper 屏蔽前 T-1 帧的真实解码
-    logits_loader = _LastFrameOnlyFastLogitsLoader(build_logits_loader(data_cfg, root_path))
-    print("[io] fast_logits worker 只返回末帧 (1,C,X,Y,Z)，省 I/O + 内存分配 + IPC 传输")
+    raw_logits_loader = build_logits_loader(data_cfg, root_path)
+    if dataset_variant == "surroundocc":
+        # SurroundOcc dataset 会用 frame_sample_tokens 构造 LIDAR_TOP lidar2global
+        # 序列；保持完整 fast_logits 长度，避免 pose 序列与帧数错位。
+        logits_loader = raw_logits_loader
+        print("[io] SurroundOcc 使用完整 fast_logits 序列，保留 LIDAR_TOP pose 对齐")
+    else:
+        # baseline 只用 fast_logits[-1]，用 wrapper 屏蔽前 T-1 帧的真实解码
+        logits_loader = _LastFrameOnlyFastLogitsLoader(raw_logits_loader)
+        print("[io] fast_logits worker 只返回末帧 (1,C,X,Y,Z)，省 I/O + 内存分配 + IPC 传输")
 
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval-baseline] min_history_completeness={min_hc}"
@@ -133,14 +138,10 @@ def main() -> None:
     if args.val_info_path:
         print(f"[eval-baseline] --val-info-path 覆盖 -> {info_path}")
 
-    dataset = Occ3DOnlineNcdeDataset(
+    dataset = build_online_ncde_dataset(
+        data_cfg,
         info_path=info_path,
         root_path=root_path,
-        gt_root=data_cfg["gt_root"],
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        gt_mask_key=data_cfg["gt_mask_key"],
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
         min_history_completeness=min_hc,
@@ -173,17 +174,19 @@ def main() -> None:
     print(f"[baseline] {baseline.name} (logits-level blend)")
 
     num_classes = int(data_cfg["num_classes"])
-    gt_root = resolve_path(root_path, data_cfg["gt_root"])
-    gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
 
-    metric_miou = MetricMiouOcc3D(
+    metric_miou = build_miou_metric(
         num_classes=num_classes,
         use_image_mask=True,
         use_lidar_mask=False,
+        variant=metric_variant,
     )
     class_names = metric_miou.class_names
 
     enable_rayiou = not args.no_rayiou
+    if enable_rayiou and dataset_variant != "occ3d":
+        print("[rayiou] 当前 RayIoU 实现固定 Occ3D label space / pc_range，SurroundOcc 分支自动跳过")
+        enable_rayiou = False
     sweep_info_path = resolve_path(root_path, args.sweep_info_path)
 
     # 推理阶段累积预测；RayIoU 阶段统一批量计算（不做流式 per-sample raycast）
@@ -191,7 +194,6 @@ def main() -> None:
     coverage_sum = 0.0
     coverage_count = 0
     degenerate_count = 0  # scene 首帧退化（slow 直出）
-    missing_gt_count = 0
     processed = 0
 
     total_batches = len(loader)
@@ -204,12 +206,14 @@ def main() -> None:
 
     with torch.inference_mode():
         for batch_idx, sample in enumerate(iterator, start=1):
-            # worker 侧 wrapper 已将 fast_logits 裁到末帧 (1, C, X, Y, Z)，
-            # 主进程无需再切片；num_frames 的真值由 frame_ego2global 提供。
+            # Occ3D worker 侧 wrapper 会把 fast_logits 裁到末帧；SurroundOcc
+            # 保留完整序列以对齐 LIDAR_TOP pose。baseline 下游只用 [-1]。
             sample = move_to_device(sample, device)
-            fast_logits = cast(torch.Tensor, sample["fast_logits"])   # (B, 1, C, X, Y, Z)
+            fast_logits = cast(torch.Tensor, sample["fast_logits"])   # (B, T_fast, C, X, Y, Z)
             slow_logits = cast(torch.Tensor, sample["slow_logits"])   # (B, C, X, Y, Z)
             frame_ego2global = cast(torch.Tensor, sample["frame_ego2global"])  # (B, T, 4, 4)
+            gt_labels = cast(torch.Tensor, sample["gt_labels"])  # (B, X, Y, Z)
+            gt_mask = cast(torch.Tensor, sample["gt_mask"])  # (B, X, Y, Z)
             rollout_start_step = sample.get("rollout_start_step", None)
             meta_list = cast("list[dict[str, Any]]", sample["meta"])
 
@@ -232,36 +236,27 @@ def main() -> None:
                     coverage_sum += float(coverage.mean().item())
                     coverage_count += 1
 
-                meta = meta_list[b]
-                scene_name = str(meta.get("scene_name", ""))
-                token = str(meta.get("token", ""))
-                if not scene_name or not token:
-                    continue
-
-                gt_path = os.path.join(gt_root, scene_name, token, "labels.npz")
-                if not os.path.exists(gt_path):
-                    missing_gt_count += 1
-                    continue
-
-                gt_npz = load_labels_npz(gt_path)
-                gt_semantics = gt_npz["semantics"]
-                gt_mask = gt_npz.get(gt_mask_key, np.ones(gt_semantics.shape, dtype=np.float32))
                 pred_np = pred.detach().cpu().numpy()
+                gt_semantics = gt_labels[b].detach().cpu().numpy()
+                gt_mask_np = gt_mask[b].detach().cpu().numpy()
 
                 metric_miou.add_batch(
                     semantics_pred=pred_np,
                     semantics_gt=gt_semantics,
                     mask_lidar=None,
-                    mask_camera=gt_mask,
+                    mask_camera=gt_mask_np,
                 )
 
+                meta = meta_list[b]
+                token = str(meta.get("token", ""))
                 if enable_rayiou:
                     # 只存 RayIoU 所需字段，用 uint8 省内存（~640KB/样本）
-                    collected.append({
-                        "pred": pred_np.astype(np.uint8),
-                        "gt": gt_semantics.astype(np.uint8),
-                        "token": token,
-                    })
+                    if token:
+                        collected.append({
+                            "pred": pred_np.astype(np.uint8),
+                            "gt": gt_semantics.astype(np.uint8),
+                            "token": token,
+                        })
 
                 processed += 1
 
@@ -275,12 +270,19 @@ def main() -> None:
         miou = float(metric_miou.count_miou(verbose=False))
         miou_d = float(metric_miou.count_miou_d(verbose=False))
         per_class = np.nan_to_num(metric_miou.get_per_class_iou(), nan=0.0).tolist()
-        print(f"[miou] num={metric_miou.cnt} miou={miou:.2f} miou_d={miou_d:.2f}")
+        occupied_iou = (
+            float(metric_miou.count_occupied_iou(verbose=False))
+            if hasattr(metric_miou, "count_occupied_iou")
+            else None
+        )
+        occupied_text = "" if occupied_iou is None else f" occupied_iou={occupied_iou:.2f}"
+        print(f"[miou] num={metric_miou.cnt} miou={miou:.2f} miou_d={miou_d:.2f}{occupied_text}")
         for name, value in zip(class_names, per_class):
             print(f"  {name}: {float(value):.2f}")
     else:
         miou = float("nan")
         miou_d = float("nan")
+        occupied_iou = None
         per_class = []
         print("[miou] no samples")
 
@@ -288,6 +290,9 @@ def main() -> None:
     missing_origin_count = 0
     rayiou_num_samples = 0
     if enable_rayiou:
+        from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+        from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+
         print(f"\n[rayiou] 加载 lidar origins: {sweep_info_path}")
         origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)
         print(f"[rayiou] 共 {len(origins_by_token)} 个 token 的 origin")
@@ -319,7 +324,7 @@ def main() -> None:
         else:
             print("[rayiou] no samples")
 
-    print(f"[meta] missing_gt={missing_gt_count} missing_origin={missing_origin_count}")
+    print(f"[meta] missing_origin={missing_origin_count}")
 
     if args.dump_json:
         payload = {
@@ -328,14 +333,16 @@ def main() -> None:
             "num_samples": int(metric_miou.cnt),
             "miou": _to_json_number(miou),
             "miou_d": _to_json_number(miou_d),
+            "occupied_iou": None if occupied_iou is None else _to_json_number(occupied_iou),
             "per_class_iou": [float(v) for v in per_class],
             "class_names": class_names,
             "rayiou": rayiou_result,
             "rayiou_num_samples": int(rayiou_num_samples),
             "coverage_mean": _to_json_number(coverage_sum / max(coverage_count, 1)),
             "degenerate_count": int(degenerate_count),
-            "missing_gt_count": int(missing_gt_count),
             "missing_origin_count": int(missing_origin_count),
+            "dataset_variant": dataset_variant,
+            "metric_variant": metric_variant,
             "config": str(args.config),
             "val_info_path": str(info_path),
         }

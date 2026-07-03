@@ -410,6 +410,7 @@ def main() -> None:
                 scheduler.step()
 
     # 给 build_loss 注入 ray 需要的几何常量（yaml 里不重复填）。
+    loss_cfg.setdefault("free_index", int(data_cfg["free_index"]))
     ray_cfg = loss_cfg.get("ray", None)
     if ray_cfg is not None:
         ray_cfg.setdefault("pc_range", list(data_cfg["pc_range"]))
@@ -435,6 +436,7 @@ def main() -> None:
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
         is_main=is_main,
         ema=ema,
+        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
     )
 
     # --- 推导 output_dir：resume 时复用原目录，否则新建时间戳目录 ---
@@ -465,8 +467,11 @@ def main() -> None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join(output_base, f"{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
+    save_checkpoints = bool(train_cfg.get("save_checkpoints", True))
     if is_main:
         print(f"[ckpt] output_dir: {output_dir}")
+        if not save_checkpoints:
+            print("[ckpt] save_checkpoints=false，跳过 epoch 权重保存")
 
     # --- wandb 初始化：resume 时续接同一个 run ---
     run = None
@@ -532,8 +537,7 @@ def main() -> None:
                 f"[train] epoch={epoch} "
                 f"loss={train_metrics['loss']:.4f} "
                 f"focal={train_metrics['focal']:.4f} "
-                f"aux={train_metrics['aux']:.4f} "
-                f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"aux={train_metrics['aux']:.4f}"
                 f"{fast_kl_text}"
                 f"{ray_total_text}"
                 f"{train_sup_text}"
@@ -558,18 +562,22 @@ def main() -> None:
                 )
                 _cleanup_gpu_cache()
                 predictions = val_metrics["predictions"]
-                sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
-                sweep_path = Path(sweep_rel)
-                sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
-                if epoch == start_epoch:
+                enable_rayiou = bool(eval_cfg.get("enable_rayiou", True))
+                sweep_pkl = None
+                if enable_rayiou:
+                    sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
+                    sweep_path = Path(sweep_rel)
+                    sweep_pkl = str(sweep_path if sweep_path.is_absolute() else (ROOT / sweep_path).resolve())
+                if enable_rayiou and epoch == start_epoch:
                     print(f"[rayiou] sweep pkl: {sweep_pkl}")
 
                 binned_ray_result = None
-                need_pcds = args.save_metrics_json
+                need_pcds = args.save_metrics_json and enable_rayiou
                 if need_pcds:
                     dense_eval = evaluate_dense_occ(
                         predictions,
                         num_classes=int(data_cfg["num_classes"]),
+                        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
                         enable_rayiou=False,
                     )
                     rayiou_result, raw_pcd_pred, raw_pcd_gt, rayiou_meta = compute_dense_rayiou_with_pcds(
@@ -582,7 +590,8 @@ def main() -> None:
                     dense_eval = evaluate_dense_occ(
                         predictions,
                         num_classes=int(data_cfg["num_classes"]),
-                        enable_rayiou=True,
+                        metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
+                        enable_rayiou=enable_rayiou,
                         sweep_pkl=sweep_pkl,
                         print_rayiou_table=True,
                     )
@@ -596,11 +605,16 @@ def main() -> None:
                     "per_class_iou": dense_all["per_class_iou"],
                     "class_names": dense_all["class_names"],
                 })
+                if dense_all.get("occupied_iou", None) is not None:
+                    val_metrics["occupied_iou"] = dense_all["occupied_iou"]
                 val_sup_parts = []
                 for key, value in val_metrics.items():
                     if isinstance(key, str) and key.startswith("sup_loss_t"):
                         val_sup_parts.append(f"{key}={float(value):.4f}")
                 val_sup_text = (" " + " ".join(val_sup_parts)) if val_sup_parts else ""
+                occupied_text = ""
+                if val_metrics.get("occupied_iou", None) is not None:
+                    occupied_text = f" occupied_iou={float(val_metrics['occupied_iou']):.4f}"
                 print(
                     f"[eval] epoch={epoch} "
                     f"loss={val_metrics['loss']:.4f} "
@@ -608,6 +622,7 @@ def main() -> None:
                     f"aux={val_metrics['aux']:.4f} "
                     f"miou={val_metrics['miou']:.4f} "
                     f"miou_d={val_metrics.get('miou_d', float('nan')):.4f}"
+                    f"{occupied_text}"
                     f"{val_sup_text}"
                 )
                 class_names = val_metrics.get("class_names", [])
@@ -618,9 +633,9 @@ def main() -> None:
                         print(f"===> {name} - IoU = {round(float(value), 2)}")
 
                 missing_origin_count = int(rayiou_meta.get("missing_origin_count", 0))
-                if missing_origin_count:
+                if enable_rayiou and missing_origin_count:
                     print(f"[rayiou] epoch={epoch} 跳过 {missing_origin_count} 个样本（无对应 lidar origin）")
-                if rayiou_result is not None:
+                if enable_rayiou and rayiou_result is not None:
                     print(
                         f"[rayiou] epoch={epoch} "
                         f"num={rayiou_result.get('num_samples', 0)} "
@@ -649,7 +664,7 @@ def main() -> None:
 
                 if run is not None:
                     payload = {"epoch": float(epoch)}
-                    for key in ("loss", "focal", "aux", "miou", "miou_d"):
+                    for key in ("loss", "focal", "aux", "miou", "miou_d", "occupied_iou"):
                         value = to_float(val_metrics.get(key, None))
                         if value is not None:
                             payload[f"val/{key}"] = value
@@ -676,6 +691,8 @@ def main() -> None:
                     "mIoU_d": float(val_metrics.get("miou_d", 0.0)),
                     "loss": float(val_metrics["loss"]),
                 }
+                if val_metrics.get("occupied_iou", None) is not None:
+                    metrics_json["occupied_iou"] = float(val_metrics["occupied_iou"])
                 # Fast-KL 诊断
                 if "fast_kl" in train_metrics:
                     metrics_json["fast_kl"] = {
@@ -701,12 +718,13 @@ def main() -> None:
                     json.dump(metrics_json, f, indent=2, ensure_ascii=False)
                 print(f"[metrics] saved -> {json_path}")
 
-            ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
-            ckpt_extra = {}
-            if run is not None:
-                ckpt_extra["wandb_run_id"] = run.id
-            trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
-            print(f"[ckpt] saved -> {ckpt_path}")
+            if save_checkpoints:
+                ckpt_path = os.path.join(output_dir, f"epoch_{epoch}.pth")
+                ckpt_extra = {}
+                if run is not None:
+                    ckpt_extra["wandb_run_id"] = run.id
+                trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
+                print(f"[ckpt] saved -> {ckpt_path}")
 
         # 同步所有 rank，等待 rank 0 完成 eval/checkpoint
         if use_ddp:

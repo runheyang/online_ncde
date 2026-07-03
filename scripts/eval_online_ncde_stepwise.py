@@ -30,7 +30,7 @@ from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E4
 from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
+from online_ncde.evaluation import attach_dense_occ_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
 from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner  # noqa: E402
 from online_ncde.metrics import build_miou_metric  # noqa: E402
 from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
@@ -179,7 +179,13 @@ def main() -> None:
     gt_root = resolve_path(root_path, data_cfg["gt_root"])
     gt_mask_key = data_cfg.get("gt_mask_key", "mask_camera")
     grid_size = tuple(int(v) for v in data_cfg["grid_size"])
-    class_names = build_miou_metric(num_classes=num_classes).class_names
+    dataset_variant = str(data_cfg.get("dataset_variant", "occ3d"))
+    metric_variant = str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d")))
+    has_occupied_iou = metric_variant.strip().lower() == "surroundocc"
+    class_names = build_miou_metric(
+        num_classes=num_classes,
+        variant=metric_variant,
+    ).class_names
 
     predictions: list[dict[str, Any]] = []
     enable_rayiou = not args.no_rayiou
@@ -330,16 +336,20 @@ def main() -> None:
             f"decode={step_decode_avg[step_idx]:.4f} count={step_time_count[step_idx]}"
         )
 
-    predictions_with_gt, missing_gt_count = attach_occ3d_targets(
+    predictions_with_gt, missing_gt_count = attach_dense_occ_targets(
         predictions,
+        dataset_variant=dataset_variant,
         gt_root=gt_root,
         gt_mask_key=gt_mask_key,
         grid_size=grid_size,
+        nuscenes_root=nusc_dataroot,
+        nuscenes_version=args.nusc_version,
     )
     print(f"[target] attached_gt={len(predictions_with_gt)} missing_gt_count={missing_gt_count}")
     dense_eval = evaluate_dense_occ(
         predictions_with_gt,
         num_classes=num_classes,
+        metric_variant=metric_variant,
         enable_rayiou=enable_rayiou,
         sweep_pkl=sweep_info_path if enable_rayiou else None,
         print_rayiou_table=True,
@@ -365,15 +375,22 @@ def main() -> None:
                 "num_step_preds": int(step_time_count[step_idx]),
                 "rayiou": None,
             }
+            if has_occupied_iou:
+                per_step_results[step_key]["occupied_iou"] = None
             continue
 
         step_miou = step_payload["miou"]
         step_miou_d = step_payload["miou_d"]
         step_per_class = step_payload.get("per_class_iou", [])
+        step_occupied_iou = step_payload.get("occupied_iou", None)
+        occupied_text = ""
+        if step_occupied_iou is not None:
+            occupied_text = f" occupied_iou={float(step_occupied_iou):.2f}"
         print(
             f"[keyframe][step={step_idx}] "
             f"num={step_payload['num_keyframes']} miou={float(step_miou):.2f} "
             f"miou_d={float(step_miou_d):.2f}"
+            f"{occupied_text}"
         )
         for name, value in zip(class_names, step_per_class):
             print(f"  {name}: {float(value):.2f}")
@@ -402,9 +419,14 @@ def main() -> None:
 
     all_result = dense_eval["all"]
     if int(all_result.get("num_keyframes", 0)) > 0:
+        all_occupied_iou = all_result.get("occupied_iou", None)
+        occupied_text = ""
+        if all_occupied_iou is not None:
+            occupied_text = f" occupied_iou={float(all_occupied_iou):.2f}"
         print(
             f"[keyframe][all] num={all_result['num_keyframes']} "
             f"miou={float(all_result['miou']):.2f} miou_d={float(all_result['miou_d']):.2f}"
+            f"{occupied_text}"
         )
         all_per_class = all_result.get("per_class_iou", [])
         for name, value in zip(class_names, all_per_class):

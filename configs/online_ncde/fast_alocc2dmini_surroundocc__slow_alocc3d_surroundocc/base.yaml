@@ -1,0 +1,97 @@
+# Canonical config for SurroundOcc: fast=alocc2d_mini, slow=alocc3d.
+# Loss: occupancy Dice + non-free semantic CE/Dice.
+
+data:
+  dataset_variant: surroundocc
+  metric_variant: surroundocc
+  logits_format: alocc_dense_topk
+  info_path: configs/online_ncde/canonical_infos_train_full.pkl
+  val_info_path: configs/online_ncde/canonical_infos_val_full.pkl
+  # 训练/训练内评估过滤短历史样本（history_completeness<4）。独立评估脚本
+  # 可加 --include-short-history 覆盖为 0，评估全集含短历史。
+  min_history_completeness: 4
+  # 2Hz 推演：每 3 帧取 1 帧，13 帧 -> 5 帧。
+  fast_frame_stride: 3
+  # SurroundOcc 当前不启用 Ray first-hit loss。
+  ray_sidecar_dir: null
+  fast_logits_root: data/alocc2d_mini_surroundocc_logits
+  slow_logit_root: data/alocc3d_surroundocc_logits
+  # ALOCC dense top-k 专用参数。SurroundOcc logits 目录按 sample_token 存储，
+  # topk_indices 存原始 1..17 类 id，训练内部压缩到 0..16。
+  alocc_fill_value: -5.0
+  alocc_clamp_min: -5.0
+  alocc_topk_k: 3
+  alocc_max_centering: false
+  alocc_path_token_type: sample_token
+  alocc_label_id_offset: -1
+  # 通用参数（模型、dataset、loss 均使用）
+  gt_root: data/nuscenes/gts_surroundocc
+  nuscenes_root: data/nuscenes
+  nuscenes_version: v1.0-trainval
+  num_classes: 17
+  free_index: 16
+  pc_range: [-50.0, -50.0, -5.0, 50.0, 50.0, 3.0]
+  voxel_size: [0.5, 0.5, 0.5]
+  grid_size: [200, 200, 16]
+  gt_mask_key: mask_camera
+  timestamp_scale: 1.0e-6
+
+model:
+  feat_dim: 32
+  hidden_dim: 32
+  encoder_in_channels: 17
+  use_fast_residual: true
+  decoder_init_scale: 1.0e-6
+  func_g_inner_dim: 24
+  func_g_body_dilations: [1, 3, 5]
+  func_g_gn_groups: 8
+
+loss:
+  type: occ_bce_dice_sem_ce
+  lambda_occ_bce: 0.0
+  lambda_occ_dice: 1.0
+  lambda_sem_ce: 1.0
+  lambda_sem_dice: 1.0
+  class_weights: null
+  ray: null
+
+train:
+  batch_size: 1
+  num_workers: 12
+  epochs: 20
+  lr: 1.0e-4
+  warmup_epochs: 1
+  warmup_start_lr: 1.0e-5
+  weight_decay: 1.0e-2
+  clip_norm: 5.0
+  log_interval: 1000
+  device: cuda
+  supervision_labels: ["t-1.5", "t-1.0", "t-0.5", "t"]
+  supervision_weights: [0.15, 0.20, 0.25, 0.40]
+  supervision_weight_normalize: true
+  save_checkpoints: true
+  ema:
+    enabled: true
+    decay: 0.999
+  # L_kl = lambda * mean(m_occ.clamp(min=0) * KL(aligned || fast.detach()))。
+  lambda_fast_kl: 0.0
+
+dataloader:
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+
+eval:
+  batch_size: 1
+  num_workers: 16
+  device: cuda
+  free_conf_thresh: null
+  log_interval: 500
+  log_multistep_losses: true
+  sweep_pkl: data/nuscenes/nuscenes_infos_val_sweep.pkl
+  enable_rayiou: false
+
+wandb:
+  entity: runheyang
+  project: neural-ode
+  name: ""

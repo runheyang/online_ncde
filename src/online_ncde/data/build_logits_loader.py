@@ -39,6 +39,8 @@ def build_logits_loader(
             clamp_min=float(data_cfg.get("alocc_clamp_min", -12.0)),
             topk_k=int(data_cfg.get("alocc_topk_k", 3)),
             max_centering=bool(data_cfg.get("alocc_max_centering", True)),
+            label_id_offset=int(data_cfg.get("alocc_label_id_offset", 0)),
+            path_token_type=str(data_cfg.get("alocc_path_token_type", "rel_path")),
         )
 
     if logits_format == "composite":

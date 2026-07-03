@@ -73,6 +73,8 @@ class AloccDenseTopkLoader(LogitsLoader):
         clamp_min: float = -12.0,
         topk_k: int = 3,
         max_centering: bool = True,
+        label_id_offset: int = 0,
+        path_token_type: str = "rel_path",
     ) -> None:
         self.root_path = root_path
         self.fast_logits_root = fast_logits_root
@@ -83,6 +85,13 @@ class AloccDenseTopkLoader(LogitsLoader):
         self.clamp_min = float(clamp_min)
         self.topk_k = int(topk_k)
         self.max_centering = bool(max_centering)
+        self.label_id_offset = int(label_id_offset)
+        self.path_token_type = str(path_token_type).strip().lower()
+        if self.path_token_type not in {"rel_path", "sample_token"}:
+            raise ValueError(
+                "alocc path_token_type 仅支持 {'rel_path', 'sample_token'}，"
+                f"当前为 {path_token_type!r}"
+            )
 
         # 预计算 scatter 用的坐标索引，所有帧复用，避免重复分配
         X, Y, Z = self.grid_size
@@ -109,6 +118,22 @@ class AloccDenseTopkLoader(LogitsLoader):
             topk_values = torch.from_numpy(data["topk_values"].astype(np.float32))   # (X, Y, Z, K)
             topk_indices = torch.from_numpy(data["topk_indices"].astype(np.int64))    # (X, Y, Z, K)
 
+        if int(topk_values.shape[-1]) != self.topk_k or int(topk_indices.shape[-1]) != self.topk_k:
+            raise ValueError(
+                f"{path} 的 top-k 维度与配置不一致："
+                f"values={tuple(topk_values.shape)}, indices={tuple(topk_indices.shape)}, "
+                f"配置 alocc_topk_k={self.topk_k}"
+            )
+        if self.label_id_offset:
+            topk_indices = topk_indices + int(self.label_id_offset)
+        min_idx = int(topk_indices.min().item())
+        max_idx = int(topk_indices.max().item())
+        if min_idx < 0 or max_idx >= self.num_classes:
+            raise ValueError(
+                f"{path} 的 topk_indices 经 offset={self.label_id_offset} 后越界："
+                f"min={min_idx}, max={max_idx}, num_classes={self.num_classes}"
+            )
+
         # max-centering：每体素的 top-K logits 减去其中最大值（可选）
         if self.max_centering:
             max_vals = topk_values.max(dim=-1, keepdim=True).values  # (X, Y, Z, 1)
@@ -128,15 +153,47 @@ class AloccDenseTopkLoader(LogitsLoader):
         )
 
         # scatter：将 centered top-K 值写入对应类别位置
-        c_idx = topk_indices.reshape(-1)
-        v_flat = centered.reshape(-1)
-        dense[c_idx, self._x_idx, self._y_idx, self._z_idx] = v_flat
+        c_idx = topk_indices.reshape(-1).to(device=device, dtype=torch.long)
+        v_flat = centered.reshape(-1).to(device=device)
+        dense[
+            c_idx,
+            self._x_idx.to(device=device),
+            self._y_idx.to(device=device),
+            self._z_idx.to(device=device),
+        ] = v_flat
 
         return dense
 
     def _resolve(self, logits_root: str, rel_path: str) -> str:
         """拼接完整路径。"""
         return resolve_path(self.root_path, os.path.join(logits_root, rel_path))
+
+    def _make_sample_token_rel_path(self, info: Dict[str, Any], token: str) -> str:
+        """从 scene/sample_token 组装逐帧 logits 相对路径。"""
+        if not token:
+            return ""
+        scene_name = str(info.get("scene_name", ""))
+        if not scene_name:
+            raise KeyError("path_token_type=sample_token 需要 info['scene_name']")
+        return os.path.join(scene_name, str(token), "logits.npz")
+
+    def _iter_fast_rel_paths(self, info: Dict[str, Any]) -> list[str]:
+        """按配置返回 fast logits 的逐帧相对路径。"""
+        if self.path_token_type == "sample_token":
+            if "frame_sample_tokens" not in info:
+                raise KeyError("path_token_type=sample_token 需要 info['frame_sample_tokens']")
+            return [
+                self._make_sample_token_rel_path(info, str(token))
+                for token in info["frame_sample_tokens"]
+            ]
+        return list(info["frame_rel_paths"])
+
+    def _slow_rel_path(self, info: Dict[str, Any]) -> str:
+        """按配置返回 slow logits 相对路径。"""
+        if self.path_token_type == "sample_token":
+            token = str(info.get("slow_sample_token", "") or info.get("token", ""))
+            return self._make_sample_token_rel_path(info, token)
+        return str(info["slow_logit_path"])
 
     def _empty_frame(self, device: torch.device) -> torch.Tensor:
         """pad 帧占位：全 fill_value 的 (C, X, Y, Z) 张量。"""
@@ -154,7 +211,7 @@ class AloccDenseTopkLoader(LogitsLoader):
         device: torch.device,
     ) -> torch.Tensor:
         """加载 13 帧快系统 logits，返回 (T, C, X, Y, Z)。"""
-        frame_rel_paths = info["frame_rel_paths"]
+        frame_rel_paths = self._iter_fast_rel_paths(info)
         frames = []
         for rel_path in frame_rel_paths:
             if not rel_path:
@@ -171,7 +228,7 @@ class AloccDenseTopkLoader(LogitsLoader):
         device: torch.device,
     ) -> torch.Tensor:
         """加载慢系统单帧 logits，返回 (C, X, Y, Z)。"""
-        rel_path = info["slow_logit_path"]
+        rel_path = self._slow_rel_path(info)
         full_path = self._resolve(self.slow_logit_root, rel_path)
         return self._decode_dense_topk_frame(full_path, device)
 
