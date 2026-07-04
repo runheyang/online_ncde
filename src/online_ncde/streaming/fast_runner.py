@@ -54,6 +54,8 @@ class FastRunner:
         clamp_min: float = -5.0,
         fill_value: float = -5.0,
         max_centering: bool = False,
+        label_id_offset: int = 0,
+        drop_others_label: bool = False,
         device: str = "cuda:0",
     ) -> None:
         self.occstudio_root = occstudio_root
@@ -65,6 +67,8 @@ class FastRunner:
         self.clamp_min = float(clamp_min)
         self.fill_value = float(fill_value)
         self.max_centering = bool(max_centering)
+        self.label_id_offset = int(label_id_offset)
+        self.drop_others_label = bool(drop_others_label)
         self.device = torch.device(device)
         self.model = None
         self._dataset = None
@@ -149,11 +153,22 @@ class FastRunner:
         pred = torch.flip(pred, [2])
         pred = torch.rot90(pred, -1, [2, 3])
         pred = pred.permute(2, 3, 1, 0)                   # (X, Y, Z, C)
+        if self.drop_others_label:
+            if pred.shape[-1] < self.num_classes + 1:
+                raise ValueError(
+                    "drop_others_label=True 需要比内部类别数多 1 个 others 通道: "
+                    f"logits={pred.shape[-1]}, num_classes={self.num_classes}"
+                )
+            pred = pred[..., 1:]
 
         # topk(3) 沿 class 维
         topk_vals, topk_idx = torch.topk(
             pred, k=self.topk_k, dim=-1, largest=True, sorted=True
         )
+        if self.drop_others_label:
+            topk_idx = topk_idx + 1
+        if self.label_id_offset:
+            topk_idx = topk_idx + self.label_id_offset
         # 复刻 logits_loader 的 dense decode: max-center (可选) + clamp_min + scatter
         if self.max_centering:
             max_vals = topk_vals.max(dim=-1, keepdim=True).values
@@ -187,6 +202,12 @@ class FastRunner:
         y_idx = torch.arange(Y, device=topk_vals.device).view(1, Y, 1, 1).expand(X, -1, Z, K)
         z_idx = torch.arange(Z, device=topk_vals.device).view(1, 1, Z, 1).expand(X, Y, -1, K)
         c_idx = topk_idx.long()
+        min_idx = int(c_idx.min().item())
+        max_idx = int(c_idx.max().item())
+        if min_idx < 0 or max_idx >= C:
+            raise ValueError(
+                f"FastRunner topk index 越界: min={min_idx}, max={max_idx}, num_classes={C}"
+            )
         dense[c_idx, x_idx, y_idx, z_idx] = topk_vals
         return dense.float()
 

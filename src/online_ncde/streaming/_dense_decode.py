@@ -37,6 +37,7 @@ def decode_topk_npz_to_dense_gpu(
     clamp_min: float,
     fill_value: float,
     max_centering: bool = False,
+    label_id_offset: int = 0,
 ) -> torch.Tensor:
     """读取 alocc dense topk npz, 全程 GPU 解码 → (C, X, Y, Z) fp32.
 
@@ -49,6 +50,15 @@ def decode_topk_npz_to_dense_gpu(
         topk_idx_cpu = torch.from_numpy(data["topk_indices"])     # uint8 (X,Y,Z,K)
     topk_vals = topk_vals_cpu.to(device=device, dtype=torch.float32, non_blocking=True)
     topk_idx = topk_idx_cpu.to(device=device, dtype=torch.long, non_blocking=True)
+    if label_id_offset:
+        topk_idx = topk_idx + int(label_id_offset)
+    min_idx = int(topk_idx.min().item())
+    max_idx = int(topk_idx.max().item())
+    if min_idx < 0 or max_idx >= int(num_classes):
+        raise ValueError(
+            f"{npz_path} 的 topk_indices 经 offset={label_id_offset} 后越界: "
+            f"min={min_idx}, max={max_idx}, num_classes={num_classes}"
+        )
     if max_centering:
         topk_vals = topk_vals - topk_vals.max(dim=-1, keepdim=True).values
     topk_vals = topk_vals.clamp_min(clamp_min)

@@ -89,12 +89,14 @@ def build_slow_decoder_fn(
         clamp_min = float(data_cfg.get("alocc_clamp_min", -5.0))
         fill_value = float(data_cfg.get("alocc_fill_value", -5.0))
         max_centering = bool(data_cfg.get("alocc_max_centering", False))
+        label_id_offset = int(data_cfg.get("alocc_label_id_offset", 0))
 
         def _decode(path: str) -> torch.Tensor:
             return decode_topk_npz_to_dense_gpu(
                 path, device=device, num_classes=num_classes,
                 clamp_min=clamp_min, fill_value=fill_value,
                 max_centering=max_centering,
+                label_id_offset=label_id_offset,
             )
         return _decode
 

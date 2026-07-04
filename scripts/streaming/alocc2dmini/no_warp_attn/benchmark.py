@@ -28,18 +28,18 @@ from online_ncde.streaming.benchmark_loop import (
     select_benchmark_frames,
 )
 from online_ncde.streaming.benchmark_modes import benchmark_alocc_fast_only
-from online_ncde.streaming.fast_runner import FastRunner
+from online_ncde.streaming.alocc2dmini_runtime import (
+    DEFAULT_BDV2_PKL,
+    DEFAULT_OCCSTUDIO_ROOT,
+    build_alocc2dmini_fast_runner,
+    resolve_cfg_path,
+)
 from online_ncde.streaming.no_warp_attn import NoWarpAttnStreamAligner, build_no_warp_aligner
 from online_ncde.streaming.scene_iterator import build_sample_meta_index, iter_scenes
 
 configure_torch_benchmark_runtime(torch)
 
 
-OCC_ROOT = "/root/autodl-tmp/online_ncde/third_party/OccStudio"
-OCC_CONFIG = "configs/alocc/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.py"
-OCC_CKPT = "ckpts/alocc_2d_mini_r50_256x704_bevdet_preatrain_16f_wo_mask.pth"
-BDV2_PKL = "/root/autodl-tmp/data/nuscenes/bevdetv2-nuscenes_infos_val.pkl"
-GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
 DEFAULT_ALIGNER_CFG = "configs/online_ncde/fast_alocc2dmini__slow_alocc3d/base.yaml"
 DEFAULT_ALIGNER_CKPT = (
     "ckpts/fast_alocc2dmini__slow_alocc3d/"
@@ -51,6 +51,11 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--aligner-cfg", default=DEFAULT_ALIGNER_CFG)
     p.add_argument("--aligner-ckpt", default=DEFAULT_ALIGNER_CKPT)
+    p.add_argument("--occ-root", default=DEFAULT_OCCSTUDIO_ROOT)
+    p.add_argument("--occ-config", default=None)
+    p.add_argument("--occ-ckpt", default=None)
+    p.add_argument("--bevdetv2-pkl", default=DEFAULT_BDV2_PKL)
+    p.add_argument("--gt-root", default=None)
     p.add_argument("--samples", type=int, default=200)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--slow-interval", type=float, default=4.0)
@@ -63,21 +68,14 @@ def parse_args():
     return p.parse_args()
 
 
-def build_fast_runner(data_cfg):
-    fast = FastRunner(
-        occstudio_root=OCC_ROOT,
-        config_path=OCC_CONFIG,
-        ckpt_path=OCC_CKPT,
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        topk_k=int(data_cfg.get("alocc_topk_k", 3)),
-        clamp_min=float(data_cfg.get("alocc_clamp_min", -5.0)),
-        fill_value=float(data_cfg.get("alocc_fill_value", -5.0)),
-        max_centering=bool(data_cfg.get("alocc_max_centering", False)),
+def build_fast_runner(args, data_cfg):
+    return build_alocc2dmini_fast_runner(
+        data_cfg,
+        occstudio_root=args.occ_root,
+        occ_config=args.occ_config,
+        occ_ckpt=args.occ_ckpt,
         device="cuda:0",
     )
-    fast.build()
-    return fast
 
 
 def main():
@@ -85,6 +83,7 @@ def main():
     os.chdir(REPO_ROOT)
     args.aligner_cfg = resolve_repo_path(args.aligner_cfg, REPO_ROOT)
     args.aligner_ckpt = resolve_repo_path(args.aligner_ckpt, REPO_ROOT)
+    args.bevdetv2_pkl = resolve_repo_path(args.bevdetv2_pkl, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
 
@@ -100,12 +99,21 @@ def main():
     print(f"  fast_residual={args.use_fast_residual}")
 
     print("[2] ALOcc2DMini fast runner build ...")
-    fast = build_fast_runner(data_cfg)
+    fast = build_fast_runner(args, data_cfg)
 
     slow_root = resolve_slow_root(data_cfg, REPO_ROOT)
+    gt_root = resolve_cfg_path(data_cfg, "gt_root", REPO_ROOT, args.gt_root)
+    nuscenes_root = resolve_cfg_path(data_cfg, "nuscenes_root", REPO_ROOT)
     slow_format = data_cfg.get("slow_logit_format", data_cfg.get("logits_format", "alocc_dense_topk"))
     print(f"[3] sample meta index (slow_format={slow_format}, slow_root={slow_root}) ...")
-    s2m = build_sample_meta_index(BDV2_PKL, slow_root, GT_ROOT)
+    s2m = build_sample_meta_index(
+        args.bevdetv2_pkl,
+        slow_root,
+        gt_root,
+        dataset_variant=data_cfg.get("dataset_variant", "occ3d"),
+        nuscenes_root=nuscenes_root,
+        nuscenes_version=data_cfg.get("nuscenes_version", "v1.0-trainval"),
+    )
     scenes_meta = list(iter_scenes(fast.dataset, s2m, limit_scenes=None))
     _flat, flat_indices, flat_metas = select_benchmark_frames(
         scenes_meta, args.warmup, args.samples

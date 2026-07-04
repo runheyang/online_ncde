@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import os
 import pickle
+import json
 from dataclasses import dataclass
-from typing import Iterator, List, Tuple
+from typing import Iterator, List, Tuple, Optional
 
 import numpy as np
 from pyquaternion import Quaternion
@@ -38,10 +39,80 @@ def _ego2global_matrix(translation, rotation_wxyz) -> np.ndarray:
     return M
 
 
+def _build_surroundocc_lidar_pose_index(
+    nuscenes_root: str,
+    nuscenes_version: str,
+) -> dict[str, tuple[str, int, np.ndarray]]:
+    """sample_token -> (LIDAR_TOP 文件名, timestamp, lidar2global)。"""
+    table_dir = os.path.join(nuscenes_root, nuscenes_version)
+    sample_path = os.path.join(table_dir, "sample.json")
+    sample_data_path = os.path.join(table_dir, "sample_data.json")
+    calibrated_sensor_path = os.path.join(table_dir, "calibrated_sensor.json")
+    sensor_path = os.path.join(table_dir, "sensor.json")
+    ego_pose_path = os.path.join(table_dir, "ego_pose.json")
+    for table_path in (
+        sample_path,
+        sample_data_path,
+        calibrated_sensor_path,
+        sensor_path,
+        ego_pose_path,
+    ):
+        if not os.path.exists(table_path):
+            raise FileNotFoundError(f"缺少 nuScenes table: {table_path}")
+
+    with open(sample_path, "r", encoding="utf-8") as f:
+        sample = json.load(f)
+    with open(sample_data_path, "r", encoding="utf-8") as f:
+        sample_data = json.load(f)
+    with open(calibrated_sensor_path, "r", encoding="utf-8") as f:
+        calibrated_sensor = json.load(f)
+    with open(sensor_path, "r", encoding="utf-8") as f:
+        sensor = json.load(f)
+    with open(ego_pose_path, "r", encoding="utf-8") as f:
+        ego_pose = json.load(f)
+
+    sensor_by_token = {str(rec["token"]): rec for rec in sensor}
+    calibrated_by_token = {str(rec["token"]): rec for rec in calibrated_sensor}
+    ego_pose_by_token = {str(rec["token"]): rec for rec in ego_pose}
+    sample_ts_by_token = {str(rec["token"]): int(rec["timestamp"]) for rec in sample}
+
+    candidates: dict[str, list[tuple[int, bool, str, int, np.ndarray]]] = {}
+    for rec in sample_data:
+        calibrated = calibrated_by_token.get(str(rec.get("calibrated_sensor_token", "")), {})
+        sensor_rec = sensor_by_token.get(str(calibrated.get("sensor_token", "")), {})
+        if sensor_rec.get("channel") != "LIDAR_TOP":
+            continue
+        sample_token = str(rec.get("sample_token", ""))
+        filename = str(rec.get("filename", ""))
+        if not sample_token or not filename:
+            continue
+        target_ts = sample_ts_by_token.get(sample_token, int(rec.get("timestamp", 0)))
+        timestamp = int(rec.get("timestamp", 0))
+        dt = abs(timestamp - int(target_ts))
+        pose_rec = ego_pose_by_token[str(rec["ego_pose_token"])]
+        ego2global = _ego2global_matrix(pose_rec["translation"], pose_rec["rotation"])
+        lidar2ego = _ego2global_matrix(calibrated["translation"], calibrated["rotation"])
+        lidar2global = (ego2global @ lidar2ego).astype(np.float64)
+        candidates.setdefault(sample_token, []).append(
+            (dt, bool(rec.get("is_key_frame", False)), os.path.basename(filename), timestamp, lidar2global)
+        )
+
+    out: dict[str, tuple[str, int, np.ndarray]] = {}
+    for sample_token, items in candidates.items():
+        _, _, filename, timestamp, lidar2global = sorted(items, key=lambda x: (not x[1], x[0]))[0]
+        out[sample_token] = (filename, timestamp, lidar2global)
+    if not out:
+        raise RuntimeError(f"未能从 {sample_data_path} 建立 LIDAR_TOP 索引")
+    return out
+
+
 def build_sample_meta_index(
     bevdetv2_pkl_path: str,
     slow_logit_root: str,
     gt_root: str,
+    dataset_variant: str = "occ3d",
+    nuscenes_root: Optional[str] = None,
+    nuscenes_version: str = "v1.0-trainval",
 ) -> dict:
     """sample_token -> KeyframeMeta(slow/gt 路径已 absolute).
 
@@ -52,21 +123,33 @@ def build_sample_meta_index(
     """
     with open(bevdetv2_pkl_path, "rb") as f:
         bdv2 = pickle.load(f)
+    variant = str(dataset_variant).strip().lower()
+    lidar_index = None
+    if variant == "surroundocc":
+        if not nuscenes_root:
+            raise ValueError("build_sample_meta_index(surroundocc) 需要 nuscenes_root")
+        lidar_index = _build_surroundocc_lidar_pose_index(nuscenes_root, nuscenes_version)
+
     out = {}
     for e in bdv2["infos"]:
         sample_token = e["token"]
         frame_token = e["cams"]["CAM_FRONT"]["sample_data_token"]
         scene_name = e["scene_name"]
+        timestamp_us = int(e["timestamp"])
         ego = _ego2global_matrix(e["ego2global_translation"], e["ego2global_rotation"])
+        gt_label_path = os.path.join(gt_root, scene_name, sample_token, "labels.npz")
+        if lidar_index is not None:
+            lidar_filename, timestamp_us, ego = lidar_index[sample_token]
+            gt_label_path = os.path.join(gt_root, "samples", f"{lidar_filename}.npy")
         out[sample_token] = KeyframeMeta(
             sample_token=sample_token,
             frame_token=frame_token,
             scene_name=scene_name,
             scene_token=e["scene_token"],
-            timestamp_us=int(e["timestamp"]),
+            timestamp_us=timestamp_us,
             ego2global=ego,
             slow_logit_path=os.path.join(slow_logit_root, scene_name, sample_token, "logits.npz"),
-            gt_label_path=os.path.join(gt_root, scene_name, sample_token, "labels.npz"),
+            gt_label_path=gt_label_path,
         )
     return out
 

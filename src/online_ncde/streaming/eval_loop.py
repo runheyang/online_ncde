@@ -8,20 +8,20 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
 
-from online_ncde.metrics import MetricMiouOcc3D
+from online_ncde.evaluation import attach_dense_occ_targets, compute_dense_miou
 from online_ncde.streaming.slow_cache import SlowLogitsGPUCache
 from online_ncde.streaming.slow_schedule import schedule_slow_steps
 from online_ncde.streaming.stream_aligner import StreamAligner
 from online_ncde.streaming.streaming_loader import make_streaming_loader, scatter_to_device
 
 
-PredictionList = List[Tuple[str, np.ndarray]]
-GtCache = Dict[str, Tuple[np.ndarray, np.ndarray]]
+PredictionList = List[Dict[str, Any]]
+GtCache = Dict[Tuple[str, str], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
 
 
 def cache_one_scene_fast(fast, kf_list, loader_iter) -> List[torch.Tensor]:
@@ -36,14 +36,14 @@ def cache_one_scene_fast(fast, kf_list, loader_iter) -> List[torch.Tensor]:
     return cache
 
 
-def _load_gt_once(meta, gt_cache: GtCache) -> None:
-    if meta.sample_token in gt_cache:
-        return
-    with np.load(meta.gt_label_path, allow_pickle=False) as gt_npz:
-        gt_cache[meta.sample_token] = (
-            gt_npz["semantics"].astype(np.uint8),
-            gt_npz["mask_camera"].astype(np.uint8),
-        )
+def _prediction_record(meta, step: int, pred: np.ndarray) -> Dict[str, Any]:
+    """构造 dense occupancy 评估记录。"""
+    return {
+        "token": meta.sample_token,
+        "scene_name": meta.scene_name,
+        "step_idx": int(step),
+        "pred": pred,
+    }
 
 
 def stream_scene_one_interval(
@@ -55,7 +55,6 @@ def stream_scene_one_interval(
     slow_interval: float,
     device: torch.device,
     pred_list_out: PredictionList,
-    gt_cache: GtCache,
 ) -> Tuple[int, int]:
     """普通 streaming：slow 到达即 reset，其余 keyframe evolve."""
     n_reset, n_evolve = 0, 0
@@ -89,8 +88,7 @@ def stream_scene_one_interval(
             n_evolve += 1
 
         pred_uint8 = aligned.argmax(0).to(torch.uint8).cpu().numpy()
-        pred_list_out.append((meta.sample_token, pred_uint8))
-        _load_gt_once(meta, gt_cache)
+        pred_list_out.append(_prediction_record(meta, step, pred_uint8))
 
     return n_reset, n_evolve
 
@@ -154,7 +152,6 @@ def stream_scene_one_interval_delayed(
     slow_delay_kf: int,
     device: torch.device,
     pred_list_out: PredictionList,
-    gt_cache: GtCache,
 ) -> Tuple[int, int, int]:
     """delayed slow 注入版本；slow 到达前输出 fast."""
     n_reset, n_evolve, n_fast_only = 0, 0, 0
@@ -213,33 +210,78 @@ def stream_scene_one_interval_delayed(
                 n_fast_only += 1
 
         pred_uint8 = aligned.argmax(0).to(torch.uint8).cpu().numpy()
-        pred_list_out.append((meta.sample_token, pred_uint8))
-        _load_gt_once(meta, gt_cache)
+        pred_list_out.append(_prediction_record(meta, step, pred_uint8))
 
     return n_reset, n_evolve, n_fast_only
 
 
-def eval_miou(pred_list: PredictionList, gt_cache: GtCache, num_classes: int):
-    """返回 mIoU、mIoU_D、逐类 IoU 和 metric 对象."""
-    metric = MetricMiouOcc3D(
-        num_classes=num_classes,
+def _cfg_path(data_cfg: dict, key: str) -> Optional[str]:
+    value = data_cfg.get(key, None)
+    if not value:
+        return None
+    return value if os.path.isabs(str(value)) else os.path.abspath(str(value))
+
+
+def _dataset_variant(data_cfg: dict) -> str:
+    return str(data_cfg.get("dataset_variant", "occ3d")).strip().lower()
+
+
+def _metric_variant(data_cfg: dict) -> str:
+    return str(data_cfg.get("metric_variant", _dataset_variant(data_cfg))).strip().lower()
+
+
+def _attach_targets(pred_list: PredictionList, data_cfg: dict, gt_cache: GtCache) -> List[Dict[str, Any]]:
+    """按 data_cfg 的数据集类型补齐 GT/mask。"""
+    gt_root = _cfg_path(data_cfg, "gt_root")
+    if not gt_root:
+        raise ValueError("streaming eval 需要 data.gt_root")
+    attached, missing = attach_dense_occ_targets(
+        pred_list,
+        dataset_variant=_dataset_variant(data_cfg),
+        gt_root=gt_root,
+        gt_mask_key=str(data_cfg.get("gt_mask_key", "mask_camera")),
+        grid_size=tuple(data_cfg.get("grid_size", (200, 200, 16))),
+        nuscenes_root=_cfg_path(data_cfg, "nuscenes_root"),
+        nuscenes_version=str(data_cfg.get("nuscenes_version", "v1.0-trainval")),
+        gt_cache=gt_cache,
+    )
+    if missing:
+        print(f"  [metric] 跳过 {missing} 个缺少 GT 的预测")
+    return attached
+
+
+def eval_miou(pred_list: PredictionList, data_cfg: dict, gt_cache: GtCache):
+    """返回 mIoU、mIoU_D、逐类 IoU、类别名、payload 和附 GT 记录。"""
+    attached = _attach_targets(pred_list, data_cfg, gt_cache)
+    metric_payload = compute_dense_miou(
+        attached,
+        num_classes=int(data_cfg["num_classes"]),
         use_lidar_mask=False,
         use_image_mask=True,
+        metric_variant=_metric_variant(data_cfg),
+    )["all"]
+    miou = metric_payload.get("miou", None)
+    miou_d = metric_payload.get("miou_d", None)
+    per_cls = np.asarray(metric_payload.get("per_class_iou", []), dtype=np.float64)
+    class_names = list(metric_payload.get("class_names", []))
+    return (
+        float(miou) if miou is not None else float("nan"),
+        float(miou_d) if miou_d is not None else float("nan"),
+        per_cls,
+        class_names,
+        metric_payload,
+        attached,
     )
-    for token, pred in pred_list:
-        gt, mask = gt_cache[token]
-        metric.add_batch(pred, gt, mask_camera=mask)
-    miou = metric.count_miou(verbose=False)
-    per_cls = metric.per_class_iu(metric.hist) * 100.0
-    miou_d = metric.count_miou_d(verbose=False, class_iou=per_cls / 100.0)
-    return float(miou), float(miou_d), per_cls, metric
 
 
 def print_per_class_iou(per_cls, class_names, miou, miou_d, label: str = "") -> None:
     """逐类 IoU 紧凑打印."""
     if label:
         print(f"  {label}")
-    sem_count = len(class_names) - 1
+    if len(class_names) == 0 or len(per_cls) == 0:
+        print(f"    no valid GT samples    ->  mIoU = {miou:.2f}   mIoU_D = {miou_d:.2f}")
+        return
+    sem_count = min(len(class_names), len(per_cls)) - 1
     cells = [f"{class_names[i]}={per_cls[i]:5.2f}" for i in range(sem_count)]
     line, lines, max_per_line = "", [], 4
     for j, cell in enumerate(cells, 1):
@@ -251,20 +293,25 @@ def print_per_class_iou(per_cls, class_names, miou, miou_d, label: str = "") -> 
         lines.append(line.rstrip())
     for ln in lines:
         print(f"    {ln}")
-    print(f"    free={per_cls[-1]:.2f}    ->  mIoU = {miou:.2f}   mIoU_D = {miou_d:.2f}")
+    free_iou = float(per_cls[min(len(per_cls), len(class_names)) - 1])
+    print(f"    free={free_iou:.2f}    ->  mIoU = {miou:.2f}   mIoU_D = {miou_d:.2f}")
 
 
-def eval_rayiou(pred_list: PredictionList, gt_cache: GtCache, origins_by_token: dict):
+def eval_rayiou(records: PredictionList, origins_by_token: dict):
     from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
 
     sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
     skipped = 0
-    for token, pred in pred_list:
+    for item in records:
+        token = str(item.get("token", ""))
         if token not in origins_by_token:
             skipped += 1
             continue
-        gt, _ = gt_cache[token]
-        sem_pred_list.append(pred)
+        gt = item.get("gt", None)
+        if gt is None:
+            skipped += 1
+            continue
+        sem_pred_list.append(np.asarray(item["pred"]))
         sem_gt_list.append(gt)
         lidar_origin_list.append(origins_by_token[token])
     if skipped:
@@ -345,7 +392,6 @@ def run_streaming_eval(
                     slow_delay_keyframes,
                     device,
                     pred_list_out=predictions[interval],
-                    gt_cache=gt_cache,
                 )
                 fast_only_cnt[interval] += n_f
             else:
@@ -358,7 +404,6 @@ def run_streaming_eval(
                     interval,
                     device,
                     pred_list_out=predictions[interval],
-                    gt_cache=gt_cache,
                 )
             reset_cnt[interval] += n_r
             evolve_cnt[interval] += n_e
@@ -377,25 +422,32 @@ def run_streaming_eval(
             )
 
     inference_wall = time.time() - t_overall
-    print(f"\n[6] Phase 1 完成: wall={inference_wall:.1f}s, GT/mask cache={len(gt_cache)} samples")
+    print(f"\n[6] Phase 1 完成: wall={inference_wall:.1f}s, predictions={total_kf} per interval")
 
     print("\n[7] Phase 2a: mIoU ...")
     miou_results, miou_d_results, per_cls_results = {}, {}, {}
+    class_names_results, metric_payloads, attached_predictions = {}, {}, {}
     for interval in slow_intervals:
-        miou, miou_d, per_cls, metric = eval_miou(
-            predictions[interval], gt_cache, data_cfg["num_classes"]
+        miou, miou_d, per_cls, class_names, payload, attached = eval_miou(
+            predictions[interval], data_cfg, gt_cache
         )
         miou_results[interval] = miou
         miou_d_results[interval] = miou_d
         per_cls_results[interval] = per_cls
+        class_names_results[interval] = class_names
+        metric_payloads[interval] = payload
+        attached_predictions[interval] = attached
         label = f"[interval={interval}s"
         if delayed:
             label += f", delay={slow_delay_keyframes}kf"
         label += "]"
-        print_per_class_iou(per_cls, metric.class_names, miou, miou_d, label=label)
+        print_per_class_iou(per_cls, class_names, miou, miou_d, label=label)
+        if "occupied_iou" in payload:
+            print(f"    occupied_iou = {payload['occupied_iou']:.2f}")
 
     rayiou_results = {}
-    if not no_rayiou:
+    metric_variant = _metric_variant(data_cfg)
+    if not no_rayiou and metric_variant == "occ3d":
         print("\n[8] Phase 2b: RayIoU ...")
         from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
 
@@ -403,28 +455,35 @@ def run_streaming_eval(
         print(f"  loaded {len(origins_by_token)} origins from {sweep_pkl}")
         for interval in slow_intervals:
             print(f"\n  --- interval={interval} ---")
-            r = eval_rayiou(predictions[interval], gt_cache, origins_by_token)
+            r = eval_rayiou(attached_predictions[interval], origins_by_token)
             rayiou_results[interval] = r
             print(
                 f"  RayIoU={r['RayIoU']:.4f}  @1={r['RayIoU@1']:.4f}  "
                 f"@2={r['RayIoU@2']:.4f}  @4={r['RayIoU@4']:.4f}"
             )
     else:
-        print("\n[8] Phase 2b: RayIoU skipped (--no-rayiou)")
+        reason = "--no-rayiou" if no_rayiou else f"metric_variant={metric_variant}"
+        print(f"\n[8] Phase 2b: RayIoU skipped ({reason})")
 
     suffix = f", slow_delay={slow_delay_keyframes}kf" if delayed else ""
     print(f"\n=== 最终汇总 ({total_kf} keyframes, {len(scenes_meta)} scenes{suffix}) ===")
     print(f"  inference wall: {inference_wall:.1f}s")
-    header = (
-        f"  {'interval':>10s}  {'mIoU':>7s}  {'mIoU_D':>7s}  {'RayIoU':>7s}  "
-        f"{'@1':>6s}  {'@2':>6s}  {'@4':>6s}  {'reset':>6s}  {'evolve':>7s}"
-    )
+    show_rayiou_cols = metric_variant == "occ3d"
+    show_occupied_iou = any("occupied_iou" in metric_payloads[it] for it in slow_intervals)
+    header = f"  {'interval':>10s}  {'mIoU':>7s}  {'mIoU_D':>7s}"
+    if show_occupied_iou:
+        header += f"  {'OccIoU':>7s}"
+    if show_rayiou_cols:
+        header += f"  {'RayIoU':>7s}  {'@1':>6s}  {'@2':>6s}  {'@4':>6s}"
+    header += f"  {'reset':>6s}  {'evolve':>7s}"
     if delayed:
         header += f"  {'fastonly':>8s}"
     print(header)
 
     out = {
         "fast_backend": fast_backend,
+        "dataset_variant": _dataset_variant(data_cfg),
+        "metric_variant": metric_variant,
         "scenes": len(scenes_meta),
         "total_kf": total_kf,
         "inference_wall_s": float(inference_wall),
@@ -435,31 +494,31 @@ def run_streaming_eval(
     if extra_out:
         out.update(extra_out)
 
-    class_names = MetricMiouOcc3D(num_classes=data_cfg["num_classes"]).class_names
     for interval in slow_intervals:
+        class_names = class_names_results[interval]
         r = rayiou_results.get(interval, {})
         ri = r.get("RayIoU", float("nan"))
         ri1 = r.get("RayIoU@1", float("nan"))
         ri2 = r.get("RayIoU@2", float("nan"))
         ri4 = r.get("RayIoU@4", float("nan"))
-        row = (
-            f"  {interval:>10.2f}  {miou_results[interval]:>7.2f}  "
-            f"{miou_d_results[interval]:>7.2f}  {ri:>7.4f}  {ri1:>6.4f}  "
-            f"{ri2:>6.4f}  {ri4:>6.4f}  {reset_cnt[interval]:>6d}  "
-            f"{evolve_cnt[interval]:>7d}"
-        )
+        row = f"  {interval:>10.2f}  {miou_results[interval]:>7.2f}  {miou_d_results[interval]:>7.2f}"
+        if show_occupied_iou:
+            occ_iou = metric_payloads[interval].get("occupied_iou", float("nan"))
+            row += f"  {occ_iou:>7.2f}"
+        if show_rayiou_cols:
+            row += f"  {ri:>7.4f}  {ri1:>6.4f}  {ri2:>6.4f}  {ri4:>6.4f}"
+        row += f"  {reset_cnt[interval]:>6d}  {evolve_cnt[interval]:>7d}"
         if delayed:
             row += f"  {fast_only_cnt[interval]:>8d}"
         print(row)
 
-        per_cls_dict = {
-            class_names[i]: float(per_cls_results[interval][i])
-            for i in range(data_cfg["num_classes"])
-        }
+        n_cls = min(len(class_names), len(per_cls_results[interval]), int(data_cfg["num_classes"]))
+        per_cls_dict = {class_names[i]: float(per_cls_results[interval][i]) for i in range(n_cls)}
         item = {
             "miou": float(miou_results[interval]),
             "miou_d": float(miou_d_results[interval]),
             "per_class_iou": per_cls_dict,
+            "num_keyframes": int(metric_payloads[interval].get("num_keyframes", 0)),
             "rayiou": float(ri) if not np.isnan(ri) else None,
             "rayiou_at_1": float(ri1) if not np.isnan(ri1) else None,
             "rayiou_at_2": float(ri2) if not np.isnan(ri2) else None,
@@ -467,6 +526,8 @@ def run_streaming_eval(
             "n_reset": int(reset_cnt[interval]),
             "n_evolve": int(evolve_cnt[interval]),
         }
+        if "occupied_iou" in metric_payloads[interval]:
+            item["occupied_iou"] = metric_payloads[interval]["occupied_iou"]
         if delayed:
             item["n_fast_only"] = int(fast_only_cnt[interval])
         out["intervals"][_interval_key(interval)] = item

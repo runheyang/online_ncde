@@ -32,19 +32,27 @@ def _unwrap_alocc_batch_for_simple_test(batch):
 def benchmark_alocc_fast_only(fast, raw_batches, warmup: int, samples: int):
     """ALOcc 官方 simple_test 路径，包含 softmax/argmax/cpu."""
     fast.reset_history()
+    old_cal_metric = getattr(fast.model, "cal_metric_in_model", None)
+    if old_cal_metric is not None:
+        # benchmark 只统计模型前向，不把 OccStudio 内部 mIoU 计算算进耗时。
+        fast.model.cal_metric_in_model = False
 
     def step(raw):
         batch = scatter_to_device(raw, 0)
         pts, metas, img = _unwrap_alocc_batch_for_simple_test(batch)
         return fast.model.simple_test(pts, metas, img)
 
-    return benchmark_callable(
-        "fast-only",
-        raw_batches,
-        warmup,
-        samples,
-        step,
-    )
+    try:
+        return benchmark_callable(
+            "fast-only",
+            raw_batches,
+            warmup,
+            samples,
+            step,
+        )
+    finally:
+        if old_cal_metric is not None:
+            fast.model.cal_metric_in_model = old_cal_metric
 
 
 def _take_single_aug(x):
