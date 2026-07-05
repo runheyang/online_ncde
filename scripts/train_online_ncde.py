@@ -34,7 +34,7 @@ except RuntimeError:
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
-from online_ncde.config import load_config_with_base  # noqa: E402
+from online_ncde.config import config_output_subdir, load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
 from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
@@ -451,8 +451,8 @@ def main() -> None:
             resumed_wandb_id = None
         del _ckpt_payload
     else:
-        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
-        output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
+        config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
+        output_base = os.path.join(str(ROOT), "outputs", config_subdir)
         if use_ddp:
             if rank == 0:
                 ts_tensor = torch.tensor(

@@ -10,7 +10,7 @@
 
 用法示例：
     python tests/online_ncde/eval_ray_depth_stats_slow_current.py \
-        --config configs/online_ncde/.../base.yaml --limit 50
+        --config configs/online_ncde/<配置名>.yaml --limit 50
 
 统计内容（与 eval_ray_depth_stats.py 一致，只是把 aligned 换成 slow_current）：
   1. 每条 ray 的 GT/Pred first-hit depth、abs 深度误差

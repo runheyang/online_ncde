@@ -51,7 +51,7 @@ from train_online_ncde import (  # noqa: E402
 )
 
 from online_ncde.baselines import NeuralOdeDtAligner  # noqa: E402
-from online_ncde.config import load_config_with_base  # noqa: E402
+from online_ncde.config import config_output_subdir, load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
@@ -299,10 +299,10 @@ def main() -> None:
             resumed_wandb_id = None
         del _ckpt_payload
     else:
-        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+        config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(
             str(ROOT), "outputs", "baselines", "neural_ode_dt",
-            os.path.dirname(config_rel),
+            config_subdir,
         )
         if use_ddp:
             if rank == 0:

@@ -40,7 +40,7 @@ from train_online_ncde import (  # noqa: E402
 )
 
 from online_ncde.baselines import StreamingFlowBEVOdeAligner  # noqa: E402
-from online_ncde.config import load_config, load_config_with_base, merge_dict  # noqa: E402
+from online_ncde.config import config_output_subdir, load_config, load_config_with_base, merge_dict  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.evaluation import evaluate_dense_occ  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
@@ -283,9 +283,9 @@ def main() -> None:
         output_dir = os.path.dirname(os.path.abspath(args.resume))
         run_timestamp = os.path.basename(output_dir)
     else:
-        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+        config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(
-            str(ROOT), "outputs", "baselines", "streamingflow_bev_ode", os.path.dirname(config_rel)
+            str(ROOT), "outputs", "baselines", "streamingflow_bev_ode", config_subdir
         )
         if use_ddp:
             if is_main:

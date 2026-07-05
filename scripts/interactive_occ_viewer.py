@@ -23,7 +23,7 @@ warp 越界（旧视角的某点跑出 curr pc_range）取 free_index。
 
 用法:
     python scripts/interactive_occ_viewer.py \
-        --config configs/online_ncde/fast_alocc2dmini__slow_alocc3d/base.yaml \
+        --config configs/online_ncde/fast_alocc2dmini__slow_alocc3d.yaml \
         --checkpoint ckpts/.../epoch_9.pth
 
 操作:

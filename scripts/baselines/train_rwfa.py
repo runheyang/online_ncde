@@ -65,7 +65,7 @@ from train_online_ncde import (  # noqa: E402
 )
 
 from online_ncde.baselines import RecurrentWarpFusionAligner  # noqa: E402
-from online_ncde.config import load_config_with_base  # noqa: E402
+from online_ncde.config import config_output_subdir, load_config_with_base  # noqa: E402
 from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
 from online_ncde.losses import build_loss  # noqa: E402
 from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
@@ -362,8 +362,8 @@ def main() -> None:
     if args.resume:
         output_dir = os.path.dirname(os.path.abspath(args.resume))
     else:
-        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
-        output_base = os.path.join(str(ROOT), "outputs", "baselines", args.model_kind, os.path.dirname(config_rel))
+        config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
+        output_base = os.path.join(str(ROOT), "outputs", "baselines", args.model_kind, config_subdir)
         if use_ddp:
             # 各 rank 时间戳可能不同，必须从 rank 0 广播一份
             if rank == 0:

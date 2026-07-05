@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "src") not in sys.path:
     sys.path.append(str(ROOT / "src"))
 
-from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
+from online_ncde.config import config_output_subdir, load_config_with_base, resolve_path  # noqa: E402
 from online_ncde.data.ego_warp_list import (  # noqa: E402
     backward_warp_dense_trilinear,
     build_sampling_grid,
@@ -622,8 +622,8 @@ def main() -> None:
         run.define_metric("val/*", step_metric="epoch")
 
     # 从 config 路径推导输出目录
-    config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
-    output_base = os.path.join(str(ROOT), "outputs", os.path.dirname(config_rel))
+    config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
+    output_base = os.path.join(str(ROOT), "outputs", config_subdir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(output_base, f"{timestamp}_euler_next_fast")
     os.makedirs(output_dir, exist_ok=True)

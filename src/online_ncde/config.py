@@ -51,6 +51,26 @@ def resolve_path(root_path: str, path: str) -> str:
     return os.path.join(root_path, path)
 
 
+def config_output_subdir(config_path: str, configs_root: str | None = None) -> str:
+    """根据配置文件路径生成稳定输出子目录。"""
+    config_abs = os.path.abspath(os.path.expanduser(config_path))
+    rel_path = None
+
+    if configs_root:
+        configs_abs = os.path.abspath(os.path.expanduser(configs_root))
+        try:
+            if os.path.commonpath([config_abs, configs_abs]) == configs_abs:
+                rel_path = os.path.relpath(config_abs, configs_abs)
+        except ValueError:
+            rel_path = None
+
+    if rel_path is None:
+        rel_path = os.path.basename(config_abs)
+
+    rel_no_ext = os.path.splitext(rel_path)[0]
+    return rel_no_ext or os.path.splitext(os.path.basename(config_abs))[0]
+
+
 def load_config_with_base(path: str) -> Dict[str, Any]:
     """支持 base_config 的递归配置加载。自动注入 root_path。"""
     cfg = _load_config_recursive(path)
@@ -68,5 +88,3 @@ def _load_config_recursive(path: str) -> Dict[str, Any]:
         base_cfg = _load_config_recursive(base_abs)
         return merge_dict(base_cfg, cfg)
     return cfg
-
-
