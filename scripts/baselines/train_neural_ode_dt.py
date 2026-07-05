@@ -374,8 +374,7 @@ def main() -> None:
                 f"[train] epoch={epoch} "
                 f"loss={train_metrics['loss']:.4f} "
                 f"focal={train_metrics['focal']:.4f} "
-                f"aux={train_metrics['aux']:.4f} "
-                f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"aux={train_metrics['aux']:.4f}"
                 f"{kl_text}{ray_text}{sup_text}"
             )
             if run is not None:

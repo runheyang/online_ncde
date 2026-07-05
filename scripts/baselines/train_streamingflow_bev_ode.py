@@ -328,8 +328,7 @@ def main() -> None:
         if is_main:
             print(
                 f"[train] epoch={epoch} loss={train_metrics['loss']:.4f} "
-                f"focal={train_metrics['focal']:.4f} aux={train_metrics['aux']:.4f} "
-                f"state={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"focal={train_metrics['focal']:.4f} aux={train_metrics['aux']:.4f}"
             )
             if run is not None:
                 payload = {f"train/{k}": float(v) for k, v in train_metrics.items()}
