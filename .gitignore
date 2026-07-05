@@ -62,4 +62,4 @@ Auto-claude-code-research-in-sleep
 scripts/ray_tuing_runs_opus
 *.png
 *.jpg
-tests/online_ncde/*.json
+tests/evoocc/*.json

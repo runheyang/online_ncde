@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """No-warp motion-conditioned attention baseline 评估入口。
 
-复用 scripts/eval_online_ncde.py 的 dataset / loader / Trainer.evaluate /
-mIoU + RayIoU 流程，只把 OnlineNcdeAligner 替换为 NoWarpMotionBiasAttnAligner。
+复用 scripts/eval_evoocc.py 的 dataset / loader / Trainer.evaluate /
+mIoU + RayIoU 流程，只把 EvoOccAligner 替换为 NoWarpMotionBiasAttnAligner。
 
 示例：
     python scripts/baselines/eval_no_warp_attn.py \
@@ -19,19 +19,19 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 sys.path.append(str(ROOT / "scripts"))
 
-import eval_online_ncde as upstream  # noqa: E402
-from online_ncde.baselines import NoWarpMotionBiasAttnAligner  # noqa: E402
+import eval_evoocc as upstream  # noqa: E402
+from evoocc.baselines import NoWarpMotionBiasAttnAligner  # noqa: E402
 
 
 class _NoWarpAsAlignerCallable:
-    """让 NoWarpMotionBiasAttnAligner 与 OnlineNcdeAligner 构造签名兼容。"""
+    """让 NoWarpMotionBiasAttnAligner 与 EvoOccAligner 构造签名兼容。"""
 
     def __init__(self, model_cfg: dict, use_fast_residual: bool) -> None:
         self._model_cfg = model_cfg
         self._use_fast_residual = bool(use_fast_residual)
 
     def _resolve_attn_channels(self) -> tuple[int, int]:
-        """与 train_no_warp_attn.py 保持一致：默认走 NCDE 主干 24 维。"""
+        """与 train_no_warp_attn.py 保持一致：默认走 EvoOcc 主干 24 维。"""
         cfg = self._model_cfg
         inner_dim = int(cfg.get("no_warp_inner_dim", cfg.get("func_g_inner_dim", 24)))
         num_heads = int(cfg.get("no_warp_attn_num_heads", 3))
@@ -52,11 +52,11 @@ class _NoWarpAsAlignerCallable:
         voxel_size,
         decoder_init_scale=1.0e-3,
         use_fast_residual=True,
-        func_g_inner_dim=32,           # NCDE-only，忽略
-        func_g_body_dilations=(1, 2, 3),  # NCDE-only，忽略
-        func_g_gn_groups=8,            # NCDE-only，忽略
+        func_g_inner_dim=32,           # EvoOcc-only，忽略
+        func_g_body_dilations=(1, 2, 3),  # EvoOcc-only，忽略
+        func_g_gn_groups=8,            # EvoOcc-only，忽略
         timestamp_scale=1.0e-6,
-        solver_variant=None,           # NCDE-only，忽略
+        solver_variant=None,           # EvoOcc-only，忽略
     ):
         cfg = self._model_cfg
         resolved_use_fast_residual = self._use_fast_residual
@@ -123,12 +123,12 @@ def main() -> None:
         upstream.main()
         return
 
-    from online_ncde.config import load_config_with_base
+    from evoocc.config import load_config_with_base
 
     cfg = load_config_with_base(config_path)
     model_cfg = cfg.get("model", {})
 
-    upstream.OnlineNcdeAligner = _NoWarpAsAlignerCallable(
+    upstream.EvoOccAligner = _NoWarpAsAlignerCallable(
         model_cfg=model_cfg,
         use_fast_residual=use_fast_residual_override,
     )

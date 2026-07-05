@@ -19,13 +19,13 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
-from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
-from online_ncde.data.ego_warp_list import backward_warp_dense_trilinear  # noqa: E402
-from online_ncde.data.logits_io import (  # noqa: E402
+from evoocc.config import load_config_with_base, resolve_path  # noqa: E402
+from evoocc.data.ego_warp_list import backward_warp_dense_trilinear  # noqa: E402
+from evoocc.data.logits_io import (  # noqa: E402
     decode_single_frame_sparse_topk,
     load_logits_npz,
 )
-from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
+from evoocc.metrics import MetricMiouOcc3D  # noqa: E402
 
 try:
     import progressbar

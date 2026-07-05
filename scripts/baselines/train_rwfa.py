@@ -3,18 +3,18 @@
 
 设计：复用 trainer / dataset / loss / RayIoU 的全套 wiring，只把 model 构造
 换成 RecurrentWarpFusionAligner（fusion_kind=conv 或 attn）。RWFA 的 forward
-接口与 OnlineNcdeAligner 完全一致（default / stepwise_train / stepwise_eval、
+接口与 EvoOccAligner 完全一致（default / stepwise_train / stepwise_eval、
 _fast_kl_active 协议），trainer 内部不需要任何分支改动。
 
-DDP 启动方式与 train_online_ncde.py 一致，例如：
+DDP 启动方式与 train_evoocc.py 一致，例如：
     torchrun --nproc_per_node=2 scripts/baselines/train_rwfa.py --config <yaml>
 单卡时直接 python 调用即可。
 
 精简掉的功能（baseline 实验场景一般不需要，需要时再扩）：
   - 分箱 RayIoU / metrics json
 
-CLI 与 train_online_ncde.py 兼容子集：相同 config 文件可直接复用。attn 分支默认
-使用 hidden/state=32、fusion_inner_dim=func_g_inner_dim(24)，对齐 NCDE 计算维度。
+CLI 与 train_evoocc.py 兼容子集：相同 config 文件可直接复用。attn 分支默认
+使用 hidden/state=32、fusion_inner_dim=func_g_inner_dim(24)，对齐 EvoOcc 计算维度。
 baseline 默认关闭 fast residual / fast KL，并训练 10 epoch；--epochs 可覆盖训练轮数。
 """
 
@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 torch.backends.cudnn.benchmark = True
-# 与 train_online_ncde 对齐：fp32 + TF32
+# 与 train_evoocc 对齐：fp32 + TF32
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -51,10 +51,10 @@ except RuntimeError:
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
-sys.path.append(str(ROOT / "scripts"))  # 复用 train_online_ncde 中的 helper
+sys.path.append(str(ROOT / "scripts"))  # 复用 train_evoocc 中的 helper
 
 # 复用主训练脚本里已经写好的 helper，避免重复实现
-from train_online_ncde import (  # noqa: E402
+from train_evoocc import (  # noqa: E402
     build_dataset,
     build_scheduler,
     build_subset,
@@ -64,14 +64,14 @@ from train_online_ncde import (  # noqa: E402
     to_float,
 )
 
-from online_ncde.baselines import RecurrentWarpFusionAligner  # noqa: E402
-from online_ncde.config import config_output_subdir, load_config_with_base  # noqa: E402
-from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.losses import build_loss  # noqa: E402
-from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
-from online_ncde.utils.ema import ModelEMA  # noqa: E402
-from online_ncde.utils.reproducibility import set_seed  # noqa: E402
+from evoocc.baselines import RecurrentWarpFusionAligner  # noqa: E402
+from evoocc.config import config_output_subdir, load_config_with_base  # noqa: E402
+from evoocc.data.build_logits_loader import build_logits_loader  # noqa: E402
+from evoocc.losses import build_loss  # noqa: E402
+from evoocc.trainer import Trainer, evoocc_collate  # noqa: E402
+from evoocc.utils.checkpoints import load_checkpoint  # noqa: E402
+from evoocc.utils.ema import ModelEMA  # noqa: E402
+from evoocc.utils.reproducibility import set_seed  # noqa: E402
 
 try:
     import wandb
@@ -81,7 +81,7 @@ except Exception:  # pragma: no cover
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="配置文件路径（与 NCDE 同 config 兼容）")
+    parser.add_argument("--config", required=True, help="配置文件路径（与 EvoOcc 同 config 兼容）")
     parser.add_argument(
         "--model-kind",
         choices=["rwfa-conv", "rwfa-attn"],
@@ -121,7 +121,7 @@ def _cleanup_gpu_cache() -> None:
 
 
 def _resolve_fusion_channels(model_kind: str, model_cfg: dict) -> tuple[int, int]:
-    """解析 RWFA 主干计算维度；attn 默认对齐 NCDE 的 func_g_inner_dim。"""
+    """解析 RWFA 主干计算维度；attn 默认对齐 EvoOcc 的 func_g_inner_dim。"""
     if model_kind == "rwfa-attn":
         inner_dim = int(model_cfg.get("fusion_inner_dim", model_cfg.get("func_g_inner_dim", 24)))
         num_heads = int(model_cfg.get("fusion_attn_num_heads", 3))
@@ -298,7 +298,7 @@ def main() -> None:
     train_loader_kwargs = dict(
         batch_size=int(train_cfg["batch_size"]), num_workers=num_workers,
         shuffle=(train_sampler is None), sampler=train_sampler,
-        collate_fn=online_ncde_collate, pin_memory=loader_cfg.get("pin_memory", False),
+        collate_fn=evoocc_collate, pin_memory=loader_cfg.get("pin_memory", False),
     )
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
@@ -311,7 +311,7 @@ def main() -> None:
         val_workers = int(eval_cfg.get("num_workers", num_workers))
         val_loader_kwargs = dict(
             batch_size=int(eval_cfg.get("batch_size", 1)), num_workers=val_workers, shuffle=False,
-            collate_fn=online_ncde_collate, pin_memory=loader_cfg.get("pin_memory", False),
+            collate_fn=evoocc_collate, pin_memory=loader_cfg.get("pin_memory", False),
         )
         if val_workers > 0:
             val_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
@@ -414,7 +414,7 @@ def main() -> None:
     enable_rayiou = (not args.no_rayiou) and (val_loader is not None)
     sweep_pkl_abs = None
     if enable_rayiou:
-        from online_ncde.config import resolve_path
+        from evoocc.config import resolve_path
         sweep_pkl_abs = resolve_path(
             root_path,
             eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl"),
@@ -478,8 +478,8 @@ def main() -> None:
 
             rayiou_result = None
             if enable_rayiou and "predictions" in val_metrics:
-                from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-                from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+                from evoocc.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+                from evoocc.ops.dvr.ray_metrics import main as calc_rayiou
                 origins_by_token = load_origins_from_sweep_pkl(sweep_pkl_abs)
                 sem_pred_list, sem_gt_list, lidar_origin_list = [], [], []
                 for item in val_metrics["predictions"]:

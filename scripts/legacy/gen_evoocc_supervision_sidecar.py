@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate 4-step supervision sidecar for transport_online_nde."""
+"""为 EvoOcc 生成 4 时刻监督 sidecar（t-1.5, t-1.0, t-0.5, t）。"""
 
 from __future__ import annotations
 
@@ -31,15 +31,12 @@ EMPTY_MASK4 = [0, 0, 0, 0]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root-path", default=str(ROOT), help="Repository root")
-    parser.add_argument("--info-path", required=True, help="Input evoocc_align_infos_*.pkl")
+    parser.add_argument("--root-path", default=str(ROOT), help="仓库根目录")
+    parser.add_argument("--info-path", required=True, help="输入 evoocc_align_infos_*.pkl")
     parser.add_argument(
         "--output",
         default="",
-        help=(
-            "Output sidecar path. If empty, save to "
-            "configs/transport_online_nde/<info_stem>_sup4_sidecar.pkl"
-        ),
+        help="输出 sidecar 路径；空则默认写到与 info 同目录，文件名追加 _sup4_sidecar.pkl",
     )
     parser.add_argument(
         "--nusc-dataroot",
@@ -49,27 +46,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--nusc-version",
         default="v1.0-trainval",
-        help="NuScenes version",
+        help="NuScenes 版本",
     )
     parser.add_argument(
-        "--occ-gt-root",
+        "--gt-root",
         default="data/nuscenes/gts",
-        help="Occupancy GT root containing labels.npz",
-    )
-    parser.add_argument(
-        "--motion-gt-root",
-        default="data/nuscenes/gts_uniocc_occ3d",
-        help="Motion GT root containing gts.npz",
+        help="GT 根目录",
     )
     return parser.parse_args()
 
 
-def build_output_path(root_path: str, info_path: str, output: str) -> str:
+def build_output_path(info_path: str, output: str) -> str:
     if output:
-        return resolve_path(root_path, output)
+        return output
     info = Path(info_path)
-    out_dir = Path(resolve_path(root_path, "configs/transport_online_nde"))
-    return str(out_dir / f"{info.stem}_sup4_sidecar{info.suffix}")
+    stem = info.stem + "_sup4_sidecar"
+    return str(info.with_name(stem + info.suffix))
 
 
 def load_infos(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -82,16 +74,16 @@ def load_infos(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         infos = payload
         meta = {}
     if not isinstance(infos, list):
-        raise TypeError(f"Unexpected infos type: {type(infos)}")
+        raise TypeError(f"infos 类型异常: {type(infos)}")
     return infos, meta
 
 
 def collect_target_tokens(sample_table: dict[str, dict[str, Any]], curr_token: str) -> list[str]:
-    """Return keyframe sample tokens ordered as [t-1.5, t-1.0, t-0.5, t]."""
+    """返回按 [t-1.5, t-1.0, t-0.5, t] 顺序排列的 keyframe sample token。"""
     curr = curr_token
-    chain = [curr]
+    chain = [curr]  # [t, t-0.5, t-1.0, t-1.5]
     for _ in range(3):
-        sample = sample_table.get(curr)
+        sample = sample_table.get(curr, None)
         if sample is None:
             break
         prev_token = str(sample.get("prev", ""))
@@ -99,7 +91,7 @@ def collect_target_tokens(sample_table: dict[str, dict[str, Any]], curr_token: s
             break
         chain.append(prev_token)
         curr = prev_token
-    chain = chain[::-1]
+    chain = chain[::-1]  # oldest -> current
     if len(chain) < 4:
         chain = [""] * (4 - len(chain)) + chain
     elif len(chain) > 4:
@@ -107,20 +99,13 @@ def collect_target_tokens(sample_table: dict[str, dict[str, Any]], curr_token: s
     return chain
 
 
-def build_gt_paths(scene_name: str, sample_token: str) -> tuple[str, str]:
-    occ_rel_path = os.path.join(scene_name, sample_token, "labels.npz")
-    motion_rel_path = os.path.join(scene_name, sample_token, "gts.npz")
-    return occ_rel_path, motion_rel_path
-
-
 def main() -> None:
     args = parse_args()
     root_path = args.root_path
     info_path = resolve_path(root_path, args.info_path)
-    output_path = build_output_path(root_path=root_path, info_path=info_path, output=args.output)
+    output_path = resolve_path(root_path, build_output_path(info_path, args.output))
     nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)
-    occ_gt_root = resolve_path(root_path, args.occ_gt_root)
-    motion_gt_root = resolve_path(root_path, args.motion_gt_root)
+    gt_root = resolve_path(root_path, args.gt_root)
 
     infos, info_meta = load_infos(info_path)
     nusc = NuScenes(version=args.nusc_version, dataroot=nusc_dataroot, verbose=False)
@@ -137,14 +122,10 @@ def main() -> None:
     index_by_token: dict[str, int] = {}
 
     valid_total = 0
-    valid_with_any = 0
     valid_with_all4 = 0
+    valid_with_any = 0
 
-    iterator = (
-        progressbar.progressbar(enumerate(infos), max_value=len(infos), prefix="[gen transport sup4 sidecar] ")
-        if progressbar is not None
-        else enumerate(infos)
-    )
+    iterator = progressbar.progressbar(enumerate(infos), max_value=len(infos), prefix="[gen sup4 sidecar] ") if progressbar is not None else enumerate(infos)
     for idx, info in iterator:
         token = str(info.get("token", ""))
         scene_name = str(info.get("scene_name", ""))
@@ -153,8 +134,7 @@ def main() -> None:
 
         supervision_steps = list(EMPTY_STEPS)
         supervision_gt_tokens = list(EMPTY_STR4)
-        supervision_occ_gt_rel_paths = list(EMPTY_STR4)
-        supervision_motion_gt_rel_paths = list(EMPTY_STR4)
+        supervision_gt_rel_paths = list(EMPTY_STR4)
         supervision_frame_tokens = list(EMPTY_STR4)
         supervision_mask = list(EMPTY_MASK4)
 
@@ -167,11 +147,12 @@ def main() -> None:
         if token and scene_name and is_valid and frame_tokens:
             target_tokens = collect_target_tokens(sample_table=sample_table, curr_token=token)
 
+            # 在当前 13 帧序列中找到 keyframe sample token -> step_idx
             keyframe_step_map: dict[str, tuple[int, str]] = {}
             for step_idx, frame_token in enumerate(frame_tokens):
                 if not frame_token:
                     continue
-                pair = sample_data_to_sample.get(frame_token)
+                pair = sample_data_to_sample.get(frame_token, None)
                 if pair is None:
                     continue
                 is_key_frame, sample_token = pair
@@ -183,21 +164,19 @@ def main() -> None:
             for sup_i, sup_token in enumerate(target_tokens):
                 if not sup_token:
                     continue
-                step_pair = keyframe_step_map.get(sup_token)
+                step_pair = keyframe_step_map.get(sup_token, None)
                 if step_pair is None:
                     continue
 
-                occ_rel_path, motion_rel_path = build_gt_paths(scene_name=scene_name, sample_token=sup_token)
-                occ_abs_path = os.path.join(occ_gt_root, occ_rel_path)
-                motion_abs_path = os.path.join(motion_gt_root, motion_rel_path)
-                if not (os.path.exists(occ_abs_path) and os.path.exists(motion_abs_path)):
+                step_idx, frame_token = step_pair
+                gt_rel_path = os.path.join(scene_name, sup_token, "labels.npz")
+                gt_abs_path = os.path.join(gt_root, gt_rel_path)
+                if not os.path.exists(gt_abs_path):
                     continue
 
-                step_idx, frame_token = step_pair
                 supervision_steps[sup_i] = int(step_idx)
                 supervision_gt_tokens[sup_i] = sup_token
-                supervision_occ_gt_rel_paths[sup_i] = occ_rel_path
-                supervision_motion_gt_rel_paths[sup_i] = motion_rel_path
+                supervision_gt_rel_paths[sup_i] = gt_rel_path
                 supervision_frame_tokens[sup_i] = frame_token
                 supervision_mask[sup_i] = 1
 
@@ -215,12 +194,11 @@ def main() -> None:
                 "valid": is_valid,
                 "num_output_frames": int(info.get("num_output_frames", len(frame_tokens))),
                 "supervision_labels": SUPERVISION_LABELS,
-                "supervision_mask": supervision_mask,
-                "supervision_step_indices": supervision_steps,
-                "supervision_gt_tokens": supervision_gt_tokens,
-                "supervision_occ_gt_rel_paths": supervision_occ_gt_rel_paths,
-                "supervision_motion_gt_rel_paths": supervision_motion_gt_rel_paths,
-                "supervision_frame_tokens": supervision_frame_tokens,
+                "supervision_mask": supervision_mask,  # 长度4，1表示该时刻可监督
+                "supervision_step_indices": supervision_steps,  # 长度4，缺失为 -1
+                "supervision_gt_tokens": supervision_gt_tokens,  # 长度4，缺失为空串
+                "supervision_gt_rel_paths": supervision_gt_rel_paths,  # 相对 gt_root
+                "supervision_frame_tokens": supervision_frame_tokens,  # 对应 step 的 sample_data token
                 "num_supervision": available,
                 "has_all_4_supervision": bool(available == 4),
             }
@@ -228,14 +206,13 @@ def main() -> None:
 
     payload = {
         "metadata": {
-            "schema_version": "transport_online_nde_sup4_sidecar_v1",
-            "description": "4-step supervision index for transport_online_nde",
+            "schema_version": "evoocc_sup4_sidecar_v1",
+            "description": "4时刻监督索引（t-1.5/t-1.0/t-0.5/t）",
             "source_info_path": info_path,
             "source_info_metadata": info_meta,
             "nusc_dataroot": nusc_dataroot,
             "nusc_version": args.nusc_version,
-            "occ_gt_root": occ_gt_root,
-            "motion_gt_root": motion_gt_root,
+            "gt_root": gt_root,
             "supervision_labels": SUPERVISION_LABELS,
             "num_infos": len(infos),
             "num_valid_infos": valid_total,

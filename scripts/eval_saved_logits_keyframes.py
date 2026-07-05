@@ -19,10 +19,10 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
-from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
-from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
-from online_ncde.data.labels_io import load_labels_npz  # noqa: E402
-from online_ncde.metrics import MetricMiouOcc3D  # noqa: E402
+from evoocc.config import load_config_with_base, resolve_path  # noqa: E402
+from evoocc.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
+from evoocc.data.labels_io import load_labels_npz  # noqa: E402
+from evoocc.metrics import MetricMiouOcc3D  # noqa: E402
 
 try:
     import progressbar

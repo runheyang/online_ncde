@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Online NCDE 交互式 Occupancy 可视化工具。
+"""EvoOcc 交互式 Occupancy 可视化工具。
 
 六面板对比（2x3 布局）。约定演化 2s 的 evolve_infos pkl，
 evolve_keyframe_sample_tokens 长度 = max_evolve+1，从老到新：
@@ -9,7 +9,7 @@ evolve_keyframe_sample_tokens 长度 = max_evolve+1，从老到新：
 
 第 1 行（curr 相关）：
   - GT (curr)                : 当前 keyframe ground truth（不应用 camera mask，完整显示）
-  - NCDE Aligned (curr)      : aligner 演化到当前帧的输出
+  - EvoOcc Aligned (curr)      : aligner 演化到当前帧的输出
   - Fast (curr frame)        : fast_logits[-1]，当前帧 fast 预测
 第 2 行（slow 历史，按时间从老到新；统一到 curr ego frame）：
   - Slow (-2s keyframe)      : 倒数第 5 个 keyframe（2s 前），warp 到 curr ego
@@ -23,12 +23,12 @@ warp 越界（旧视角的某点跑出 curr pc_range）取 free_index。
 
 用法:
     python scripts/interactive_occ_viewer.py \
-        --config configs/online_ncde/fast_alocc2dmini__slow_alocc3d.yaml \
+        --config configs/evoocc/fast_alocc2dmini__slow_alocc3d.yaml \
         --checkpoint ckpts/.../epoch_9.pth
 
 操作:
     - 顶部 [◀ N/total ▶] 切样本，立即刷新 GT/Fast/3 路 Slow（不跑模型）
-    - [运行 NCDE 对齐] 触发一次 forward，刷新 Aligned 面板
+    - [运行 EvoOcc 对齐] 触发一次 forward，刷新 Aligned 面板
     - 6 个视图相机自动同步（鼠标松开后）
     - [保存大图] 把 6 个面板拼成 2x3 PNG 存盘
 """
@@ -51,12 +51,12 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
-from online_ncde.config import load_config_with_base                      # noqa: E402
-from online_ncde.data.build_logits_loader import build_logits_loader      # noqa: E402
-from online_ncde.data.occ3d_online_ncde_dataset import Occ3DOnlineNcdeDataset  # noqa: E402
-from online_ncde.models.online_ncde_aligner import OnlineNcdeAligner       # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint_for_eval         # noqa: E402
-from online_ncde.visualization.occ_renderer import (                       # noqa: E402
+from evoocc.config import load_config_with_base                      # noqa: E402
+from evoocc.data.build_logits_loader import build_logits_loader      # noqa: E402
+from evoocc.data.occ3d_evoocc_dataset import Occ3DEvoOccDataset  # noqa: E402
+from evoocc.models.evoocc_aligner import EvoOccAligner       # noqa: E402
+from evoocc.utils.checkpoints import load_checkpoint_for_eval         # noqa: E402
+from evoocc.visualization.occ_renderer import (                       # noqa: E402
     OCC3D_CLASS_NAMES,
     OCC3D_COLORS,
     clear_figure,
@@ -75,7 +75,7 @@ from mayavi.core.ui.mayavi_scene import MayaviScene                       # noqa
 PANEL_KEYS = ["gt", "aligned", "fast", "slow_m2", "slow_m1", "slow_curr"]
 PANEL_NAMES = [
     "GT (curr)",
-    "NCDE Aligned (curr)",
+    "EvoOcc Aligned (curr)",
     "Fast (curr frame)",
     "Slow (-2s keyframe)",
     "Slow (-1s keyframe)",
@@ -144,7 +144,7 @@ def load_idx_list(path: str) -> list[int]:
 
     支持的格式：
       - .txt  每行非 # 开头、空白分隔，第一列必须是 int idx；
-              （兼容 tests/online_ncde/find_top_*.py 输出的格式：
+              （兼容 tests/evoocc/find_top_*.py 输出的格式：
                idx \\t fast_miou \\t aligned_miou \\t diff \\t scene \\t end_token）
       - .json 顶层接受三种 schema：
           1. [120, 543, 22, ...]
@@ -341,12 +341,12 @@ class Backend:
                 f"root={fast_pred_root}, filename={fast_pred_filename}, key={fast_pred_key}"
             )
 
-        # dataset：跟 eval_online_ncde.py 默认 min_history_completeness=0
+        # dataset：跟 eval_evoocc.py 默认 min_history_completeness=0
         # logits_loader 暴露给后续用：dataset 默认取的 slow 是 anchor（最老 keyframe），
         # 我们额外用它加载当前 keyframe 的 slow 给 GUI 显示
         self.logits_loader = build_logits_loader(data_cfg, self.cfg["root_path"])
         logits_loader = self.logits_loader
-        self.dataset = Occ3DOnlineNcdeDataset(
+        self.dataset = Occ3DEvoOccDataset(
             info_path=data_cfg.get("val_info_path", data_cfg["info_path"]),
             root_path=self.cfg["root_path"],
             gt_root=data_cfg["gt_root"],
@@ -367,7 +367,7 @@ class Backend:
             self.eval_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu"
         )
         # 模型懒加载
-        self._model: OnlineNcdeAligner | None = None
+        self._model: EvoOccAligner | None = None
         self._raw_sample = None  # 缓存当前样本（含 logits / pose / timestamps）
 
     # ---------- dataset ----------
@@ -540,10 +540,10 @@ class Backend:
         )
 
     # ---------- model ----------
-    def ensure_model(self) -> OnlineNcdeAligner:
+    def ensure_model(self) -> EvoOccAligner:
         if self._model is not None:
             return self._model
-        m = OnlineNcdeAligner(
+        m = EvoOccAligner(
             num_classes=self.num_classes,
             feat_dim=self.model_cfg["feat_dim"],
             hidden_dim=self.model_cfg["hidden_dim"],
@@ -692,7 +692,7 @@ class OccViewer(QtWidgets.QMainWindow):
             self.DEFAULT_FP_FORWARD_M if view_forward_m is None else float(view_forward_m)
         )
 
-        self.setWindowTitle("Online NCDE Occupancy Viewer")
+        self.setWindowTitle("EvoOcc Occupancy Viewer")
         self.resize(1800, 1000)
 
         self._build_toolbar()
@@ -731,7 +731,7 @@ class OccViewer(QtWidgets.QMainWindow):
 
         tb.addSeparator()
 
-        self.run_btn = QtWidgets.QPushButton("▶ 运行 NCDE 对齐")
+        self.run_btn = QtWidgets.QPushButton("▶ 运行 EvoOcc 对齐")
         self.run_btn.clicked.connect(self._on_run_aligner)
         tb.addWidget(self.run_btn)
 
@@ -914,7 +914,7 @@ class OccViewer(QtWidgets.QMainWindow):
                 self._panels[key].set_title(base_title)
 
         self._clear_panel("aligned")
-        self._panels["aligned"].set_title("NCDE Aligned (未运行)")
+        self._panels["aligned"].set_title("EvoOcc Aligned (未运行)")
 
         self._reset_views()
         self.status.showMessage(f"loaded sample {idx}")
@@ -1014,16 +1014,16 @@ class OccViewer(QtWidgets.QMainWindow):
         if self.current_sample is None:
             return
         self.run_btn.setEnabled(False)
-        self.status.showMessage("running NCDE aligner ...")
+        self.status.showMessage("running EvoOcc aligner ...")
         QtWidgets.QApplication.processEvents()
         try:
             aligned = self.backend.run_aligner()
             self._render_panel("aligned", aligned)
-            self._panels["aligned"].set_title("NCDE Aligned")
-            self.status.showMessage("NCDE aligner done")
+            self._panels["aligned"].set_title("EvoOcc Aligned")
+            self.status.showMessage("EvoOcc aligner done")
         except Exception as e:
             self.status.showMessage(f"aligner failed: {e}")
-            QtWidgets.QMessageBox.critical(self, "NCDE 对齐失败", str(e))
+            QtWidgets.QMessageBox.critical(self, "EvoOcc 对齐失败", str(e))
         finally:
             self.run_btn.setEnabled(True)
 
@@ -1049,7 +1049,7 @@ class OccViewer(QtWidgets.QMainWindow):
 
         布局（自上而下）：
           [ 顶部 header: 样本元信息 ]
-          [ 行 1: GT | NCDE Aligned | Fast ]
+          [ 行 1: GT | EvoOcc Aligned | Fast ]
           [ 行 2: Slow(-2s) | Slow(-1s) | Slow(curr) ]
           [ 底部 footer: 坐标系说明 ]
         每个 panel 上方有粗体标题条，标题取 self._panels[k].title_label
@@ -1161,7 +1161,7 @@ class OccViewer(QtWidgets.QMainWindow):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Online NCDE 交互式可视化")
+    parser = argparse.ArgumentParser(description="EvoOcc 交互式可视化")
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--solver", choices=["heun", "euler"], default="euler")
@@ -1174,11 +1174,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--idx-list", default=None,
                         help="可选 idx 列表文件 (.txt 或 .json)，"
                              "▶/◀/spinbox 在该列表里走，按列表顺序看样本；"
-                             ".txt 即 tests/online_ncde/find_top_*.py 的输出格式；"
+                             ".txt 即 tests/evoocc/find_top_*.py 的输出格式；"
                              ".json 接受 [int...] / {indices: [...]} / {samples: [{idx,...}]}")
     parser.add_argument("--fast-pred-root", default=None,
                         help="可选：Fast 面板改为读取离散预测 root，例如 "
-                             "data/preds_opusv1t_occ3d；不影响 NCDE 输入")
+                             "data/preds_opusv1t_occ3d；不影响 EvoOcc 输入")
     parser.add_argument("--fast-pred-filename", default="pred.npz",
                         help="fast-pred-root 下每个 token 目录中的文件名")
     parser.add_argument("--fast-pred-key", default="semantics",
