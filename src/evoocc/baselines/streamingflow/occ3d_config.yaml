@@ -22,11 +22,11 @@ model:
     bev_channels: 96
     bev_stride_xy: 1
     adapter_kind: matched_stride1
-    adapter_mid_channels: 64
+    adapter_mid_channels: 128
     small_encoder_kind: streamingflow_downsample
-    small_encoder_filter_size: 24
+    small_encoder_filter_size: 32
     small_decoder_kind: streamingflow_upsample
-    small_decoder_filter_size: 24
+    small_decoder_filter_size: 32
     bev_to_3d_decoder_kind: matched_no_upsample
     decoder_high_channels: 64
     decoder_mid_channels: 64
@@ -37,7 +37,7 @@ model:
     use_variable_ode_step: true
 
 train:
-  epochs: 10
+  epochs: 20
   # batch_size=1 下每 2 个 micro-batch 更新一次，模拟 batch_size=2。
   gradient_accumulation_steps: 2
   # StreamingFlow baseline 输出 absolute logits，不使用 fast residual KL。
