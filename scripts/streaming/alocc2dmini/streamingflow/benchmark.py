@@ -60,7 +60,7 @@ def parse_args():
     p.add_argument("--gt-root", default=None)
     p.add_argument("--samples", type=int, default=200)
     p.add_argument("--warmup", type=int, default=20)
-    p.add_argument("--slow-interval", type=float, default=4.0)
+    p.add_argument("--slow-interval", type=float, default=5.0)
     p.add_argument("--mode", choices=["fast-only", "fast-streamingflow", "both"], default="both")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--prefetch-factor", type=int, default=2)
