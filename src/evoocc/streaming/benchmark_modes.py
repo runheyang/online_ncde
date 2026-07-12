@@ -12,39 +12,27 @@ def _unwrap(x):
     return x.data[0] if hasattr(x, "data") else x
 
 
-def _unwrap_alocc_batch_for_simple_test(batch):
-    """把 streaming_loader.scatter_to_device 后的 batch unwrap 成 ALOcc simple_test 参数."""
-    img_inputs = batch["img_inputs"]
-    img_metas = batch["img_metas"]
-    points = batch.get("points", None)
-    if not isinstance(img_inputs, list):
-        img_inputs = [img_inputs]
-    if not isinstance(img_metas, list):
-        img_metas = [img_metas]
-    if points is not None and not isinstance(points, list):
-        points = [points]
-    img = _unwrap(img_inputs[0])
-    metas = _unwrap(img_metas[0])
-    pts = [None] if points is None else _unwrap(points[0])
-    return pts, metas, img
-
-
-def benchmark_alocc_fast_only(fast, raw_batches, warmup: int, samples: int):
-    """ALOcc 官方 simple_test 路径，包含 softmax/argmax/cpu."""
-    fast.reset_history()
-    old_cal_metric = getattr(fast.model, "cal_metric_in_model", None)
+def benchmark_alocc_only(
+    runner,
+    raw_batches,
+    warmup: int,
+    samples: int,
+    name: str,
+):
+    """ALOcc 官方 forward_test 路径，可共用于 fast/slow 系统。"""
+    runner.reset_history()
+    old_cal_metric = getattr(runner.model, "cal_metric_in_model", None)
     if old_cal_metric is not None:
         # benchmark 只统计模型前向，不把 OccStudio 内部 mIoU 计算算进耗时。
-        fast.model.cal_metric_in_model = False
+        runner.model.cal_metric_in_model = False
 
     def step(raw):
         batch = scatter_to_device(raw, 0)
-        pts, metas, img = _unwrap_alocc_batch_for_simple_test(batch)
-        return fast.model.simple_test(pts, metas, img)
+        return runner.model(return_loss=False, rescale=True, **batch)
 
     try:
         return benchmark_callable(
-            "fast-only",
+            name,
             raw_batches,
             warmup,
             samples,
@@ -52,7 +40,12 @@ def benchmark_alocc_fast_only(fast, raw_batches, warmup: int, samples: int):
         )
     finally:
         if old_cal_metric is not None:
-            fast.model.cal_metric_in_model = old_cal_metric
+            runner.model.cal_metric_in_model = old_cal_metric
+
+
+def benchmark_alocc_fast_only(fast, raw_batches, warmup: int, samples: int):
+    """保留原 fast-only 入口。"""
+    return benchmark_alocc_only(fast, raw_batches, warmup, samples, name="fast-only")
 
 
 def _take_single_aug(x):
