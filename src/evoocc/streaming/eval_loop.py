@@ -340,7 +340,7 @@ def run_streaming_eval(
     sweep_pkl: str,
     out_json: Optional[str],
     fast_backend: str,
-    aligner_label: str = "NCDE",
+    aligner_label: str = "EvoOcc",
     delayed: bool = False,
     slow_delay_keyframes: int = 0,
     extra_out: Optional[dict] = None,

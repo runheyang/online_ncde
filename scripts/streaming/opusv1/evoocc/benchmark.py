@@ -9,9 +9,9 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-SCRIPT_DIR = os.path.dirname(__file__)
-REPO_ROOT = "/root/autodl-tmp/online_ncde"
-sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "src")))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", ".."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from evoocc.streaming.benchmark_runtime import configure_benchmark_env
 
@@ -138,7 +138,7 @@ def main():
         )
 
     if wants_mode(args.mode, "fast-ours", ("fast-only", "fast-ours")):
-        print(f"\n=== Mode B: OPUS raw-top3 fast + NCDE (slow_interval={args.slow_interval}s) ===")
+        print(f"\n=== Mode B: OPUS raw-top3 fast + EvoOcc (slow_interval={args.slow_interval}s) ===")
         results["fast_ours"] = benchmark_stream_aligned(
             name="fast+ours",
             fast=fast,

@@ -7,7 +7,8 @@ from typing import Optional, Tuple
 from evoocc.streaming.fast_runner import FastRunner
 
 
-DEFAULT_OCCSTUDIO_ROOT = "/root/autodl-tmp/online_ncde/third_party/OccStudio"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+DEFAULT_OCCSTUDIO_ROOT = os.path.join(_REPO_ROOT, "third_party", "OccStudio")
 DEFAULT_BDV2_PKL = "/root/autodl-tmp/data/nuscenes/bevdetv2-nuscenes_infos_val.pkl"
 
 _FAST_PATHS_BY_VARIANT = {
