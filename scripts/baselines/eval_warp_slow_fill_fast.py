@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Baseline 评估：warp_slow_fill_fast（无参数纯几何）。
 
-流程（对齐 scripts/eval_online_ncde.py）：
+流程（对齐 scripts/eval_evoocc.py）：
   1. 推理阶段：逐 batch 跑 baseline.predict_sample，累加 mIoU，并把
      每个样本的 dense pred/gt/token 收集到内存。
   2. RayIoU 阶段：推理结束后，按 token 查 lidar origin，一次性调
@@ -31,12 +31,12 @@ if torch.cuda.is_available():
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from online_ncde.baselines import WarpSlowFillFastBaseline  # noqa: E402
-from online_ncde.config import load_config_with_base, resolve_path  # noqa: E402
-from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
-from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.metrics import build_miou_metric  # noqa: E402
-from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
+from evoocc.baselines import WarpSlowFillFastBaseline  # noqa: E402
+from evoocc.config import load_config_with_base, resolve_path  # noqa: E402
+from evoocc.data.build_dataset import build_evoocc_dataset  # noqa: E402
+from evoocc.data.build_logits_loader import build_logits_loader  # noqa: E402
+from evoocc.metrics import build_miou_metric  # noqa: E402
+from evoocc.trainer import move_to_device, evoocc_collate  # noqa: E402
 
 try:
     import progressbar
@@ -78,7 +78,7 @@ class _LastFrameOnlyFastLogitsLoader:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="配置文件路径（沿用 online_ncde config）")
+    parser.add_argument("--config", required=True, help="配置文件路径（沿用 evoocc config）")
     parser.add_argument("--limit", type=int, default=0, help="仅评估前 N 个样本，0 表示全量")
     parser.add_argument("--batch-size", type=int, default=0, help="覆盖 eval.batch_size")
     parser.add_argument(
@@ -138,7 +138,7 @@ def main() -> None:
     if args.val_info_path:
         print(f"[eval-baseline] --val-info-path 覆盖 -> {info_path}")
 
-    dataset = build_online_ncde_dataset(
+    dataset = build_evoocc_dataset(
         data_cfg,
         info_path=info_path,
         root_path=root_path,
@@ -156,7 +156,7 @@ def main() -> None:
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=False,
-        collate_fn=online_ncde_collate,
+        collate_fn=evoocc_collate,
         pin_memory=loader_cfg.get("pin_memory", False),
     )
     if num_workers > 0:
@@ -290,8 +290,8 @@ def main() -> None:
     missing_origin_count = 0
     rayiou_num_samples = 0
     if enable_rayiou:
-        from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-        from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+        from evoocc.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+        from evoocc.ops.dvr.ray_metrics import main as calc_rayiou
 
         print(f"\n[rayiou] 加载 lidar origins: {sweep_info_path}")
         origins_by_token = load_origins_from_sweep_pkl(sweep_info_path)

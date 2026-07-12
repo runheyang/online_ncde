@@ -15,17 +15,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", ".
 
 import torch
 
-from online_ncde.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
-from online_ncde.streaming.eval_loop import run_streaming_eval
-from online_ncde.streaming.alocc2dmini_runtime import (
+from evoocc.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
+from evoocc.streaming.eval_loop import run_streaming_eval
+from evoocc.streaming.alocc2dmini_runtime import (
     DEFAULT_BDV2_PKL,
     DEFAULT_OCCSTUDIO_ROOT,
     build_alocc2dmini_fast_runner,
     resolve_cfg_path,
 )
-from online_ncde.streaming.scene_iterator import build_sample_meta_index, iter_scenes
-from online_ncde.streaming.slow_cache import build_slow_decoder_fn
-from online_ncde.streaming.streamingflow_aligner import (
+from evoocc.streaming.scene_iterator import build_sample_meta_index, iter_scenes
+from evoocc.streaming.slow_cache import build_slow_decoder_fn
+from evoocc.streaming.streamingflow_aligner import (
     StreamingFlowStreamAligner,
     build_streamingflow_model,
 )
@@ -33,7 +33,7 @@ from online_ncde.streaming.streamingflow_aligner import (
 
 DEFAULT_SWEEP_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
 STREAMINGFLOW_OVERLAY = (
-    Path(REPO_ROOT) / "src" / "online_ncde" / "baselines" / "streamingflow" / "occ3d_config.yaml"
+    Path(REPO_ROOT) / "src" / "evoocc" / "baselines" / "streamingflow" / "occ3d_config.yaml"
 )
 
 

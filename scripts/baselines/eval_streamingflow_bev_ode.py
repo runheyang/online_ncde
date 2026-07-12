@@ -25,14 +25,14 @@ if torch.cuda.is_available():
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
-from online_ncde.baselines import StreamingFlowBEVOdeAligner  # noqa: E402
-from online_ncde.config import load_config, load_config_with_base, merge_dict, resolve_path  # noqa: E402
-from online_ncde.data.build_dataset import build_online_ncde_dataset  # noqa: E402
-from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
-from online_ncde.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
-from online_ncde.trainer import move_to_device, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
+from evoocc.baselines import StreamingFlowBEVOdeAligner  # noqa: E402
+from evoocc.config import load_config, load_config_with_base, merge_dict, resolve_path  # noqa: E402
+from evoocc.data.build_dataset import build_evoocc_dataset  # noqa: E402
+from evoocc.data.build_logits_loader import build_logits_loader  # noqa: E402
+from evoocc.data.keyframe_mapping import NuScenesKeyFrameResolver  # noqa: E402
+from evoocc.evaluation import attach_occ3d_targets, evaluate_dense_occ, make_dense_occ_prediction  # noqa: E402
+from evoocc.trainer import move_to_device, evoocc_collate  # noqa: E402
+from evoocc.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
 try:
     import progressbar
@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover
 
 
 STREAMINGFLOW_OVERLAY = (
-    ROOT / "src" / "online_ncde" / "baselines" / "streamingflow" / "occ3d_config.yaml"
+    ROOT / "src" / "evoocc" / "baselines" / "streamingflow" / "occ3d_config.yaml"
 )
 
 
@@ -156,7 +156,7 @@ def _build_eval_loader_and_model(
     logits_loader = build_logits_loader(data_cfg, root_path)
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     info_path = args.val_info_path or data_cfg.get("val_info_path", data_cfg["info_path"])
-    dataset = build_online_ncde_dataset(
+    dataset = build_evoocc_dataset(
         data_cfg,
         info_path=info_path,
         root_path=root_path,
@@ -173,7 +173,7 @@ def _build_eval_loader_and_model(
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=False,
-        collate_fn=online_ncde_collate,
+        collate_fn=evoocc_collate,
         pin_memory=loader_cfg.get("pin_memory", False),
     )
     if num_workers > 0:

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Neural ODE 离散化 baseline 训练脚本（支持 DDP + wandb）。
 
-与 train_online_ncde.py 同款 wiring：复用 trainer / dataset / loss / RayIoU /
+与 train_evoocc.py 同款 wiring：复用 trainer / dataset / loss / RayIoU /
 EMA / scheduler / wandb / DDP 全套；只把模型换成 NeuralOdeDtAligner —— 控制
 增量从 (Fast 差值 + 1x1x1 conv) 改为 标量 Δt 广播。
 
-Config 完全兼容 train_online_ncde.py 的 yaml；NeuralOdeDtAligner 的超参
+Config 完全兼容 train_evoocc.py 的 yaml；NeuralOdeDtAligner 的超参
 （func_g_inner_dim/func_g_body_dilations/func_g_gn_groups/use_fast_residual/
-decoder_init_scale）走 model.* 字段，与 NCDE 同名同义。
+decoder_init_scale）走 model.* 字段，与 EvoOcc 同名同义。
 """
 
 from __future__ import annotations
@@ -37,10 +37,10 @@ except RuntimeError:
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
-sys.path.append(str(ROOT / "scripts"))  # 复用 train_online_ncde 的 helper
+sys.path.append(str(ROOT / "scripts"))  # 复用 train_evoocc 的 helper
 
 # 复用主训练脚本里的 helper，避免重复实现
-from train_online_ncde import (  # noqa: E402
+from train_evoocc import (  # noqa: E402
     build_dataset,
     build_scheduler,
     build_subset,
@@ -50,13 +50,13 @@ from train_online_ncde import (  # noqa: E402
     to_float,
 )
 
-from online_ncde.baselines import NeuralOdeDtAligner  # noqa: E402
-from online_ncde.config import load_config_with_base  # noqa: E402
-from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.losses import build_loss  # noqa: E402
-from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint  # noqa: E402
-from online_ncde.utils.reproducibility import set_seed  # noqa: E402
+from evoocc.baselines import NeuralOdeDtAligner  # noqa: E402
+from evoocc.config import config_output_subdir, load_config_with_base  # noqa: E402
+from evoocc.data.build_logits_loader import build_logits_loader  # noqa: E402
+from evoocc.losses import build_loss  # noqa: E402
+from evoocc.trainer import Trainer, evoocc_collate  # noqa: E402
+from evoocc.utils.checkpoints import load_checkpoint  # noqa: E402
+from evoocc.utils.reproducibility import set_seed  # noqa: E402
 
 try:
     import wandb
@@ -66,7 +66,7 @@ except Exception:  # pragma: no cover
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="配置文件路径（与 NCDE 同 config 兼容）")
+    parser.add_argument("--config", required=True, help="配置文件路径（与 EvoOcc 同 config 兼容）")
     parser.add_argument("--resume", default="", help="恢复训练权重")
     parser.add_argument("--train-limit", type=int, default=0)
     parser.add_argument("--eval-every", type=int, default=1)
@@ -174,7 +174,7 @@ def main() -> None:
             batch_size=int(eval_cfg.get("batch_size", 1)),
             num_workers=val_workers,
             shuffle=False,
-            collate_fn=online_ncde_collate,
+            collate_fn=evoocc_collate,
             pin_memory=loader_cfg.get("pin_memory", False),
         )
         if val_workers > 0:
@@ -219,7 +219,7 @@ def main() -> None:
     ema = None
     ema_cfg = train_cfg.get("ema", {}) or {}
     if bool(ema_cfg.get("enabled", True)):
-        from online_ncde.utils.ema import ModelEMA
+        from evoocc.utils.ema import ModelEMA
         ema_decay = float(ema_cfg.get("decay", 0.999))
         ema = ModelEMA(model, decay=ema_decay, device=device)
         if is_main:
@@ -238,7 +238,7 @@ def main() -> None:
         num_workers=num_workers,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        collate_fn=online_ncde_collate,
+        collate_fn=evoocc_collate,
         pin_memory=loader_cfg.get("pin_memory", False),
     )
     if num_workers > 0:
@@ -299,10 +299,10 @@ def main() -> None:
             resumed_wandb_id = None
         del _ckpt_payload
     else:
-        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+        config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(
             str(ROOT), "outputs", "baselines", "neural_ode_dt",
-            os.path.dirname(config_rel),
+            config_subdir,
         )
         if use_ddp:
             if rank == 0:
@@ -374,8 +374,7 @@ def main() -> None:
                 f"[train] epoch={epoch} "
                 f"loss={train_metrics['loss']:.4f} "
                 f"focal={train_metrics['focal']:.4f} "
-                f"aux={train_metrics['aux']:.4f} "
-                f"delta={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"aux={train_metrics['aux']:.4f}"
                 f"{kl_text}{ray_text}{sup_text}"
             )
             if run is not None:
@@ -417,8 +416,8 @@ def main() -> None:
                         print(f"===> {name} - IoU = {round(float(value), 2)}")
 
                 # --- RayIoU ---
-                from online_ncde.ops.dvr.ego_pose import load_origins_from_sweep_pkl
-                from online_ncde.ops.dvr.ray_metrics import main as calc_rayiou
+                from evoocc.ops.dvr.ego_pose import load_origins_from_sweep_pkl
+                from evoocc.ops.dvr.ray_metrics import main as calc_rayiou
 
                 sweep_rel = eval_cfg.get("sweep_pkl", "data/nuscenes/nuscenes_infos_val_sweep.pkl")
                 sweep_path = Path(sweep_rel)
@@ -457,7 +456,7 @@ def main() -> None:
                 )
 
                 if need_pcds:
-                    from online_ncde.ops.dvr.binned_ray_stats import compute_binned_ray_stats
+                    from evoocc.ops.dvr.binned_ray_stats import compute_binned_ray_stats
                     binned_ray_result = compute_binned_ray_stats(raw_pcd_pred, raw_pcd_gt)
                     for bk in ["0-10m", "10-20m", "20-40m"]:
                         bs = binned_ray_result[bk]

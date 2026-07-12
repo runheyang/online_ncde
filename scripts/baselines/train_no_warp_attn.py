@@ -21,7 +21,7 @@ sys.path.append(str(ROOT / "src"))
 sys.path.append(str(ROOT / "scripts" / "baselines"))
 
 import train_rwfa as upstream  # noqa: E402
-from online_ncde.baselines import NoWarpMotionBiasAttnAligner  # noqa: E402
+from evoocc.baselines import NoWarpMotionBiasAttnAligner  # noqa: E402
 
 
 def _build_model(
@@ -33,7 +33,7 @@ def _build_model(
 ) -> NoWarpMotionBiasAttnAligner:
     """构造 no-warp attention baseline。
 
-    默认主干维度走 model.func_g_inner_dim（当前配置为 24），与 NCDE 主干计算维度
+    默认主干维度走 model.func_g_inner_dim（当前配置为 24），与 EvoOcc 主干计算维度
     对齐；hidden/state 维度仍使用 model.hidden_dim（当前为 32）。
     """
     inner_dim = int(model_cfg.get("no_warp_inner_dim", model_cfg.get("func_g_inner_dim", 24)))

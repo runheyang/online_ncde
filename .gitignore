@@ -23,7 +23,7 @@ CLAUDE.md
 __pycache__/
 *.py[cod]
 
-configs/online_ncde/hard_oversample_train_stats.json
+
 
 # tests 下的 txt 输出文件（实验产物，不纳入版本控制）
 tests/**/*.txt
@@ -62,4 +62,4 @@ Auto-claude-code-research-in-sleep
 scripts/ray_tuing_runs_opus
 *.png
 *.jpg
-tests/online_ncde/*.json
+tests/evoocc/*.json

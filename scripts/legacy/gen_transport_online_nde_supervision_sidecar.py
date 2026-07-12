@@ -15,7 +15,7 @@ sys.path.append(str(ROOT / "src"))
 
 from nuscenes import NuScenes  # type: ignore[import-not-found]
 
-from online_ncde.config import resolve_path  # noqa: E402
+from evoocc.config import resolve_path  # noqa: E402
 
 try:
     import progressbar
@@ -32,7 +32,7 @@ EMPTY_MASK4 = [0, 0, 0, 0]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root-path", default=str(ROOT), help="Repository root")
-    parser.add_argument("--info-path", required=True, help="Input ncde_align_infos_*.pkl")
+    parser.add_argument("--info-path", required=True, help="Input evoocc_align_infos_*.pkl")
     parser.add_argument(
         "--output",
         default="",

@@ -13,34 +13,34 @@ SCRIPT_DIR = os.path.dirname(__file__)
 REPO_ROOT = "/root/autodl-tmp/online_ncde"
 sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "src")))
 
-from online_ncde.streaming.benchmark_runtime import configure_benchmark_env
+from evoocc.streaming.benchmark_runtime import configure_benchmark_env
 
 configure_benchmark_env()
 
 import torch
 
-from online_ncde.streaming.benchmark_runtime import configure_torch_benchmark_runtime
-from online_ncde.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
-from online_ncde.streaming.benchmark_loop import (
+from evoocc.streaming.benchmark_runtime import configure_torch_benchmark_runtime
+from evoocc.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
+from evoocc.streaming.benchmark_loop import (
     benchmark_stream_aligned,
     make_loader_iter,
     preload_slow_cache,
     select_benchmark_frames,
 )
-from online_ncde.streaming.benchmark_modes import benchmark_alocc_fast_only
-from online_ncde.streaming.alocc2dmini_runtime import (
+from evoocc.streaming.benchmark_modes import benchmark_alocc_fast_only
+from evoocc.streaming.alocc2dmini_runtime import (
     DEFAULT_BDV2_PKL,
     DEFAULT_OCCSTUDIO_ROOT,
     build_alocc2dmini_fast_runner,
     resolve_cfg_path,
 )
-from online_ncde.streaming.no_warp_attn import NoWarpAttnStreamAligner, build_no_warp_aligner
-from online_ncde.streaming.scene_iterator import build_sample_meta_index, iter_scenes
+from evoocc.streaming.no_warp_attn import NoWarpAttnStreamAligner, build_no_warp_aligner
+from evoocc.streaming.scene_iterator import build_sample_meta_index, iter_scenes
 
 configure_torch_benchmark_runtime(torch)
 
 
-DEFAULT_ALIGNER_CFG = "configs/online_ncde/fast_alocc2dmini__slow_alocc3d/base.yaml"
+DEFAULT_ALIGNER_CFG = "configs/evoocc/fast_alocc2dmini__slow_alocc3d.yaml"
 DEFAULT_ALIGNER_CKPT = (
     "ckpts/fast_alocc2dmini__slow_alocc3d/"
     "no_warp_attn_20260503_112331/epoch_9.pth"

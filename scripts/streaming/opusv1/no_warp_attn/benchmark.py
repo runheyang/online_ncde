@@ -13,28 +13,28 @@ SCRIPT_DIR = os.path.dirname(__file__)
 REPO_ROOT = "/root/autodl-tmp/online_ncde"
 sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", "src")))
 
-from online_ncde.streaming.benchmark_runtime import configure_benchmark_env
+from evoocc.streaming.benchmark_runtime import configure_benchmark_env
 
 configure_benchmark_env()
 
 import torch
 
-from online_ncde.streaming.benchmark_runtime import configure_torch_benchmark_runtime
-from online_ncde.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
-from online_ncde.streaming.benchmark_loop import (
+from evoocc.streaming.benchmark_runtime import configure_torch_benchmark_runtime
+from evoocc.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
+from evoocc.streaming.benchmark_loop import (
     benchmark_stream_aligned,
     make_loader_iter,
     preload_slow_cache,
     select_benchmark_frames,
     wants_mode,
 )
-from online_ncde.streaming.benchmark_modes import (
+from evoocc.streaming.benchmark_modes import (
     benchmark_opus_fast_only,
     benchmark_opus_native_only,
 )
-from online_ncde.streaming.no_warp_attn import NoWarpAttnStreamAligner, build_no_warp_aligner
-from online_ncde.streaming.opusv1_fast_runner import OpusV1FastRunner
-from online_ncde.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
+from evoocc.streaming.no_warp_attn import NoWarpAttnStreamAligner, build_no_warp_aligner
+from evoocc.streaming.opusv1_fast_runner import OpusV1FastRunner
+from evoocc.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
 
 configure_torch_benchmark_runtime(torch)
 
@@ -44,7 +44,7 @@ OPUS_CONFIG = "configs/opusv1_nusc-occ3d/opusv1-t_r50_704x256_8f_nusc-occ3d_100e
 OPUS_CKPT = "checkpoints/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.pth"
 META_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
 GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
-DEFAULT_ALIGNER_CFG = "configs/online_ncde/fast_opusv1t__slow_opusv2l/base.yaml"
+DEFAULT_ALIGNER_CFG = "configs/evoocc/fast_opusv1t__slow_opusv2l.yaml"
 DEFAULT_ALIGNER_CKPT = (
     "ckpts/fast_opusv1t__slow_opusv2l/"
     "no_warp_attn_20260504_100601/epoch_6.pth"

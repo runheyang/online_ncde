@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 sys.path.append(str(ROOT / "scripts"))
 
-from train_online_ncde import (  # noqa: E402
+from train_evoocc import (  # noqa: E402
     build_dataset,
     build_scheduler,
     build_subset,
@@ -39,14 +39,14 @@ from train_online_ncde import (  # noqa: E402
     setup_ddp_init,
 )
 
-from online_ncde.baselines import StreamingFlowBEVOdeAligner  # noqa: E402
-from online_ncde.config import load_config, load_config_with_base, merge_dict  # noqa: E402
-from online_ncde.data.build_logits_loader import build_logits_loader  # noqa: E402
-from online_ncde.evaluation import evaluate_dense_occ  # noqa: E402
-from online_ncde.losses import build_loss  # noqa: E402
-from online_ncde.trainer import Trainer, online_ncde_collate  # noqa: E402
-from online_ncde.utils.checkpoints import load_checkpoint, save_checkpoint  # noqa: E402
-from online_ncde.utils.reproducibility import set_seed  # noqa: E402
+from evoocc.baselines import StreamingFlowBEVOdeAligner  # noqa: E402
+from evoocc.config import config_output_subdir, load_config, load_config_with_base, merge_dict  # noqa: E402
+from evoocc.data.build_logits_loader import build_logits_loader  # noqa: E402
+from evoocc.evaluation import evaluate_dense_occ  # noqa: E402
+from evoocc.losses import build_loss  # noqa: E402
+from evoocc.trainer import Trainer, evoocc_collate  # noqa: E402
+from evoocc.utils.checkpoints import load_checkpoint, save_checkpoint  # noqa: E402
+from evoocc.utils.reproducibility import set_seed  # noqa: E402
 
 try:
     import wandb
@@ -55,7 +55,7 @@ except Exception:  # pragma: no cover
 
 
 STREAMINGFLOW_OVERLAY = (
-    ROOT / "src" / "online_ncde" / "baselines" / "streamingflow" / "occ3d_config.yaml"
+    ROOT / "src" / "evoocc" / "baselines" / "streamingflow" / "occ3d_config.yaml"
 )
 
 
@@ -179,7 +179,7 @@ def main() -> None:
             batch_size=int(eval_cfg.get("batch_size", 1)),
             num_workers=val_workers,
             shuffle=False,
-            collate_fn=online_ncde_collate,
+            collate_fn=evoocc_collate,
             pin_memory=loader_cfg.get("pin_memory", False),
         )
         if val_workers > 0:
@@ -206,7 +206,7 @@ def main() -> None:
     ema = None
     ema_cfg = train_cfg.get("ema", {}) or {}
     if bool(ema_cfg.get("enabled", True)):
-        from online_ncde.utils.ema import ModelEMA
+        from evoocc.utils.ema import ModelEMA
         ema = ModelEMA(model, decay=float(ema_cfg.get("decay", 0.999)), device=device)
         if resumed_payload is not None and "ema" in resumed_payload:
             ema.load_state_dict(resumed_payload["ema"])
@@ -221,7 +221,7 @@ def main() -> None:
         num_workers=num_workers,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        collate_fn=online_ncde_collate,
+        collate_fn=evoocc_collate,
         pin_memory=loader_cfg.get("pin_memory", False),
     )
     if num_workers > 0:
@@ -283,9 +283,9 @@ def main() -> None:
         output_dir = os.path.dirname(os.path.abspath(args.resume))
         run_timestamp = os.path.basename(output_dir)
     else:
-        config_rel = os.path.relpath(args.config, os.path.join(str(ROOT), "configs"))
+        config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(
-            str(ROOT), "outputs", "baselines", "streamingflow_bev_ode", os.path.dirname(config_rel)
+            str(ROOT), "outputs", "baselines", "streamingflow_bev_ode", config_subdir
         )
         if use_ddp:
             if is_main:
@@ -328,8 +328,7 @@ def main() -> None:
         if is_main:
             print(
                 f"[train] epoch={epoch} loss={train_metrics['loss']:.4f} "
-                f"focal={train_metrics['focal']:.4f} aux={train_metrics['aux']:.4f} "
-                f"state={train_metrics['delta_scene_abs_mean']:.4f}"
+                f"focal={train_metrics['focal']:.4f} aux={train_metrics['aux']:.4f}"
             )
             if run is not None:
                 payload = {f"train/{k}": float(v) for k, v in train_metrics.items()}
