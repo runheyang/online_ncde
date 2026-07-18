@@ -48,8 +48,8 @@ configure_torch_benchmark_runtime(torch)
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--aligner-cfg", required=True)
-    p.add_argument("--aligner-ckpt", default=None)
+    p.add_argument("--config", required=True)
+    p.add_argument("--checkpoint", default=None)
     p.add_argument("--occ-root", default=DEFAULT_OCCSTUDIO_ROOT)
     p.add_argument("--occ-config", default=None)
     p.add_argument("--occ-ckpt", default=None)
@@ -71,8 +71,8 @@ def parse_args():
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--out-json", default=None)
     args = p.parse_args()
-    if args.mode in ("fast-ours", "both", "all") and not args.aligner_ckpt:
-        p.error(f"--mode {args.mode} 需要 --aligner-ckpt")
+    if args.mode in ("fast-ours", "both", "all") and not args.checkpoint:
+        p.error(f"--mode {args.mode} 需要 --checkpoint")
     return args
 
 
@@ -127,13 +127,13 @@ def select_frames(runner, args, data_cfg, slow_root, gt_root, nuscenes_root):
 def main():
     args = parse_args()
     os.chdir(REPO_ROOT)
-    args.aligner_cfg = resolve_repo_path(args.aligner_cfg, REPO_ROOT)
-    args.aligner_ckpt = resolve_repo_path(args.aligner_ckpt, REPO_ROOT)
+    args.config = resolve_repo_path(args.config, REPO_ROOT)
+    args.checkpoint = resolve_repo_path(args.checkpoint, REPO_ROOT)
     args.occ_root = resolve_repo_path(args.occ_root, REPO_ROOT)
     args.bevdetv2_pkl = resolve_repo_path(args.bevdetv2_pkl, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
-    data_cfg = load_config_with_base(args.aligner_cfg)["data"]
+    data_cfg = load_config_with_base(args.config)["data"]
     slow_root = resolve_slow_root(data_cfg, REPO_ROOT)
     gt_root = resolve_cfg_path(data_cfg, "gt_root", REPO_ROOT, args.gt_root)
     nuscenes_root = resolve_cfg_path(data_cfg, "nuscenes_root", REPO_ROOT)
@@ -163,7 +163,7 @@ def main():
         if mode_enabled(args.mode, "fast-ours"):
             print("[aligner] build & load ckpt ...")
             aligner, aligner_data_cfg = build_evoocc_aligner(
-                args.aligner_cfg, args.aligner_ckpt, device, solver=args.solver
+                args.config, args.checkpoint, device, solver=args.solver
             )
             if aligner_data_cfg != data_cfg:
                 raise ValueError("aligner 构建返回的 data_cfg 与配置加载结果不一致")
