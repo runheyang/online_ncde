@@ -136,7 +136,18 @@ class FastRunner:
         pts = [None] if points is None else _unwrap(points[0])
         self.model.do_history = True
 
-        results = self.model.extract_feat(points=pts, img=img, img_metas=metas)
+        # ALOcc3D depth-stereo 分支还需要当前帧和相邻帧的相机参数。
+        extra_kwargs = {
+            key: sample[key]
+            for key in ("aux_cam_params", "adj_aux_cam_params")
+            if key in sample
+        }
+        results = self.model.extract_feat(
+            points=pts,
+            img=img,
+            img_metas=metas,
+            **extra_kwargs,
+        )
         if self.model.with_specific_component("occupancy_head"):
             output_test = self.model.occupancy_head(results["img_bev_feat"], results=results)
         elif self.model.with_specific_component("alocc_head"):
