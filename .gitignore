@@ -57,9 +57,8 @@ htmlcov/
 .mypy_cache/
 .pytype/
 
-Auto-claude-code-research-in-sleep
 .codex
-scripts/ray_tuing_runs_opus
 *.png
 *.jpg
 tests/evoocc/*.json
+papers/
