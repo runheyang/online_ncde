@@ -1,10 +1,11 @@
-"""OPUSv1-T fast + EvoOcc streaming eval."""
+"""OPUSv1-T fast + StreamingFlow streaming eval。"""
 from __future__ import annotations
 
 import argparse
 import os
 import sys
 import warnings
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
@@ -14,11 +15,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 import torch
 
-from evoocc.streaming.aligner_factory import (
-    build_evoocc_aligner,
-    resolve_repo_path,
-    resolve_slow_root,
-)
+from evoocc.streaming.aligner_factory import resolve_repo_path, resolve_slow_root
 from evoocc.streaming.eval_loop import run_streaming_eval
 from evoocc.streaming.opus_runtime import (
     DEFAULT_GT_ROOT,
@@ -32,7 +29,15 @@ from evoocc.streaming.opus_runtime import (
 )
 from evoocc.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
 from evoocc.streaming.slow_cache import build_slow_decoder_fn
-from evoocc.streaming.stream_aligner import StreamAligner
+from evoocc.streaming.streamingflow_aligner import (
+    StreamingFlowStreamAligner,
+    build_streamingflow_model,
+)
+
+
+STREAMINGFLOW_OVERLAY = (
+    Path(REPO_ROOT) / "src" / "evoocc" / "baselines" / "streamingflow" / "occ3d_config.yaml"
+)
 
 
 def parse_args():
@@ -41,7 +46,6 @@ def parse_args():
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--slow-intervals", type=float, nargs="+", required=True)
     p.add_argument("--limit-scenes", type=int, default=None)
-    p.add_argument("--solver", choices=["euler", "heun"], default="euler")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--preload-slow", action="store_true")
@@ -82,11 +86,14 @@ def main():
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
 
-    print("[1] aligner build & load ckpt ...")
-    aligner, data_cfg = build_evoocc_aligner(
-        args.config, args.checkpoint, device, solver=args.solver
+    print("[1] StreamingFlow build & load ckpt ...")
+    model, data_cfg = build_streamingflow_model(
+        args.config,
+        args.checkpoint,
+        str(STREAMINGFLOW_OVERLAY),
+        device,
     )
-    stream_aligner = StreamAligner(aligner)
+    stream_aligner = StreamingFlowStreamAligner(model)
 
     print("[2] OPUSv1-T fast runner build ...")
     fast = build_fast_runner(args, data_cfg)
@@ -115,7 +122,12 @@ def main():
         sweep_pkl=args.sweep_pkl,
         out_json=args.out_json,
         fast_backend="opusv1t_raw_top3",
-        extra_out={"opus_config": args.opus_config},
+        aligner_label="StreamingFlow",
+        extra_out={
+            "aligner": "streamingflow_bev_ode",
+            "streamingflow_checkpoint": args.checkpoint,
+            "opus_config": args.opus_config,
+        },
     )
 
 

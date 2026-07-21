@@ -36,8 +36,8 @@ DEFAULT_SWEEP_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--aligner-cfg", required=True)
-    p.add_argument("--aligner-ckpt", required=True)
+    p.add_argument("--config", required=True)
+    p.add_argument("--checkpoint", required=True)
     p.add_argument("--occ-root", default=DEFAULT_OCCSTUDIO_ROOT)
     p.add_argument("--occ-config", default=None)
     p.add_argument("--occ-ckpt", default=None)
@@ -68,6 +68,8 @@ def build_fast_runner(args, data_cfg):
 def main():
     args = parse_args()
     os.chdir(REPO_ROOT)
+    args.config = resolve_repo_path(args.config, REPO_ROOT)
+    args.checkpoint = resolve_repo_path(args.checkpoint, REPO_ROOT)
     args.bevdetv2_pkl = resolve_repo_path(args.bevdetv2_pkl, REPO_ROOT)
     args.sweep_pkl = resolve_repo_path(args.sweep_pkl, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
@@ -75,7 +77,7 @@ def main():
 
     print("[1] aligner build & load ckpt ...")
     aligner, data_cfg = build_evoocc_aligner(
-        args.aligner_cfg, args.aligner_ckpt, device, solver=args.solver
+        args.config, args.checkpoint, device, solver=args.solver
     )
     stream_aligner = StreamAligner(aligner)
 
