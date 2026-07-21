@@ -1,9 +1,8 @@
-"""OPUSv1-T 在线 fast runner.
+"""OPUSv1/OPUSv2 在线 streaming runner.
 
-只服务 scripts/streaming/opusv1 下的入口，不改动现有 alocc2d_mini FastRunner。
-runner 复用 OPUS 自己的 dataset/model 构建逻辑，
-但不调用 dataset.evaluate / RayIoU，只把当前 keyframe 转成 EvoOcc 需要的
-dense logits: (C, X, Y, Z)。
+只服务 scripts/streaming/opusv1 下的入口，不改动现有 ALOcc FastRunner。
+runner 复用 OPUS 自己的 dataset/model 构建逻辑，但不调用 dataset.evaluate /
+RayIoU，只把当前 keyframe 转成 EvoOcc 需要的 dense logits: (C, X, Y, Z)。
 """
 from __future__ import annotations
 
@@ -49,13 +48,16 @@ def _decode_points(points: torch.Tensor, pc_range: torch.Tensor) -> torch.Tensor
 
 
 class OpusV1FastRunner:
-    """OPUSv1 单帧在线推理 + dense logits 封装.
+    """OPUSv1/OPUSv2 单帧在线推理 + dense logits 封装.
 
     输出契约和 offline OPUS sparse-full loader 对齐：
-      - 只用 sigmoid(raw_logits)>0.5 和中心距离过滤 query；
+      - 按各版本 head.test_cfg 过滤稀疏预测；
       - 命中体素对 17 个非 free raw logits 取 top-k，并 clamp_min；
       - 未命中体素 free 通道为 free_fill_value，其余为 other_fill_value；
       - 返回 (num_classes, X, Y, Z) fp32 CUDA tensor。
+
+    OPUSv1 使用 query points 聚合体素；OPUSv2 直接使用 densifier 输出的
+    all_voxel_coors/all_cls_scores，并按其 test_cfg.score_thr 过滤。
     """
 
     def __init__(
@@ -218,6 +220,49 @@ class OpusV1FastRunner:
 
     def _outs_to_dense_logits(self, pred_dicts: dict) -> torch.Tensor:
         """把 OPUS sparse set raw logits 转成 (C,X,Y,Z) dense top-k logits."""
+        if "all_voxel_coors" in pred_dicts:
+            return self._opusv2_outs_to_dense_logits(pred_dicts)
+
+        return self._opusv1_outs_to_dense_logits(pred_dicts)
+
+    def _scatter_sparse_logits(
+        self,
+        dense: torch.Tensor,
+        voxels: torch.Tensor,
+        voxel_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """把稀疏非 free logits 以 top-k 形式写入 dense tensor。"""
+        if voxels.numel() == 0:
+            return dense
+        if voxel_logits.ndim != 2 or voxel_logits.shape[-1] != len(self._semantic_indices):
+            raise ValueError(
+                "OPUS sparse logits 通道数异常: "
+                f"shape={tuple(voxel_logits.shape)}, expected={len(self._semantic_indices)}"
+            )
+
+        k = min(self.topk_k, int(voxel_logits.shape[-1]))
+        topk_vals, topk_local_idx = torch.topk(
+            voxel_logits, k=k, dim=-1, largest=True, sorted=True
+        )
+        topk_vals = topk_vals.clamp_min(self.clamp_min).to(dtype=dense.dtype)
+        semantic_idx = torch.as_tensor(
+            self._semantic_indices, device=self.device, dtype=torch.long
+        )
+        topk_global_idx = semantic_idx[topk_local_idx.long()]
+        x_idx, y_idx, z_idx = voxels[:, 0], voxels[:, 1], voxels[:, 2]
+        dense[self.free_index, x_idx, y_idx, z_idx] = self.other_fill_value
+        n_hit = int(voxels.shape[0])
+        hit_idx = torch.arange(n_hit, device=self.device).view(n_hit, 1).expand(-1, k)
+        dense[
+            topk_global_idx.reshape(-1),
+            x_idx[hit_idx].reshape(-1),
+            y_idx[hit_idx].reshape(-1),
+            z_idx[hit_idx].reshape(-1),
+        ] = topk_vals.reshape(-1)
+        return dense
+
+    def _opusv1_outs_to_dense_logits(self, pred_dicts: dict) -> torch.Tensor:
+        """解码 OPUSv1 query-based raw outputs。"""
         head = self.model.pts_bbox_head
         all_cls_scores = pred_dicts["all_cls_scores"]
         all_refine_pts = pred_dicts["all_refine_pts"]
@@ -252,26 +297,32 @@ class OpusV1FastRunner:
 
         voxels = torch.flip(voxels, [1]).long()
         voxel_logits = pts_infos[..., 3:].sum(dim=1) / num_pts[..., None]
-        k = min(self.topk_k, int(voxel_logits.shape[-1]))
-        topk_vals, topk_local_idx = torch.topk(
-            voxel_logits, k=k, dim=-1, largest=True, sorted=True
+        return self._scatter_sparse_logits(dense, voxels, voxel_logits)
+
+    def _opusv2_outs_to_dense_logits(self, pred_dicts: dict) -> torch.Tensor:
+        """解码 OPUSv2 densifier raw outputs，与离线 sparse-full 契约对齐。"""
+        head = self.model.pts_bbox_head
+        raw_cls_logits = pred_dicts["all_cls_scores"][-1]
+        voxel_coors = pred_dicts["all_voxel_coors"][-1]
+        if raw_cls_logits.ndim != 2 or voxel_coors.ndim != 2 or voxel_coors.shape[-1] != 4:
+            raise ValueError(
+                "OPUSv2 raw outputs 形状异常: "
+                f"logits={tuple(raw_cls_logits.shape)}, coors={tuple(voxel_coors.shape)}"
+            )
+        if raw_cls_logits.shape[0] != voxel_coors.shape[0]:
+            raise ValueError(
+                "OPUSv2 logits/coors 数量不一致: "
+                f"{raw_cls_logits.shape[0]} != {voxel_coors.shape[0]}"
+            )
+
+        dense = self._empty_dense()
+        score_thr = float(head.test_cfg.get("score_thr", 0.0))
+        mask = (voxel_coors[:, 0] == 0) & (
+            raw_cls_logits.sigmoid().amax(dim=-1) > score_thr
         )
-        topk_vals = topk_vals.clamp_min(self.clamp_min).to(dtype=dense.dtype)
-        semantic_idx = torch.as_tensor(
-            self._semantic_indices, device=self.device, dtype=torch.long
-        )
-        topk_global_idx = semantic_idx[topk_local_idx.long()]
-        x_idx, y_idx, z_idx = voxels[:, 0], voxels[:, 1], voxels[:, 2]
-        dense[self.free_index, x_idx, y_idx, z_idx] = self.other_fill_value
-        n_hit = int(voxels.shape[0])
-        hit_idx = torch.arange(n_hit, device=self.device).view(n_hit, 1).expand(-1, k)
-        dense[
-            topk_global_idx.reshape(-1),
-            x_idx[hit_idx].reshape(-1),
-            y_idx[hit_idx].reshape(-1),
-            z_idx[hit_idx].reshape(-1),
-        ] = topk_vals.reshape(-1)
-        return dense
+        voxels = voxel_coors[mask, 1:].long()
+        voxel_logits = raw_cls_logits[mask]
+        return self._scatter_sparse_logits(dense, voxels, voxel_logits)
 
     def prepare_batch(self, raw_sample) -> dict:
         """把 dataset[i] 输出包装成 forward_keyframe 期望的 batch dict."""

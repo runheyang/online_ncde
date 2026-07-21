@@ -20,18 +20,19 @@ from evoocc.streaming.aligner_factory import (
     resolve_slow_root,
 )
 from evoocc.streaming.eval_loop import run_streaming_eval
-from evoocc.streaming.opusv1_fast_runner import OpusV1FastRunner
+from evoocc.streaming.opus_runtime import (
+    DEFAULT_GT_ROOT,
+    DEFAULT_META_PKL,
+    DEFAULT_OPUS_ROOT,
+    DEFAULT_OPUSV1_CKPT,
+    DEFAULT_OPUSV1_CONFIG,
+    DEFAULT_SWEEP_PKL,
+    build_opus_runner,
+    resolve_opus_path,
+)
 from evoocc.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
 from evoocc.streaming.slow_cache import build_slow_decoder_fn
 from evoocc.streaming.stream_aligner import StreamAligner
-
-
-OPUS_ROOT = "/root/autodl-tmp/OPUS"
-OPUS_CONFIG = "configs/opusv1_nusc-occ3d/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.py"
-OPUS_CKPT = "checkpoints/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.pth"
-META_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
-GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
-DEFAULT_SWEEP_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
 
 
 def parse_args():
@@ -45,11 +46,11 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--prefetch-factor", type=int, default=2)
     p.add_argument("--preload-slow", action="store_true")
-    p.add_argument("--opus-root", default=OPUS_ROOT)
-    p.add_argument("--opus-config", default=OPUS_CONFIG)
-    p.add_argument("--opus-ckpt", default=OPUS_CKPT)
-    p.add_argument("--meta-pkl", default=META_PKL)
-    p.add_argument("--gt-root", default=GT_ROOT)
+    p.add_argument("--opus-root", default=DEFAULT_OPUS_ROOT)
+    p.add_argument("--opus-config", default=DEFAULT_OPUSV1_CONFIG)
+    p.add_argument("--opus-ckpt", default=DEFAULT_OPUSV1_CKPT)
+    p.add_argument("--meta-pkl", default=DEFAULT_META_PKL)
+    p.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
     p.add_argument("--sweep-pkl", default=DEFAULT_SWEEP_PKL)
     p.add_argument("--no-rayiou", action="store_true")
     p.add_argument("--out-json", default=None)
@@ -57,21 +58,15 @@ def parse_args():
 
 
 def build_fast_runner(args, data_cfg):
-    fast = OpusV1FastRunner(
+    return build_opus_runner(
+        data_cfg,
         opus_root=args.opus_root,
         config_path=args.opus_config,
         ckpt_path=args.opus_ckpt,
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        other_fill_value=float(data_cfg.get("opus_other_fill_value", -5.0)),
-        free_fill_value=float(data_cfg.get("opus_free_fill_value", 5.0)),
-        topk_k=int(data_cfg.get("opus_full_topk_k", 3)),
-        clamp_min=float(data_cfg.get("opus_clamp_min", -5.0)),
+        role="fast",
+        repo_root=REPO_ROOT,
         device="cuda:0",
     )
-    fast.build()
-    return fast
 
 
 def main():
@@ -79,6 +74,12 @@ def main():
     os.chdir(REPO_ROOT)
     args.aligner_cfg = resolve_repo_path(args.aligner_cfg, REPO_ROOT)
     args.aligner_ckpt = resolve_repo_path(args.aligner_ckpt, REPO_ROOT)
+    args.opus_root = resolve_repo_path(args.opus_root, REPO_ROOT)
+    args.opus_config = resolve_opus_path(args.opus_config, args.opus_root, REPO_ROOT)
+    args.opus_ckpt = resolve_opus_path(args.opus_ckpt, args.opus_root, REPO_ROOT)
+    args.meta_pkl = resolve_repo_path(args.meta_pkl, REPO_ROOT)
+    args.gt_root = resolve_repo_path(args.gt_root, REPO_ROOT)
+    args.sweep_pkl = resolve_repo_path(args.sweep_pkl, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
 
@@ -92,7 +93,9 @@ def main():
     fast = build_fast_runner(args, data_cfg)
 
     slow_root = resolve_slow_root(data_cfg, REPO_ROOT)
-    slow_format = data_cfg.get("slow_logit_format", data_cfg.get("logits_format", "opus_sparse_full"))
+    slow_format = data_cfg.get(
+        "slow_logit_format", data_cfg.get("logits_format", "opus_sparse_full")
+    )
     print(
         f"[3] sample meta index (slow_format={slow_format}, slow_root={slow_root}, "
         f"slow_delay_kf={args.slow_delay_keyframes}) ..."

@@ -83,6 +83,8 @@ def benchmark_opus_native_only(fast, raw_batches, warmup: int, samples: int, dat
     def step(raw):
         batch = scatter_to_device(raw, 0)
         img_metas, img = _unwrap_opus_batch(batch)
+        if img.dim() == 4:
+            img = img.unsqueeze(0)
         result = fast.model.simple_test(img_metas, img)
         return _sparse_occ_to_dense_uint8(
             result,
@@ -99,19 +101,30 @@ def benchmark_opus_native_only(fast, raw_batches, warmup: int, samples: int, dat
     )
 
 
-def benchmark_opus_fast_only(fast, raw_batches, warmup: int, samples: int):
-    """OPUS raw-top3 dense logits -> argmax/cpu."""
-    fast.reset_history()
+def benchmark_opus_only(runner, raw_batches, warmup: int, samples: int, name: str):
+    """OPUS raw-top3 dense logits -> argmax/cpu，可用于 fast/slow。"""
+    runner.reset_history()
 
     def step(raw):
         batch = scatter_to_device(raw, 0)
-        fast_logits = fast.forward_keyframe(batch)
-        return fast_logits.argmax(0).to(torch.uint8).cpu().numpy()
+        logits = runner.forward_keyframe(batch)
+        return logits.argmax(0).to(torch.uint8).cpu().numpy()
 
     return benchmark_callable(
-        "fast-only(raw-top3)",
+        name,
         raw_batches,
         warmup,
         samples,
         step,
+    )
+
+
+def benchmark_opus_fast_only(fast, raw_batches, warmup: int, samples: int):
+    """保留原 OPUS fast-only 入口。"""
+    return benchmark_opus_only(
+        fast,
+        raw_batches,
+        warmup,
+        samples,
+        name="fast-only(raw-top3)",
     )

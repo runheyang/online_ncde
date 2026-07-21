@@ -19,6 +19,7 @@ configure_benchmark_env()
 
 import torch
 
+from evoocc.config import load_config_with_base
 from evoocc.streaming.benchmark_runtime import configure_torch_benchmark_runtime
 from evoocc.streaming.aligner_factory import (
     build_evoocc_aligner,
@@ -30,95 +31,164 @@ from evoocc.streaming.benchmark_loop import (
     make_loader_iter,
     preload_slow_cache,
     select_benchmark_frames,
-    wants_mode,
 )
 from evoocc.streaming.benchmark_modes import (
     benchmark_opus_fast_only,
     benchmark_opus_native_only,
+    benchmark_opus_only,
 )
-from evoocc.streaming.opusv1_fast_runner import OpusV1FastRunner
+from evoocc.streaming.opus_runtime import (
+    DEFAULT_GT_ROOT,
+    DEFAULT_META_PKL,
+    DEFAULT_OPUS_ROOT,
+    DEFAULT_OPUSV1_CKPT,
+    DEFAULT_OPUSV1_CONFIG,
+    DEFAULT_OPUSV2_CKPT,
+    DEFAULT_OPUSV2_CONFIG,
+    build_opus_runner,
+    resolve_opus_path,
+)
 from evoocc.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
 from evoocc.streaming.stream_aligner import StreamAligner
 
 configure_torch_benchmark_runtime(torch)
 
 
-OPUS_ROOT = "/root/autodl-tmp/OPUS"
-OPUS_CONFIG = "configs/opusv1_nusc-occ3d/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.py"
-OPUS_CKPT = "checkpoints/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.pth"
-META_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
-GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
-
-
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--aligner-cfg", required=True)
-    p.add_argument("--aligner-ckpt", required=True)
+    p.add_argument("--config", required=True)
+    p.add_argument("--checkpoint", default=None)
+    p.add_argument("--opus-root", default=DEFAULT_OPUS_ROOT)
+    p.add_argument("--opus-config", default=DEFAULT_OPUSV1_CONFIG)
+    p.add_argument("--opus-ckpt", default=DEFAULT_OPUSV1_CKPT)
+    p.add_argument("--slow-opus-config", default=DEFAULT_OPUSV2_CONFIG)
+    p.add_argument("--slow-opus-ckpt", default=DEFAULT_OPUSV2_CKPT)
+    p.add_argument("--meta-pkl", default=DEFAULT_META_PKL)
+    p.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
     p.add_argument("--samples", type=int, default=200)
     p.add_argument("--warmup", type=int, default=20)
-    p.add_argument("--slow-interval", type=float, default=4.0)
-    p.add_argument("--mode", choices=["native-only", "fast-only", "fast-ours", "both", "all"], default="both")
+    p.add_argument("--slow-interval", type=float, default=5.0)
+    p.add_argument(
+        "--mode",
+        choices=["native-only", "fast-only", "slow-only", "fast-ours", "both", "all"],
+        default="all",
+        help="默认 all，运行全部模式；both 仅运行 fast-only + fast-ours",
+    )
     p.add_argument("--solver", choices=["euler", "heun"], default="euler")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--prefetch-factor", type=int, default=2)
-    p.add_argument("--opus-root", default=OPUS_ROOT)
-    p.add_argument("--opus-config", default=OPUS_CONFIG)
-    p.add_argument("--opus-ckpt", default=OPUS_CKPT)
-    p.add_argument("--meta-pkl", default=META_PKL)
-    p.add_argument("--gt-root", default=GT_ROOT)
     p.add_argument("--out-json", default=None)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.mode in ("fast-ours", "both", "all") and not args.checkpoint:
+        p.error(f"--mode {args.mode} 需要 --checkpoint")
+    return args
 
 
 def build_fast_runner(args, data_cfg):
-    fast = OpusV1FastRunner(
+    return build_opus_runner(
+        data_cfg,
         opus_root=args.opus_root,
         config_path=args.opus_config,
         ckpt_path=args.opus_ckpt,
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        other_fill_value=float(data_cfg.get("opus_other_fill_value", -5.0)),
-        free_fill_value=float(data_cfg.get("opus_free_fill_value", 5.0)),
-        topk_k=int(data_cfg.get("opus_full_topk_k", 3)),
-        clamp_min=float(data_cfg.get("opus_clamp_min", -5.0)),
+        role="fast",
+        repo_root=REPO_ROOT,
         device="cuda:0",
     )
-    fast.build()
-    return fast
+
+
+def build_slow_runner(args, data_cfg):
+    return build_opus_runner(
+        data_cfg,
+        opus_root=args.opus_root,
+        config_path=args.slow_opus_config,
+        ckpt_path=args.slow_opus_ckpt,
+        role="slow",
+        repo_root=REPO_ROOT,
+        device="cuda:0",
+    )
+
+
+def mode_enabled(mode: str, name: str) -> bool:
+    if mode == "all":
+        return True
+    if mode == "both":
+        return name in ("fast-only", "fast-ours")
+    return mode == name
+
+
+def select_frames(runner, sample_meta_index, args):
+    scenes_meta = list(iter_scenes(runner.dataset, sample_meta_index, limit_scenes=None))
+    _flat, flat_indices, flat_metas = select_benchmark_frames(
+        scenes_meta, args.warmup, args.samples
+    )
+    return flat_indices, flat_metas
 
 
 def main():
     args = parse_args()
     os.chdir(REPO_ROOT)
-    args.aligner_cfg = resolve_repo_path(args.aligner_cfg, REPO_ROOT)
-    args.aligner_ckpt = resolve_repo_path(args.aligner_ckpt, REPO_ROOT)
+    args.config = resolve_repo_path(args.config, REPO_ROOT)
+    args.checkpoint = resolve_repo_path(args.checkpoint, REPO_ROOT)
+    args.opus_root = resolve_repo_path(args.opus_root, REPO_ROOT)
+    args.opus_config = resolve_opus_path(args.opus_config, args.opus_root, REPO_ROOT)
+    args.opus_ckpt = resolve_opus_path(args.opus_ckpt, args.opus_root, REPO_ROOT)
+    args.slow_opus_config = resolve_opus_path(
+        args.slow_opus_config, args.opus_root, REPO_ROOT
+    )
+    args.slow_opus_ckpt = resolve_opus_path(
+        args.slow_opus_ckpt, args.opus_root, REPO_ROOT
+    )
+    args.meta_pkl = resolve_repo_path(args.meta_pkl, REPO_ROOT)
+    args.gt_root = resolve_repo_path(args.gt_root, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
-
-    print("[1] aligner build & load ckpt ...")
-    aligner, data_cfg = build_evoocc_aligner(
-        args.aligner_cfg, args.aligner_ckpt, device, solver=args.solver
-    )
-    stream_aligner = StreamAligner(aligner)
-
-    print("[2] OPUSv1-T fast runner build ...")
-    fast = build_fast_runner(args, data_cfg)
-
+    data_cfg = load_config_with_base(args.config)["data"]
     slow_root = resolve_slow_root(data_cfg, REPO_ROOT)
-    slow_format = data_cfg.get("slow_logit_format", data_cfg.get("logits_format", "opus_sparse_full"))
-    print(f"[3] sample meta index (slow_format={slow_format}, slow_root={slow_root}) ...")
-    s2m = build_opus_sample_meta_index(args.meta_pkl, slow_root, args.gt_root)
-    scenes_meta = list(iter_scenes(fast.dataset, s2m, limit_scenes=None))
-    _flat, flat_indices, flat_metas = select_benchmark_frames(
-        scenes_meta, args.warmup, args.samples
+    slow_format = data_cfg.get(
+        "slow_logit_format", data_cfg.get("logits_format", "opus_sparse_full")
     )
-
-    print("[4] preload slow logits ...")
-    slow_cache = preload_slow_cache(data_cfg, device, flat_metas)
+    print(f"[meta] slow_format={slow_format}, slow_root={slow_root}")
+    sample_meta_index = build_opus_sample_meta_index(
+        args.meta_pkl, slow_root, args.gt_root
+    )
 
     results = {}
-    if wants_mode(args.mode, "native-only", ("fast-only", "fast-ours")):
+
+    if mode_enabled(args.mode, "slow-only"):
+        print("[slow] OPUSv2-L slow runner build ...")
+        slow = build_slow_runner(args, data_cfg)
+        slow_indices, _slow_metas = select_frames(slow, sample_meta_index, args)
+        print("\n=== Mode S: OPUSv2-L slow-only raw-top3 ===")
+        results["slow_only"] = benchmark_opus_only(
+            slow,
+            make_loader_iter(slow, slow_indices, args.num_workers, args.prefetch_factor),
+            args.warmup,
+            args.samples,
+            name="slow-only(raw-top3)",
+        )
+        del slow
+        torch.cuda.empty_cache()
+
+    needs_fast = any(
+        mode_enabled(args.mode, name)
+        for name in ("native-only", "fast-only", "fast-ours")
+    )
+    if needs_fast:
+        stream_aligner = None
+        if mode_enabled(args.mode, "fast-ours"):
+            print("[aligner] build & load ckpt ...")
+            aligner, aligner_data_cfg = build_evoocc_aligner(
+                args.config, args.checkpoint, device, solver=args.solver
+            )
+            if aligner_data_cfg != data_cfg:
+                raise ValueError("aligner 构建返回的 data_cfg 与配置加载结果不一致")
+            stream_aligner = StreamAligner(aligner)
+
+        print("[fast] OPUSv1-T fast runner build ...")
+        fast = build_fast_runner(args, data_cfg)
+        flat_indices, flat_metas = select_frames(fast, sample_meta_index, args)
+
+    if mode_enabled(args.mode, "native-only"):
         print("\n=== Mode A0: OPUS native simple_test + sparse->dense uint8 ===")
         results["native_only"] = benchmark_opus_native_only(
             fast,
@@ -128,7 +198,7 @@ def main():
             data_cfg,
         )
 
-    if wants_mode(args.mode, "fast-only", ("fast-only", "fast-ours")):
+    if mode_enabled(args.mode, "fast-only"):
         print("\n=== Mode A: OPUS raw-top3 fast-only ===")
         results["fast_only"] = benchmark_opus_fast_only(
             fast,
@@ -137,7 +207,9 @@ def main():
             args.samples,
         )
 
-    if wants_mode(args.mode, "fast-ours", ("fast-only", "fast-ours")):
+    if mode_enabled(args.mode, "fast-ours"):
+        print("[slow-cache] preload OPUSv2-L logits ...")
+        slow_cache = preload_slow_cache(data_cfg, device, flat_metas)
         print(f"\n=== Mode B: OPUS raw-top3 fast + EvoOcc (slow_interval={args.slow_interval}s) ===")
         results["fast_ours"] = benchmark_stream_aligned(
             name="fast+ours",
@@ -154,12 +226,15 @@ def main():
         )
 
     print(f"\n{'=' * 72}")
-    print(f"Final OPUSv1 benchmark (warmup={args.warmup}, measured={args.samples})")
+    print(f"Final OPUS benchmark (warmup={args.warmup}, measured={args.samples})")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"{'=' * 72}")
     if "native_only" in results:
         a0 = results["native_only"]
         print(f"  OPUS native          | {a0['latency_ms_mean']:6.2f} ms | {a0['fps']:6.2f} FPS")
+    if "slow_only" in results:
+        s = results["slow_only"]
+        print(f"  OPUSv2-L slow-only   | {s['latency_ms_mean']:6.2f} ms | {s['fps']:6.2f} FPS")
     if "fast_only" in results:
         a = results["fast_only"]
         print(f"  raw-top3 fast-only   | {a['latency_ms_mean']:6.2f} ms | {a['fps']:6.2f} FPS")
@@ -182,6 +257,13 @@ def main():
         with open(args.out_json, "w") as f:
             json.dump({
                 "fast_backend": "opusv1t_raw_top3",
+                "slow_backend": "opusv2l_raw_top3",
+                "fast_config": args.opus_config,
+                "fast_checkpoint": args.opus_ckpt,
+                "slow_config": args.slow_opus_config,
+                "slow_checkpoint": args.slow_opus_ckpt,
+                "dataset_variant": data_cfg.get("dataset_variant", "occ3d"),
+                "mode": args.mode,
                 "warmup": args.warmup,
                 "measured": args.samples,
                 "slow_interval_sec": args.slow_interval,

@@ -33,17 +33,20 @@ from evoocc.streaming.benchmark_modes import (
     benchmark_opus_native_only,
 )
 from evoocc.streaming.no_warp_attn import NoWarpAttnStreamAligner, build_no_warp_aligner
-from evoocc.streaming.opusv1_fast_runner import OpusV1FastRunner
+from evoocc.streaming.opus_runtime import (
+    DEFAULT_GT_ROOT,
+    DEFAULT_META_PKL,
+    DEFAULT_OPUS_ROOT,
+    DEFAULT_OPUSV1_CKPT,
+    DEFAULT_OPUSV1_CONFIG,
+    build_opus_runner,
+    resolve_opus_path,
+)
 from evoocc.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
 
 configure_torch_benchmark_runtime(torch)
 
 
-OPUS_ROOT = "/root/autodl-tmp/OPUS"
-OPUS_CONFIG = "configs/opusv1_nusc-occ3d/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.py"
-OPUS_CKPT = "checkpoints/opusv1-t_r50_704x256_8f_nusc-occ3d_100e.pth"
-META_PKL = "/root/autodl-tmp/data/nuscenes/nuscenes_infos_val_sweep.pkl"
-GT_ROOT = "/root/autodl-tmp/data/nuscenes/gts"
 DEFAULT_ALIGNER_CFG = "configs/evoocc/fast_opusv1t__slow_opusv2l.yaml"
 DEFAULT_ALIGNER_CKPT = (
     "ckpts/fast_opusv1t__slow_opusv2l/"
@@ -61,11 +64,11 @@ def parse_args():
     p.add_argument("--mode", choices=["native-only", "fast-only", "fast-nowarp", "both", "all"], default="both")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--prefetch-factor", type=int, default=2)
-    p.add_argument("--opus-root", default=OPUS_ROOT)
-    p.add_argument("--opus-config", default=OPUS_CONFIG)
-    p.add_argument("--opus-ckpt", default=OPUS_CKPT)
-    p.add_argument("--meta-pkl", default=META_PKL)
-    p.add_argument("--gt-root", default=GT_ROOT)
+    p.add_argument("--opus-root", default=DEFAULT_OPUS_ROOT)
+    p.add_argument("--opus-config", default=DEFAULT_OPUSV1_CONFIG)
+    p.add_argument("--opus-ckpt", default=DEFAULT_OPUSV1_CKPT)
+    p.add_argument("--meta-pkl", default=DEFAULT_META_PKL)
+    p.add_argument("--gt-root", default=DEFAULT_GT_ROOT)
     p.add_argument("--out-json", default=None)
     p.add_argument("--use-fast-residual", dest="use_fast_residual", action="store_true", default=False)
     p.add_argument("--no-use-fast-residual", dest="use_fast_residual", action="store_false")
@@ -73,21 +76,15 @@ def parse_args():
 
 
 def build_fast_runner(args, data_cfg):
-    fast = OpusV1FastRunner(
+    return build_opus_runner(
+        data_cfg,
         opus_root=args.opus_root,
         config_path=args.opus_config,
         ckpt_path=args.opus_ckpt,
-        num_classes=data_cfg["num_classes"],
-        free_index=data_cfg["free_index"],
-        grid_size=tuple(data_cfg["grid_size"]),
-        other_fill_value=float(data_cfg.get("opus_other_fill_value", -5.0)),
-        free_fill_value=float(data_cfg.get("opus_free_fill_value", 5.0)),
-        topk_k=int(data_cfg.get("opus_full_topk_k", 3)),
-        clamp_min=float(data_cfg.get("opus_clamp_min", -5.0)),
+        role="fast",
+        repo_root=REPO_ROOT,
         device="cuda:0",
     )
-    fast.build()
-    return fast
 
 
 def main():
@@ -95,6 +92,11 @@ def main():
     os.chdir(REPO_ROOT)
     args.aligner_cfg = resolve_repo_path(args.aligner_cfg, REPO_ROOT)
     args.aligner_ckpt = resolve_repo_path(args.aligner_ckpt, REPO_ROOT)
+    args.opus_root = resolve_repo_path(args.opus_root, REPO_ROOT)
+    args.opus_config = resolve_opus_path(args.opus_config, args.opus_root, REPO_ROOT)
+    args.opus_ckpt = resolve_opus_path(args.opus_ckpt, args.opus_root, REPO_ROOT)
+    args.meta_pkl = resolve_repo_path(args.meta_pkl, REPO_ROOT)
+    args.gt_root = resolve_repo_path(args.gt_root, REPO_ROOT)
     args.out_json = resolve_repo_path(args.out_json, REPO_ROOT)
     device = torch.device("cuda:0")
 
