@@ -354,6 +354,9 @@ def main() -> None:
         rollout_mode=str(train_cfg.get("rollout_mode", "full")),
         primary_supervision_label=str(eval_cfg.get("primary_supervision_label", "t-1.0")),
         stepwise_max_step_index=train_cfg.get("max_step_index", None),
+        gradient_accumulation_steps=int(
+            train_cfg.get("gradient_accumulation_steps", 1)
+        ),
         is_main=is_main,
         ema=ema,
     )

@@ -38,9 +38,7 @@ model:
 
 train:
   epochs: 20
-  # batch_size=1 下每 2 个 micro-batch 更新一次，模拟 batch_size=2。
-  gradient_accumulation_steps: 2
-  # StreamingFlow baseline 输出 absolute logits，不使用 fast residual KL。
+  gradient_accumulation_steps: 1
   lambda_fast_kl: 0.0
 
 wandb:

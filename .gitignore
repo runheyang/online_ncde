@@ -63,3 +63,5 @@ scripts/ray_tuing_runs_opus
 *.png
 *.jpg
 tests/evoocc/*.json
+papers/
+.agents/

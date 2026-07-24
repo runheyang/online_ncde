@@ -1,13 +1,13 @@
-"""Neural ODE 离散化 baseline。
+"""低分辨率 Neural ODE baseline 的内部 rollout 实现。
 
-与 EvoOccAligner 的唯一差异：
+更新语义：
   - EvoOcc：每步控制增量 = (Fast_t - Fast_{t-1→t}) ‖ τ 拼接 → 1x1x1 conv → hidden_dim，
     再与 func_g 输出做 odot；
-  - 本 baseline：每步控制增量 = 标量 Δt，广播为 (hidden_dim, X, Y, Z) 后与 func_g
+  - 本 rollout：每步控制增量 = 标量 Δt，广播为 (hidden_dim, X, Y, Z) 后与 func_g
     输出做 odot。形式上即 h' = g(h, f) * Δt 的经典 Neural ODE 离散化。
 
-其余结构（双独立 encoder、全分辨率、ego-warp、FuncG、fast 残差、stepwise 接口、
-fast-KL 协议）全部对齐 EvoOccAligner，方便消融归因 EvoOcc 控制增量构造。
+该模块只提供低分辨率 aligner 复用的 solver 与 rollout 骨架，不再作为
+独立全分辨率 baseline 对外导出。
 """
 
 from __future__ import annotations
@@ -78,11 +78,11 @@ class NeuralOdeDtSolver(nn.Module):
         return h_next, delta_scene
 
 
-class NeuralOdeDtAligner(nn.Module):
-    """Neural ODE 离散化对齐器（Δt 控制增量 baseline）。
+class _NeuralOdeDtRolloutBase(nn.Module):
+    """Neural ODE Δt 对齐器的内部 rollout 基类。
 
-    forward / forward_stepwise_eval 接口与 EvoOccAligner 一致，可直接喂给
-    Trainer / 各类 evaluation 脚本，无需任何分支改动。
+    子类负责提供实际 encoder、decoder 与演化网格；本类保留统一的
+    forward / stepwise / ego-warp / Fast-KL 实现。
     """
 
     def __init__(
