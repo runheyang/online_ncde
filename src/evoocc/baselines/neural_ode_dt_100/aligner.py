@@ -1,4 +1,4 @@
-"""在 100×100×16 latent 中演化的 Neural ODE Δt baseline。"""
+"""在 50×50×16 latent 中演化的 Neural ODE Δt baseline。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
     """仅以真实 ``Δt`` 驱动、在固定低分辨率空间递归演化的对齐器。
 
     继承父类的双状态初始化、相邻帧 ego-warp、ODE solver、stepwise 接口和
-    Fast-KL 协议，只替换空间编码与解码路径。
+    Fast-KL 协议，只替换空间编码与解码路径。类名保留 ``100`` 以兼容已有入口。
     """
 
     def __init__(
@@ -29,15 +29,15 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
         free_index: int,
         pc_range: Tuple[float, float, float, float, float, float],
         voxel_size: Tuple[float, float, float],
-        latent_dim: int = 120,
-        func_g_inner_dim: int = 48,
+        latent_dim: int = 288,
+        func_g_inner_dim: int = 104,
         func_g_body_dilations: Sequence[int] = (1, 3, 5),
         func_g_gn_groups: int = 8,
         decoder_channels: int = 32,
         decoder_init_scale: Optional[float] = 1.0e-6,
         use_fast_residual: bool = True,
         input_grid_size: Tuple[int, int, int] = (200, 200, 16),
-        latent_grid_size: Tuple[int, int, int] = (100, 100, 16),
+        latent_grid_size: Tuple[int, int, int] = (50, 50, 16),
         timestamp_scale: float = 1.0e-6,
         solver_variant: str = "euler",
     ) -> None:
@@ -48,9 +48,9 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
                 "Neural ODE Δt baseline 的输入固定为 (200,200,16)，"
                 f"当前 {input_grid}"
             )
-        if latent_grid != (100, 100, 16):
+        if latent_grid != (50, 50, 16):
             raise ValueError(
-                "Neural ODE Δt baseline 的演化空间固定为 (100,100,16)，"
+                "Neural ODE Δt baseline 的演化空间固定为 (50,50,16)，"
                 f"当前 {latent_grid}"
             )
 
@@ -60,8 +60,8 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
                 f"voxel_size 必须长度为 3，当前 {input_voxel_size}"
             )
         latent_voxel_size = (
-            2.0 * input_voxel_size[0],
-            2.0 * input_voxel_size[1],
+            4.0 * input_voxel_size[0],
+            4.0 * input_voxel_size[1],
             input_voxel_size[2],
         )
 
@@ -102,11 +102,13 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
         self.fast_encoder = XYDownsampleEncoder(
             in_channels=self.encoder_in_channels,
             out_channels=self.latent_dim,
+            xy_downsample_factor=4,
             gn_groups=int(func_g_gn_groups),
         )
         self.slow_encoder = XYDownsampleEncoder(
             in_channels=self.encoder_in_channels,
             out_channels=self.latent_dim,
+            xy_downsample_factor=4,
             gn_groups=int(func_g_gn_groups),
         )
         self.decoder = XYUpsampleResidualDecoder(
@@ -130,7 +132,7 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
         encoded = self.fast_encoder(fast_logits)
         if tuple(encoded.shape[2:]) != self.latent_grid_size:
             raise RuntimeError(
-                "fast encoder 未产生固定的 100×100×16 latent，"
+                "fast encoder 未产生固定的 50×50×16 latent，"
                 f"当前 {tuple(encoded.shape)}"
             )
         return encoded
@@ -147,7 +149,7 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
         encoded = self.slow_encoder(slow_logits.unsqueeze(0))[0]
         if tuple(encoded.shape[1:]) != self.latent_grid_size:
             raise RuntimeError(
-                "slow encoder 未产生固定的 100×100×16 latent，"
+                "slow encoder 未产生固定的 50×50×16 latent，"
                 f"当前 {tuple(encoded.shape)}"
             )
         return encoded
@@ -159,7 +161,7 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
             *self.latent_grid_size,
         ):
             raise ValueError(
-                "待解码状态必须位于 100×100×16，"
+                "待解码状态必须位于 50×50×16，"
                 f"当前 {tuple(z_dense.shape)}"
             )
         return self.decoder(

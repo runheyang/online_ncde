@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""100×100×16 Neural ODE Δt baseline 评估入口。"""
+"""50×50×16 Neural ODE Δt baseline 评估入口。"""
 
 from __future__ import annotations
 
@@ -78,8 +78,8 @@ class _NeuralOdeDt100AsAligner:
             free_index=int(free_index),
             pc_range=tuple(pc_range),
             voxel_size=tuple(voxel_size),
-            latent_dim=int(cfg.get("latent_dim", 120)),
-            func_g_inner_dim=int(cfg.get("func_g_inner_dim", 48)),
+            latent_dim=int(cfg.get("latent_dim", 288)),
+            func_g_inner_dim=int(cfg.get("func_g_inner_dim", 104)),
             func_g_body_dilations=tuple(
                 cfg.get("func_g_body_dilations", [1, 3, 5])
             ),
@@ -89,7 +89,7 @@ class _NeuralOdeDt100AsAligner:
             use_fast_residual=bool(cfg.get("use_fast_residual", True)),
             input_grid_size=input_grid_size,
             latent_grid_size=tuple(
-                cfg.get("latent_grid_size", [100, 100, 16])
+                cfg.get("latent_grid_size", [50, 50, 16])
             ),
             timestamp_scale=float(timestamp_scale),
             solver_variant=configured_solver,
@@ -124,7 +124,7 @@ def main() -> None:
     )
     print(
         "[neural-ode-dt-100] "
-        "channels=120 latent_grid=100x100x16 solver=euler"
+        "channels=288/104 latent_grid=50x50x16 solver=euler"
     )
     upstream.main()
 

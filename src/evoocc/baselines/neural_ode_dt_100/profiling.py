@@ -1,4 +1,4 @@
-"""Neural ODE Δt 100×100×16 baseline 的卷积 FLOPs 估算。"""
+"""Neural ODE Δt 50×50×16 baseline 的卷积 FLOPs 估算。"""
 
 from __future__ import annotations
 
@@ -28,10 +28,10 @@ def estimate_neural_ode_dt_100_stepwise(
     num_frames: int = 5,
     num_targets: int = 4,
     input_grid_size: tuple[int, int, int] = (200, 200, 16),
-    latent_grid_size: tuple[int, int, int] = (100, 100, 16),
+    latent_grid_size: tuple[int, int, int] = (50, 50, 16),
     num_classes: int = 18,
-    latent_dim: int = 120,
-    func_g_inner_dim: int = 48,
+    latent_dim: int = 288,
+    func_g_inner_dim: int = 104,
     decoder_channels: int = 32,
     num_body_blocks: int = 3,
 ) -> ComputeEstimate:
@@ -118,7 +118,7 @@ def main() -> None:
         f"{evoocc.gflops:.5f} GFLOPs"
     )
     print(
-        f"Neural ODE dt 100: {baseline.gmacs:.5f} GMACs / "
+        f"Neural ODE dt 50: {baseline.gmacs:.5f} GMACs / "
         f"{baseline.gflops:.5f} GFLOPs"
     )
     print(f"ratio={baseline.macs / evoocc.macs:.6f}")

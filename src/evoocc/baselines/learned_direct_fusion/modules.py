@@ -13,9 +13,9 @@ from evoocc.utils.nn import resolve_group_norm_groups
 
 
 class XYDownsampleEncoder(nn.Module):
-    """仅下采样 XY，将 `(B,C,200,200,16)` 编码到 `100×100×16`。
+    """仅下采样 XY，并在低分辨率空间编码特征。
 
-    先对相邻 2×2 voxel 做平均，使低分辨率 voxel 中心与 0.8 m 网格中心对齐；
+    先对相邻 voxel 做平均，使低分辨率 voxel 中心与对应物理网格中心对齐；
     随后的 3×3×3 卷积只负责特征编码，不再改变空间尺寸。
     """
 
@@ -23,11 +23,19 @@ class XYDownsampleEncoder(nn.Module):
         self,
         in_channels: int,
         out_channels: int,
+        xy_downsample_factor: int = 2,
         gn_groups: int = 8,
     ) -> None:
         super().__init__()
+        factor = int(xy_downsample_factor)
+        if factor <= 0:
+            raise ValueError(f"xy_downsample_factor 必须为正整数，当前 {factor}")
+        self.xy_downsample_factor = factor
         groups = resolve_group_norm_groups(out_channels, gn_groups)
-        self.pool = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
+        self.pool = nn.AvgPool3d(
+            kernel_size=(1, factor, factor),
+            stride=(1, factor, factor),
+        )
         self.conv = nn.Conv3d(
             in_channels,
             out_channels,
@@ -45,9 +53,12 @@ class XYDownsampleEncoder(nn.Module):
             raise ValueError(
                 f"encoder 输入必须为 5D (B,C,X,Y,Z)，当前 {tuple(logits.shape)}"
             )
-        if logits.shape[2] % 2 or logits.shape[3] % 2:
+        if (
+            logits.shape[2] % self.xy_downsample_factor
+            or logits.shape[3] % self.xy_downsample_factor
+        ):
             raise ValueError(
-                "XY 尺寸必须为偶数，"
+                "XY 尺寸必须能被下采样倍数整除，"
                 f"当前 X={logits.shape[2]}, Y={logits.shape[3]}"
             )
         hidden = logits.permute(0, 1, 4, 3, 2).contiguous()
@@ -78,12 +89,12 @@ class _ResidualDilatedBlock(nn.Module):
 
 
 class DirectFusionNet(nn.Module):
-    """在 100×100×16 空间直接融合 warped slow 与 current fast 特征。"""
+    """在低分辨率空间直接融合 warped slow 与 current fast 特征。"""
 
     def __init__(
         self,
-        feature_dim: int = 128,
-        inner_dim: int = 48,
+        feature_dim: int = 288,
+        inner_dim: int = 104,
         body_dilations: Sequence[int] = (1, 3, 5),
         gn_groups: int = 8,
     ) -> None:
@@ -134,11 +145,11 @@ class DirectFusionNet(nn.Module):
 
 
 class XYUpsampleResidualDecoder(nn.Module):
-    """将 100×100×16 latent 解码为 200×200×16 logits residual。"""
+    """将低分辨率 latent 解码为目标尺寸的 logits residual。"""
 
     def __init__(
         self,
-        in_channels: int = 128,
+        in_channels: int = 288,
         decoder_channels: int = 32,
         out_channels: int = 18,
         init_scale: float | None = 1.0e-6,
@@ -163,7 +174,7 @@ class XYUpsampleResidualDecoder(nn.Module):
         latent: torch.Tensor,
         output_shape_xyz: tuple[int, int, int],
     ) -> torch.Tensor:
-        """输入 `(B,C,X/2,Y/2,Z)`，输出 `(B,C_out,X,Y,Z)`。"""
+        """输入 `(B,C,X_l,Y_l,Z)`，输出 `(B,C_out,X,Y,Z)`。"""
         if latent.dim() != 5:
             raise ValueError(
                 f"decoder 输入必须为 5D (B,C,X,Y,Z)，当前 {tuple(latent.shape)}"

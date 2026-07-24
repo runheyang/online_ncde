@@ -48,7 +48,7 @@ def _build_small_aligner() -> LearnedDirectFusionAligner:
         decoder_channels=2,
         decoder_init_scale=0.0,
         input_grid_size=(200, 200, 16),
-        latent_grid_size=(100, 100, 16),
+        latent_grid_size=(50, 50, 16),
     )
 
 
@@ -58,20 +58,21 @@ def test_occ3d_config_fixes_training_protocol() -> None:
     assert cfg["train"]["gradient_accumulation_steps"] == 2
     model_cfg = cfg["model"]["learned_direct_fusion"]
     assert model_cfg["input_grid_size"] == [200, 200, 16]
-    assert model_cfg["latent_grid_size"] == [100, 100, 16]
-    assert model_cfg["latent_dim"] == 128
-    assert model_cfg["fusion_inner_dim"] == 48
+    assert model_cfg["latent_grid_size"] == [50, 50, 16]
+    assert model_cfg["latent_dim"] == 288
+    assert model_cfg["fusion_inner_dim"] == 104
 
 
 def test_xy_encoder_only_downsamples_xy() -> None:
     encoder = XYDownsampleEncoder(
         in_channels=3,
         out_channels=8,
+        xy_downsample_factor=4,
         gn_groups=4,
     )
-    logits = torch.randn(2, 3, 8, 10, 4)
+    logits = torch.randn(2, 3, 8, 12, 4)
     encoded = encoder(logits)
-    assert encoded.shape == (2, 8, 4, 5, 4)
+    assert encoded.shape == (2, 8, 2, 3, 4)
 
 
 def test_fusion_decoder_shape_and_backward() -> None:
@@ -180,8 +181,8 @@ def test_target_indices_follow_supervision_steps() -> None:
     assert indices == [1, 2, 3, 4]
 
 
-def test_stepwise_conv_flops_match_evoocc_within_five_percent() -> None:
+def test_stepwise_conv_flops_match_evoocc_within_two_percent() -> None:
     evoocc = estimate_evoocc_stepwise()
     baseline = estimate_learned_direct_fusion_stepwise()
     ratio = baseline.macs / evoocc.macs
-    assert 0.95 <= ratio <= 1.05
+    assert 0.98 <= ratio <= 1.02

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""100×100×16 learned direct fusion baseline 训练入口。
+"""50×50×16 learned direct fusion baseline 训练入口。
 
 复用 train_rwfa.py 的数据、DDP、EMA、loss、Trainer 和 checkpoint 流程，
 只替换模型构造并叠加 baseline 专属配置。
@@ -62,8 +62,8 @@ def _build_model(
         free_index=int(data_cfg["free_index"]),
         pc_range=tuple(data_cfg["pc_range"]),
         voxel_size=tuple(data_cfg["voxel_size"]),
-        latent_dim=int(baseline_cfg.get("latent_dim", 128)),
-        fusion_inner_dim=int(baseline_cfg.get("fusion_inner_dim", 48)),
+        latent_dim=int(baseline_cfg.get("latent_dim", 288)),
+        fusion_inner_dim=int(baseline_cfg.get("fusion_inner_dim", 104)),
         fusion_body_dilations=tuple(
             baseline_cfg.get("fusion_body_dilations", [1, 3, 5])
         ),
@@ -73,7 +73,7 @@ def _build_model(
         use_fast_residual=configured_residual,
         input_grid_size=input_grid_size,
         latent_grid_size=tuple(
-            baseline_cfg.get("latent_grid_size", [100, 100, 16])
+            baseline_cfg.get("latent_grid_size", [50, 50, 16])
         ),
         timestamp_scale=float(data_cfg.get("timestamp_scale", 1.0e-6)),
     ).to(device)
@@ -101,7 +101,8 @@ def main() -> None:
     upstream._build_model = _build_model
     print(
         "[learned-direct-fusion] "
-        "latent=100x100x16 epochs=10 gradient_accumulation_steps=2"
+        "channels=288/104 latent=50x50x16 "
+        "epochs=10 gradient_accumulation_steps=2"
     )
     upstream.main()
 

@@ -1,4 +1,4 @@
-"""100×100×16 Neural ODE baseline 的内部 rollout 实现。
+"""低分辨率 Neural ODE baseline 的内部 rollout 实现。
 
 更新语义：
   - EvoOcc：每步控制增量 = (Fast_t - Fast_{t-1→t}) ‖ τ 拼接 → 1x1x1 conv → hidden_dim，
@@ -6,7 +6,7 @@
   - 本 rollout：每步控制增量 = 标量 Δt，广播为 (hidden_dim, X, Y, Z) 后与 func_g
     输出做 odot。形式上即 h' = g(h, f) * Δt 的经典 Neural ODE 离散化。
 
-该模块只提供新 100×100×16 aligner 复用的 solver 与 rollout 骨架，不再作为
+该模块只提供低分辨率 aligner 复用的 solver 与 rollout 骨架，不再作为
 独立全分辨率 baseline 对外导出。
 """
 

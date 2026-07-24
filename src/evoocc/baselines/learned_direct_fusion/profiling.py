@@ -119,10 +119,10 @@ def estimate_learned_direct_fusion_stepwise(
     *,
     num_targets: int = 4,
     input_grid_size: tuple[int, int, int] = (200, 200, 16),
-    latent_grid_size: tuple[int, int, int] = (100, 100, 16),
+    latent_grid_size: tuple[int, int, int] = (50, 50, 16),
     num_classes: int = 18,
-    latent_dim: int = 128,
-    fusion_inner_dim: int = 48,
+    latent_dim: int = 288,
+    fusion_inner_dim: int = 104,
     decoder_channels: int = 32,
     num_body_blocks: int = 3,
 ) -> ComputeEstimate:

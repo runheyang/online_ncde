@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""100×100×16 learned direct fusion baseline 评估入口。"""
+"""50×50×16 learned direct fusion baseline 评估入口。"""
 
 from __future__ import annotations
 
@@ -73,8 +73,8 @@ class _LearnedDirectFusionAsAligner:
             free_index=int(free_index),
             pc_range=tuple(pc_range),
             voxel_size=tuple(voxel_size),
-            latent_dim=int(cfg.get("latent_dim", 128)),
-            fusion_inner_dim=int(cfg.get("fusion_inner_dim", 48)),
+            latent_dim=int(cfg.get("latent_dim", 288)),
+            fusion_inner_dim=int(cfg.get("fusion_inner_dim", 104)),
             fusion_body_dilations=tuple(
                 cfg.get("fusion_body_dilations", [1, 3, 5])
             ),
@@ -84,7 +84,7 @@ class _LearnedDirectFusionAsAligner:
             use_fast_residual=bool(cfg.get("use_fast_residual", True)),
             input_grid_size=input_grid_size,
             latent_grid_size=tuple(
-                cfg.get("latent_grid_size", [100, 100, 16])
+                cfg.get("latent_grid_size", [50, 50, 16])
             ),
             timestamp_scale=float(timestamp_scale),
         )
@@ -116,7 +116,10 @@ def main() -> None:
         baseline_cfg=baseline_cfg,
         data_cfg=merged_cfg["data"],
     )
-    print("[learned-direct-fusion] latent=100x100x16 direct anchor-to-target warp")
+    print(
+        "[learned-direct-fusion] "
+        "channels=288/104 latent=50x50x16 direct anchor-to-target warp"
+    )
     upstream.main()
 
 
