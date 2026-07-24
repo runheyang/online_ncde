@@ -8,6 +8,7 @@ from evoocc.baselines.neural_ode_dt_aligner import (
     NeuralOdeDtAligner,
     NeuralOdeDtSolver,
 )
+from evoocc.baselines.learned_direct_fusion import LearnedDirectFusionAligner
 from evoocc.baselines.no_warp_motion_attn import (
     NoWarpMotionBiasAttnAligner,
     NoWarpMotionBiasAttnFusion,
@@ -22,6 +23,7 @@ from evoocc.baselines.warp_slow_fill_fast import WarpSlowFillFastBaseline
 
 __all__ = [
     "WarpSlowFillFastBaseline",
+    "LearnedDirectFusionAligner",
     "RecurrentWarpFusionAligner",
     "FusionNet",
     "FusionAttnNet",
