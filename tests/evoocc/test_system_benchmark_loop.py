@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from evoocc.streaming.system_benchmark_loop import (
     FrameTiming,
+    attach_system_flops,
     build_dual_system_schedule,
     index_scene_frames_by_token,
     summarize_system_benchmark,
@@ -121,7 +122,53 @@ class SystemSummaryTest(unittest.TestCase):
         self.assertAlmostEqual(result["fps_model_amortized"], 250.0)
         self.assertAlmostEqual(result["regular_latency_ms"]["mean"], 10.0)
         self.assertAlmostEqual(result["slow_tick_latency_ms"]["mean"], 50.0)
+        self.assertAlmostEqual(result["evolve_latency_ms"]["mean"], 1.0)
+        self.assertAlmostEqual(result["reset_latency_ms"]["mean"], 1.0)
         self.assertEqual(len(result["trace"]), 10)
+
+    def test_full_system_flops_follow_actual_schedule_counts(self):
+        result = {
+            "n_measured": 10,
+            "n_regular": 9,
+            "n_slow": 1,
+        }
+        attach_system_flops(
+            result,
+            mode="fast-ours",
+            fast_gflops=10.0,
+            slow_gflops=20.0,
+            evolve_gflops=2.0,
+            reset_gflops=3.0,
+        )
+        self.assertEqual(
+            result["flops"]["calls"],
+            {"fast": 10, "slow": 1, "evolve": 9, "reset": 1},
+        )
+        self.assertAlmostEqual(result["flops"]["total_gflops"], 141.0)
+        self.assertAlmostEqual(
+            result["flops"]["amortized_gflops_per_output"], 14.1
+        )
+
+    def test_missing_component_flops_are_explicit(self):
+        result = {
+            "n_measured": 10,
+            "n_regular": 9,
+            "n_slow": 1,
+        }
+        attach_system_flops(
+            result,
+            mode="fast-ours",
+            fast_gflops=10.0,
+        )
+        self.assertIsNone(result["flops"]["amortized_gflops_per_output"])
+        self.assertEqual(
+            result["flops"]["missing_components"],
+            [
+                "slow_gflops_per_call",
+                "evolve_gflops_per_call",
+                "reset_gflops_per_call",
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ from evoocc.streaming.opus_runtime import (
 from evoocc.streaming.scene_iterator import build_opus_sample_meta_index, iter_scenes
 from evoocc.streaming.stream_aligner import StreamAligner
 from evoocc.streaming.system_benchmark_loop import (
+    attach_system_flops,
     build_dual_system_schedule,
     index_scene_frames_by_token,
     print_system_summary,
@@ -76,6 +77,30 @@ def parse_args():
     p.add_argument("--solver", choices=["euler", "heun"], default="euler")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--prefetch-factor", type=int, default=2)
+    p.add_argument(
+        "--fast-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 fast forward GFLOPs",
+    )
+    p.add_argument(
+        "--slow-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 slow forward GFLOPs",
+    )
+    p.add_argument(
+        "--evolve-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 EvoOcc evolve GFLOPs",
+    )
+    p.add_argument(
+        "--reset-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 EvoOcc reset GFLOPs",
+    )
     p.add_argument("--out-json", default=None)
     args = p.parse_args()
     if args.mode == "fast-ours" and not args.checkpoint:
@@ -250,10 +275,29 @@ def main():
             device=device,
         )
 
+    attach_system_flops(
+        result,
+        mode=args.mode,
+        fast_gflops=args.fast_gflops,
+        slow_gflops=args.slow_gflops,
+        evolve_gflops=args.evolve_gflops,
+        reset_gflops=args.reset_gflops,
+    )
+    if args.mode == "fast-only":
+        schedule_label = "Fast@2Hz"
+    elif args.mode == "slow-only":
+        schedule_label = "Slow@2Hz"
+    elif args.slow_interval > 0:
+        schedule_label = f"Fast@2Hz + Slow@{1.0 / args.slow_interval:g}Hz"
+    elif args.slow_interval == 0:
+        schedule_label = "Fast@2Hz + Slow@2Hz"
+    else:
+        schedule_label = "Fast@2Hz + Slow@scene-start"
+
     print("\n=== System benchmark summary ===")
     print(f"  GPU: {torch.cuda.get_device_name(0)}")
     print(
-        f"  mode={args.mode}, startup={startup_s:.2f}s, "
+        f"  mode={args.mode}, schedule={schedule_label}, startup={startup_s:.2f}s, "
         f"resident={resident_memory_mb:.0f}MB"
     )
     print_system_summary(result)
@@ -261,6 +305,7 @@ def main():
     payload = {
         "benchmark_type": "streaming_system_max_throughput",
         "mode": args.mode,
+        "schedule_label": schedule_label,
         "fast_backend": "opusv1t_raw_top3",
         "slow_backend": "opusv2l_raw_top3",
         "fast_config": args.opus_config,

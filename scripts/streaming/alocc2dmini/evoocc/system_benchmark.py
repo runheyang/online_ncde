@@ -41,6 +41,7 @@ from evoocc.streaming.benchmark_runtime import configure_torch_benchmark_runtime
 from evoocc.streaming.scene_iterator import build_sample_meta_index, iter_scenes
 from evoocc.streaming.stream_aligner import StreamAligner
 from evoocc.streaming.system_benchmark_loop import (
+    attach_system_flops,
     build_dual_system_schedule,
     index_scene_frames_by_token,
     print_system_summary,
@@ -74,7 +75,43 @@ def parse_args():
     )
     p.add_argument("--solver", choices=["euler", "heun"], default="euler")
     p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument(
+        "--fast-num-workers",
+        type=int,
+        default=None,
+        help="fast DataLoader worker 数；默认继承 --num-workers",
+    )
+    p.add_argument(
+        "--slow-num-workers",
+        type=int,
+        default=None,
+        help="slow DataLoader worker 数；默认继承 --num-workers",
+    )
     p.add_argument("--prefetch-factor", type=int, default=2)
+    p.add_argument(
+        "--fast-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 fast forward GFLOPs",
+    )
+    p.add_argument(
+        "--slow-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 slow forward GFLOPs",
+    )
+    p.add_argument(
+        "--evolve-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 EvoOcc evolve GFLOPs",
+    )
+    p.add_argument(
+        "--reset-gflops",
+        type=float,
+        default=None,
+        help="预先测得的单次 EvoOcc reset GFLOPs",
+    )
     p.add_argument("--out-json", default=None)
     args = p.parse_args()
     if args.mode == "fast-ours" and not args.checkpoint:
@@ -83,6 +120,18 @@ def parse_args():
         p.error("--samples 必须大于 0")
     if args.warmup < 0:
         p.error("--warmup 不能小于 0")
+    if args.num_workers < 0:
+        p.error("--num-workers 不能小于 0")
+    if args.fast_num_workers is not None and args.fast_num_workers < 0:
+        p.error("--fast-num-workers 不能小于 0")
+    if args.slow_num_workers is not None and args.slow_num_workers < 0:
+        p.error("--slow-num-workers 不能小于 0")
+    args.fast_num_workers = (
+        args.num_workers if args.fast_num_workers is None else args.fast_num_workers
+    )
+    args.slow_num_workers = (
+        args.num_workers if args.slow_num_workers is None else args.slow_num_workers
+    )
     return args
 
 
@@ -158,7 +207,7 @@ def main():
             name="fast-only-system",
             runner=fast,
             raw_batches=make_loader_iter(
-                fast, flat_indices, args.num_workers, args.prefetch_factor
+                fast, flat_indices, args.fast_num_workers, args.prefetch_factor
             ),
             metas_list=flat_metas,
             warmup=args.warmup,
@@ -181,7 +230,7 @@ def main():
             name="slow-only-system",
             runner=slow,
             raw_batches=make_loader_iter(
-                slow, flat_indices, args.num_workers, args.prefetch_factor
+                slow, flat_indices, args.slow_num_workers, args.prefetch_factor
             ),
             metas_list=flat_metas,
             warmup=args.warmup,
@@ -235,10 +284,10 @@ def main():
             slow=slow,
             stream_aligner=stream_aligner,
             fast_batches=make_loader_iter(
-                fast, fast_indices, args.num_workers, args.prefetch_factor
+                fast, fast_indices, args.fast_num_workers, args.prefetch_factor
             ),
             slow_batches=make_loader_iter(
-                slow, slow_indices, args.num_workers, args.prefetch_factor
+                slow, slow_indices, args.slow_num_workers, args.prefetch_factor
             ),
             schedule=schedule,
             warmup=args.warmup,
@@ -246,20 +295,45 @@ def main():
             device=device,
         )
 
+    attach_system_flops(
+        result,
+        mode=args.mode,
+        fast_gflops=args.fast_gflops,
+        slow_gflops=args.slow_gflops,
+        evolve_gflops=args.evolve_gflops,
+        reset_gflops=args.reset_gflops,
+    )
+    if args.mode == "fast-only":
+        schedule_label = "Fast@2Hz"
+    elif args.mode == "slow-only":
+        schedule_label = "Slow@2Hz"
+    elif args.slow_interval > 0:
+        schedule_label = f"Fast@2Hz + Slow@{1.0 / args.slow_interval:g}Hz"
+    elif args.slow_interval == 0:
+        schedule_label = "Fast@2Hz + Slow@2Hz"
+    else:
+        schedule_label = "Fast@2Hz + Slow@scene-start"
+
     print("\n=== System benchmark summary ===")
     print(f"  GPU: {torch.cuda.get_device_name(0)}")
-    print(f"  mode={args.mode}, startup={startup_s:.2f}s, resident={resident_memory_mb:.0f}MB")
+    print(
+        f"  mode={args.mode}, schedule={schedule_label}, "
+        f"startup={startup_s:.2f}s, resident={resident_memory_mb:.0f}MB"
+    )
     print_system_summary(result)
 
     payload = {
         "benchmark_type": "streaming_system_max_throughput",
         "mode": args.mode,
+        "schedule_label": schedule_label,
         "fast_backend": "alocc2dmini",
         "dataset_variant": data_cfg.get("dataset_variant", "occ3d"),
         "warmup": args.warmup,
         "measured": args.samples,
         "slow_interval_sec": args.slow_interval,
         "num_workers": args.num_workers,
+        "fast_num_workers": args.fast_num_workers,
+        "slow_num_workers": args.slow_num_workers,
         "prefetch_factor": args.prefetch_factor,
         "solver": args.solver,
         "gpu": torch.cuda.get_device_name(0),

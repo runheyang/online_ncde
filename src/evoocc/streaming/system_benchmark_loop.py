@@ -131,6 +131,13 @@ def summarize_system_benchmark(
     frame_values = [x.frame_wall_ms for x in timings]
     regular_values = [x.frame_wall_ms for x in timings if not x.is_slow]
     slow_values = [x.frame_wall_ms for x in timings if x.is_slow]
+    has_align = any(abs(x.align_ms) > 0.0 for x in timings)
+    evolve_values = (
+        [x.align_ms for x in timings if not x.is_slow] if has_align else []
+    )
+    reset_values = (
+        [x.align_ms for x in timings if x.is_slow] if has_align else []
+    )
     stage_names = ("input_wait_ms", "h2d_ms", "fast_ms", "slow_ms", "align_ms", "post_ms")
     stage_mean = {
         key: float(np.mean([getattr(x, key) for x in timings]))
@@ -154,6 +161,8 @@ def summarize_system_benchmark(
         "latency_ms": _latency_stats(frame_values),
         "regular_latency_ms": _latency_stats(regular_values),
         "slow_tick_latency_ms": _latency_stats(slow_values),
+        "evolve_latency_ms": _latency_stats(evolve_values),
+        "reset_latency_ms": _latency_stats(reset_values),
         "stage_ms_mean": stage_mean,
         "model_latency_ms_mean": float(total_model_ms / n_measured),
         "fps_model_amortized": float(1000.0 * n_measured / total_model_ms),
@@ -162,6 +171,69 @@ def summarize_system_benchmark(
         "peak_memory_mb": float(peak_memory_mb),
         "trace": [asdict(x) for x in timings],
     }
+
+
+def attach_system_flops(
+    result: Dict[str, Any],
+    *,
+    mode: str,
+    fast_gflops: Optional[float] = None,
+    slow_gflops: Optional[float] = None,
+    evolve_gflops: Optional[float] = None,
+    reset_gflops: Optional[float] = None,
+) -> Dict[str, Any]:
+    """按实际调度次数汇总预先测得的组件 GFLOPs。"""
+    supported_modes = ("fast-only", "slow-only", "fast-ours")
+    if mode not in supported_modes:
+        raise ValueError(f"mode 必须是 {supported_modes}，得到 {mode!r}")
+
+    components = {
+        "fast_gflops_per_call": fast_gflops,
+        "slow_gflops_per_call": slow_gflops,
+        "evolve_gflops_per_call": evolve_gflops,
+        "reset_gflops_per_call": reset_gflops,
+    }
+    for name, value in components.items():
+        if value is not None and value < 0:
+            raise ValueError(f"{name} 不能为负数，得到 {value}")
+
+    n_measured = int(result["n_measured"])
+    if mode == "fast-only":
+        calls = {"fast": n_measured, "slow": 0, "evolve": 0, "reset": 0}
+        required = ("fast_gflops_per_call",)
+    elif mode == "slow-only":
+        calls = {"fast": 0, "slow": n_measured, "evolve": 0, "reset": 0}
+        required = ("slow_gflops_per_call",)
+    else:
+        calls = {
+            "fast": n_measured,
+            "slow": int(result["n_slow"]),
+            "evolve": int(result["n_regular"]),
+            "reset": int(result["n_slow"]),
+        }
+        required = tuple(components)
+
+    missing = [name for name in required if components[name] is None]
+    total_gflops = None
+    amortized_gflops = None
+    if not missing:
+        total_gflops = (
+            calls["fast"] * float(fast_gflops or 0.0)
+            + calls["slow"] * float(slow_gflops or 0.0)
+            + calls["evolve"] * float(evolve_gflops or 0.0)
+            + calls["reset"] * float(reset_gflops or 0.0)
+        )
+        amortized_gflops = total_gflops / n_measured
+
+    result["flops"] = {
+        "source": "preprofiled_component_gflops",
+        "components": components,
+        "calls": calls,
+        "total_gflops": total_gflops,
+        "amortized_gflops_per_output": amortized_gflops,
+        "missing_components": missing,
+    }
+    return result
 
 
 def _new_cuda_events(stage_names: Iterable[str]):
@@ -441,3 +513,23 @@ def print_system_summary(result: Mapping[str, Any]) -> None:
         f"{result['fps_model_amortized']:.2f} FPS, "
         f"peak VRAM={result['peak_memory_mb']:.0f}MB"
     )
+    evolve = result["evolve_latency_ms"]
+    reset = result["reset_latency_ms"]
+    if evolve["mean"] is not None:
+        print(
+            f"    EvoOcc evolve: mean={evolve['mean']:.2f}ms, "
+            f"p95={evolve['p95']:.2f}ms"
+        )
+    if reset["mean"] is not None:
+        print(
+            f"    EvoOcc reset:  mean={reset['mean']:.2f}ms, "
+            f"p95={reset['p95']:.2f}ms"
+        )
+    flops = result.get("flops")
+    if flops is not None:
+        amortized = flops["amortized_gflops_per_output"]
+        if amortized is None:
+            missing = ", ".join(flops["missing_components"])
+            print(f"    amortized GFLOPs/output=N/A (missing: {missing})")
+        else:
+            print(f"    amortized GFLOPs/output={amortized:.3f}")
