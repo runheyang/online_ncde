@@ -34,8 +34,19 @@ def build_evoocc_aligner(
 ) -> Tuple[EvoOccAligner, dict]:
     """构建并加载 EvoOccAligner，返回模型和 data_cfg."""
     cfg = load_config_with_base(aligner_cfg)
+    aligner = build_evoocc_model_from_config(cfg, solver=solver).to(device)
+    load_checkpoint_for_eval(aligner_ckpt, model=aligner, strict=False)
+    aligner.eval()
+    return aligner, cfg["data"]
+
+
+def build_evoocc_model_from_config(
+    cfg: dict,
+    solver: str = "euler",
+) -> EvoOccAligner:
+    """从已加载配置构建 EvoOcc，不加载 checkpoint。"""
     data_cfg, model_cfg = cfg["data"], cfg["model"]
-    aligner = EvoOccAligner(
+    return EvoOccAligner(
         num_classes=data_cfg["num_classes"],
         feat_dim=model_cfg["feat_dim"],
         hidden_dim=model_cfg["hidden_dim"],
@@ -50,7 +61,4 @@ def build_evoocc_aligner(
         func_g_gn_groups=int(model_cfg.get("func_g_gn_groups", 8)),
         timestamp_scale=data_cfg.get("timestamp_scale", 1.0e-6),
         solver_variant=solver,
-    ).to(device)
-    load_checkpoint_for_eval(aligner_ckpt, model=aligner, strict=False)
-    aligner.eval()
-    return aligner, data_cfg
+    )
