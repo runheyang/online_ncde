@@ -55,7 +55,7 @@ def _build_small_aligner() -> LearnedDirectFusionAligner:
 def test_occ3d_config_fixes_training_protocol() -> None:
     cfg = load_config(str(BASELINE_CONFIG))
     assert cfg["train"]["epochs"] == 10
-    assert cfg["train"]["gradient_accumulation_steps"] == 2
+    assert cfg["train"]["gradient_accumulation_steps"] == 4
     model_cfg = cfg["model"]["learned_direct_fusion"]
     assert model_cfg["input_grid_size"] == [200, 200, 16]
     assert model_cfg["latent_grid_size"] == [50, 50, 16]

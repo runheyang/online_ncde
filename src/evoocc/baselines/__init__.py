@@ -5,6 +5,9 @@
 """
 
 from evoocc.baselines.neural_ode_dt_100 import NeuralOdeDt100Aligner
+from evoocc.baselines.learned_direct_attention import (
+    LearnedDirectAttentionAligner,
+)
 from evoocc.baselines.learned_direct_fusion import LearnedDirectFusionAligner
 from evoocc.baselines.no_warp_motion_attn import (
     NoWarpMotionBiasAttnAligner,
@@ -20,6 +23,7 @@ from evoocc.baselines.warp_slow_fill_fast import WarpSlowFillFastBaseline
 
 __all__ = [
     "WarpSlowFillFastBaseline",
+    "LearnedDirectAttentionAligner",
     "LearnedDirectFusionAligner",
     "RecurrentWarpFusionAligner",
     "FusionNet",

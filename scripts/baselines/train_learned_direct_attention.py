@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""50×50×16 learned direct fusion baseline 训练入口。
-
-复用 train_rwfa.py 的数据、DDP、EMA、loss、Trainer 和 checkpoint 流程，
-只替换模型构造并叠加 baseline 专属配置。
-"""
+"""50×50×16 learned direct window-attention baseline 训练入口。"""
 
 from __future__ import annotations
 
@@ -17,7 +13,7 @@ sys.path.append(str(ROOT / "src"))
 sys.path.append(str(ROOT / "scripts" / "baselines"))
 
 import train_rwfa as upstream  # noqa: E402
-from evoocc.baselines import LearnedDirectFusionAligner  # noqa: E402
+from evoocc.baselines import LearnedDirectAttentionAligner  # noqa: E402
 from evoocc.config import load_config, merge_dict  # noqa: E402
 
 
@@ -26,7 +22,7 @@ BASELINE_CONFIG_PATH = (
     / "src"
     / "evoocc"
     / "baselines"
-    / "learned_direct_fusion"
+    / "learned_direct_attention"
     / "occ3d_config.yaml"
 )
 
@@ -41,39 +37,44 @@ def _build_model(
     data_cfg: dict,
     device: torch.device,
     use_fast_residual: bool,
-) -> LearnedDirectFusionAligner:
+) -> LearnedDirectAttentionAligner:
     del model_kind
-    baseline_cfg = model_cfg["learned_direct_fusion"]
-    configured_residual = bool(baseline_cfg.get("use_fast_residual", True))
+    cfg = model_cfg["learned_direct_attention"]
+    configured_residual = bool(cfg.get("use_fast_residual", True))
     if bool(use_fast_residual) != configured_residual:
         raise ValueError(
-            "learned direct fusion 的 use_fast_residual 必须与专属配置一致，"
+            "direct attention 的 use_fast_residual 必须与专属配置一致，"
             f"当前入口={use_fast_residual}, 配置={configured_residual}"
         )
-    input_grid_size = tuple(baseline_cfg.get("input_grid_size", [200, 200, 16]))
+    input_grid_size = tuple(cfg.get("input_grid_size", [200, 200, 16]))
     if tuple(data_cfg["grid_size"]) != input_grid_size:
         raise ValueError(
-            "数据 grid_size 与 direct fusion 输入网格不一致："
+            "数据 grid_size 与 direct attention 输入网格不一致："
             f"{tuple(data_cfg['grid_size'])} vs {input_grid_size}"
         )
-    return LearnedDirectFusionAligner(
+    return LearnedDirectAttentionAligner(
         num_classes=int(data_cfg["num_classes"]),
         encoder_in_channels=int(model_cfg["encoder_in_channels"]),
         free_index=int(data_cfg["free_index"]),
         pc_range=tuple(data_cfg["pc_range"]),
         voxel_size=tuple(data_cfg["voxel_size"]),
-        latent_dim=int(baseline_cfg.get("latent_dim", 288)),
-        fusion_inner_dim=int(baseline_cfg.get("fusion_inner_dim", 104)),
-        fusion_body_dilations=tuple(
-            baseline_cfg.get("fusion_body_dilations", [1, 3, 5])
+        latent_dim=int(cfg.get("latent_dim", 288)),
+        attention_inner_dim=int(cfg.get("attention_inner_dim", 96)),
+        attention_num_heads=int(cfg.get("attention_num_heads", 8)),
+        attention_window_size=tuple(
+            cfg.get("attention_window_size", [5, 5, 4])
         ),
-        fusion_gn_groups=int(baseline_cfg.get("fusion_gn_groups", 8)),
-        decoder_channels=int(baseline_cfg.get("decoder_channels", 32)),
-        decoder_init_scale=baseline_cfg.get("decoder_init_scale", 1.0e-6),
+        attention_local_dilations=tuple(
+            cfg.get("attention_local_dilations", [1, 2])
+        ),
+        attention_gn_groups=int(cfg.get("attention_gn_groups", 8)),
+        attention_mlp_ratio=float(cfg.get("attention_mlp_ratio", 2.0)),
+        decoder_channels=int(cfg.get("decoder_channels", 32)),
+        decoder_init_scale=cfg.get("decoder_init_scale", 1.0e-6),
         use_fast_residual=configured_residual,
         input_grid_size=input_grid_size,
         latent_grid_size=tuple(
-            baseline_cfg.get("latent_grid_size", [50, 50, 16])
+            cfg.get("latent_grid_size", [50, 50, 16])
         ),
         timestamp_scale=float(data_cfg.get("timestamp_scale", 1.0e-6)),
     ).to(device)
@@ -86,8 +87,7 @@ def main() -> None:
 
     def parse_args_fixed():
         args = original_parse_args()
-        args.model_kind = "learned-direct-fusion"
-        # Rebuttal 对照固定训练协议，不接受 CLI 改写。
+        args.model_kind = "learned-direct-attention"
         args.epochs = 10
         args.lambda_fast_kl = 0.0
         args.use_fast_residual = True
@@ -100,8 +100,8 @@ def main() -> None:
     upstream.load_config_with_base = load_config_with_overlay
     upstream._build_model = _build_model
     print(
-        "[learned-direct-fusion] "
-        "channels=288/104 latent=50x50x16 "
+        "[learned-direct-attention] "
+        "channels=288/96 latent=50x50x16 window=5x5x4 heads=8 "
         "epochs=10 gradient_accumulation_steps=4"
     )
     upstream.main()

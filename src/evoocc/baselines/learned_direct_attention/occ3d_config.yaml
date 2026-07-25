@@ -1,0 +1,21 @@
+# 50×50×16 learned direct window-attention baseline 专属覆盖配置。
+
+model:
+  learned_direct_attention:
+    input_grid_size: [200, 200, 16]
+    latent_grid_size: [50, 50, 16]
+    latent_dim: 288
+    attention_inner_dim: 96
+    attention_num_heads: 8
+    attention_window_size: [5, 5, 4]
+    attention_local_dilations: [1, 2]
+    attention_gn_groups: 8
+    attention_mlp_ratio: 2.0
+    decoder_channels: 32
+    decoder_init_scale: 1.0e-6
+    use_fast_residual: true
+
+train:
+  # 与卷积 direct fusion 使用相同训练协议。
+  epochs: 10
+  gradient_accumulation_steps: 4
