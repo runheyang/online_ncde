@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# 批量跑 eval_evoocc_random_interval.py 多 seed（默认 0..9），收集日志。
-#
-# 用法：
-#   bash tests/evoocc/run_random_interval_seeds.sh \
-#       --config <cfg.yaml> --checkpoint <ckpt.pt>
-#
-# 可选参数：
-#   --gap-choices "1,2,3"         默认 "1,2,3"
-#   --target-last-step 12         默认 12
-#   --seeds "0 1 2 3 4 5 6 7 8 9" 默认 0..9（空格分隔）
-#   --solver euler|heun           默认 euler
-#   --limit N                     默认 0（全部样本）
-#   --log-dir logs/random_interval  日志目录
-#   --extra "..."                 透传给 python 脚本的额外参数
 
 set -euo pipefail
 
-# ---- 默认值 ----
 CONFIG=""
 CKPT=""
 GAP_CHOICES="1,2,3"
@@ -43,7 +28,6 @@ Usage: $0 --config <cfg> --checkpoint <ckpt> [options]
 EOF
 }
 
-# ---- 参数解析 ----
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)            CONFIG="$2"; shift 2 ;;
@@ -66,7 +50,6 @@ if [[ -z "$CONFIG" || -z "$CKPT" ]]; then
     exit 1
 fi
 
-# ---- 路径处理 ----
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 REPO_ROOT="$( cd "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd )"
 PY_SCRIPT="${SCRIPT_DIR}/eval_evoocc_random_interval.py"
@@ -76,7 +59,6 @@ if [[ ! -f "${PY_SCRIPT}" ]]; then
     exit 1
 fi
 
-# 默认 log_dir：logs/random_interval/<ckpt_basename>_g<gaps>
 if [[ -z "$LOG_DIR" ]]; then
     CKPT_TAG=$(basename "${CKPT}" .pt)
     GAP_TAG=$(echo "${GAP_CHOICES}" | tr ',' '-')
@@ -84,7 +66,6 @@ if [[ -z "$LOG_DIR" ]]; then
 fi
 mkdir -p "${LOG_DIR}"
 
-# ---- 摘要 ----
 SUMMARY="${LOG_DIR}/summary.csv"
 {
     echo "# config=${CONFIG}"
@@ -102,7 +83,6 @@ echo "[run] seeds=${SEEDS}"
 echo "[run] gap_choices=${GAP_CHOICES}  target_last_step=${TARGET_LAST_STEP}"
 echo
 
-# ---- 逐 seed 运行 ----
 for seed in ${SEEDS}; do
     LOG="${LOG_DIR}/seed${seed}.log"
     echo "==================== seed=${seed} ===================="
@@ -122,14 +102,12 @@ for seed in ${SEEDS}; do
         CMD+=(--limit "${LIMIT}")
     fi
     if [[ -n "${EXTRA}" ]]; then
-        # 透传额外参数（用 eval 拆词以支持引号）
         eval "EXTRA_ARGS=( ${EXTRA} )"
         CMD+=("${EXTRA_ARGS[@]}")
     fi
 
     "${CMD[@]}" 2>&1 | tee "${LOG}"
 
-    # ---- 从 log 解析关键指标 ----
     miou=$(grep -m1 -oE "miou=[0-9.]+" "${LOG}" | head -1 | cut -d= -f2 || echo "")
     miou_d=$(grep -m1 -oE "miou_d=[0-9.]+" "${LOG}" | head -1 | cut -d= -f2 || echo "")
     rayiou=$(grep -m1 "RayIoU=" "${LOG}" | grep -oE "RayIoU=[0-9.]+" | cut -d= -f2 || echo "")
@@ -146,7 +124,6 @@ echo "==================== 汇总 ===================="
 echo "[run] summary csv: ${SUMMARY}"
 column -t -s, "${SUMMARY}" || cat "${SUMMARY}"
 
-# ---- mean ± std（写到临时 .py 跑，绕开 conda run + stdin heredoc 的兼容问题）----
 echo
 echo "==================== mean ± std ===================="
 TMP_PY="$(mktemp --suffix=.py)"
@@ -188,7 +165,6 @@ for c in cols:
     std = statistics.stdev(vs) if len(vs) >= 2 else 0.0
     print(f"{c:<12} {len(vs):>3} {mean:>10.4f} {std:>10.4f} {min(vs):>10.4f} {max(vs):>10.4f} {max(vs)-min(vs):>10.4f}")
 
-# worst seed by miou
 if data["miou"]:
     worst_idx = data["miou"].index(min(data["miou"]))
     print(f"\nworst seed (by miou) = {seeds[worst_idx]}")

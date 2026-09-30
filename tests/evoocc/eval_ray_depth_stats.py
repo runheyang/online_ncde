@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""按 ray 统计 fast baseline 与 aligner output 的 first-hit 深度误差，诊断 RayIoU 下降原因。
-
-用法示例：
-    python tests/evoocc/eval_ray_depth_stats.py \
-        --checkpoint <ckpt_path> --limit 50
-
-统计内容：
-  1. 每条 ray 的 GT/Pred first-hit depth、abs 深度误差
-  2. 预测比 GT 更近/更远的比例
-  3. 深度偏差超过阈值的比例
-  4. 分 mask 内/外、近距/远距 统计
-  5. 分区域 RayIoU 对比
-"""
 
 from __future__ import annotations
 
@@ -45,7 +32,6 @@ from evoocc.models.evoocc_aligner import EvoOccAligner  # noqa: E402
 from evoocc.trainer import move_to_device, evoocc_collate  # noqa: E402
 from evoocc.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
-# --- DVR 相关常量（与 ray_metrics.py 保持一致）---
 _pc_range = [-40, -40, -1.0, 40, 40, 5.4]
 _voxel_size = 0.4
 
@@ -58,10 +44,6 @@ occ_class_names = [
 FREE_ID = len(occ_class_names) - 1
 DYNAMIC_IDS = set(OCC3D_DYNAMIC_OBJECT_IDX)
 
-
-# ---------------------------------------------------------------------------
-# DVR 加载（延迟编译）
-# ---------------------------------------------------------------------------
 
 _dvr = None
 
@@ -84,7 +66,6 @@ def get_dvr():
 
 
 def generate_lidar_rays() -> np.ndarray:
-    """生成 lidar 射线方向（与 ray_metrics.py 一致）。"""
     pitch_angles = []
     for k in range(10):
         angle = math.pi / 2 - math.atan(k + 1)
@@ -105,32 +86,19 @@ def generate_lidar_rays() -> np.ndarray:
     return np.array(lidar_rays, dtype=np.float32)
 
 
-# ---------------------------------------------------------------------------
-# 单样本 ray casting：返回 per-ray (class, distance, coord_index)
-# ---------------------------------------------------------------------------
-
 def raycast_one_sample(
     sem_pred: np.ndarray,
     lidar_rays: torch.Tensor,
     output_origin: torch.Tensor,
 ) -> dict[str, np.ndarray]:
-    """对一个 volume 做 ray casting，返回每条 ray 的 first-hit 信息。
-
-    Returns:
-        dict with:
-          "class": (N_rays,) int — first-hit 类别
-          "dist":  (N_rays,) float — first-hit 距离
-          "coord": (N_rays, 3) int — first-hit 体素坐标 (x,y,z)
-    """
     dvr = get_dvr()
     T = output_origin.shape[1]
 
-    # 构建 binary occ volume
     occ = copy.deepcopy(sem_pred)
     occ[sem_pred < FREE_ID] = 1
     occ[sem_pred == FREE_ID] = 0
-    occ = torch.from_numpy(occ).permute(2, 1, 0)  # (Z, Y, X)
-    occ = occ[None, None, :].contiguous().float()   # (1, 1, Z, Y, X)
+    occ = torch.from_numpy(occ).permute(2, 1, 0)
+    occ = occ[None, None, :].contiguous().float()
 
     offset = torch.Tensor(_pc_range[:3])[None, None, :]
     scaler = torch.Tensor([_voxel_size] * 3)[None, None, :]
@@ -138,8 +106,8 @@ def raycast_one_sample(
 
     all_class, all_dist, all_coord = [], [], []
     for t in range(T):
-        lidar_origin = output_origin[:, t:t + 1, :]        # (1, 1, 3)
-        lidar_endpts = lidar_rays[None] + lidar_origin      # (1, N, 3)
+        lidar_origin = output_origin[:, t:t + 1, :]
+        lidar_endpts = lidar_rays[None] + lidar_origin
         origin_render = ((lidar_origin - offset) / scaler).float()
         points_render = ((lidar_endpts - offset) / scaler).float()
 
@@ -150,7 +118,7 @@ def raycast_one_sample(
             )
             pred_dist *= _voxel_size
 
-        coord_index = coord_index[0, :, :].int().cpu()  # (N, 3)
+        coord_index = coord_index[0, :, :].int().cpu()
         labels = torch.from_numpy(
             sem_pred[coord_index[:, 0], coord_index[:, 1], coord_index[:, 2]]
         )
@@ -165,13 +133,7 @@ def raycast_one_sample(
     }
 
 
-# ---------------------------------------------------------------------------
-# 深度误差统计累加器
-# ---------------------------------------------------------------------------
-
 class HitNoHitCounter:
-    """GT hit/no-hit × Pred hit/no-hit 四格表统计。"""
-
     def __init__(self) -> None:
         self.gt_hit_pred_hit: int = 0
         self.gt_hit_pred_nohit: int = 0
@@ -199,34 +161,28 @@ class HitNoHitCounter:
 
     @property
     def pred_hit_rate(self) -> float:
-        """Pred hit 占全部 ray 的比例。"""
         return (self.gt_hit_pred_hit + self.gt_nohit_pred_hit) / max(self.total, 1)
 
     @property
     def miss_rate(self) -> float:
-        """GT hit 中 pred 未 hit 的比例。"""
         return self.gt_hit_pred_nohit / max(self.gt_hit_total, 1)
 
     @property
     def false_hit_rate(self) -> float:
-        """GT no-hit 中 pred hit 的比例。"""
         return self.gt_nohit_pred_hit / max(self.gt_nohit_total, 1)
 
 
 class RayDepthStats:
-    """累计 per-ray 深度误差统计（含 signed error）。"""
-
     def __init__(self, depth_thresholds: list[float] = [1.0, 2.0, 4.0]) -> None:
         self.depth_thresholds = depth_thresholds
         self.total_rays: int = 0
         self.abs_err_sum: float = 0.0
-        self.signed_err_sum: float = 0.0   # sum(pred - gt)
-        self.signed_errs: list[np.ndarray] = []  # 收集所有 signed error 用于中位数
-        self.closer_count: int = 0     # pred 比 GT 更近 (signed < 0)
-        self.farther_count: int = 0    # pred 比 GT 更远 (signed > 0)
+        self.signed_err_sum: float = 0.0
+        self.signed_errs: list[np.ndarray] = []
+        self.closer_count: int = 0
+        self.farther_count: int = 0
         self.exact_count: int = 0
         self.exceed_count: dict[float, int] = {t: 0 for t in depth_thresholds}
-        # RayIoU 分子分母
         self.num_classes = len(occ_class_names)
         self.gt_cnt = np.zeros(self.num_classes)
         self.pred_cnt = np.zeros(self.num_classes)
@@ -244,7 +200,8 @@ class RayDepthStats:
             return
         self.total_rays += n
 
-        signed_err = pred_dist - gt_dist  # 正 = 预测更远，负 = 预测更近
+        # Positive means the prediction is farther than GT.
+        signed_err = pred_dist - gt_dist
         abs_err = np.abs(signed_err)
         self.abs_err_sum += float(abs_err.sum())
         self.signed_err_sum += float(signed_err.sum())
@@ -263,15 +220,12 @@ class RayDepthStats:
             tp_bincount = np.bincount(gt_class[tp_mask].astype(np.int64), minlength=self.num_classes)
             self.tp_cnt[j] += tp_bincount
 
-    # --- 汇总指标 ---
-
     @property
     def mean_abs_err(self) -> float:
         return self.abs_err_sum / max(self.total_rays, 1)
 
     @property
     def mean_signed_err(self) -> float:
-        """正 = 系统性预测更远，负 = 系统性预测更近。"""
         return self.signed_err_sum / max(self.total_rays, 1)
 
     @property
@@ -292,7 +246,6 @@ class RayDepthStats:
         return self.exceed_count[threshold] / max(self.total_rays, 1)
 
     def per_class_rayiou_at(self, threshold_idx: int) -> np.ndarray:
-        """返回各类别 RayIoU（不含 free），shape=(num_classes-1,)。"""
         iou = self.tp_cnt[threshold_idx] / np.maximum(
             self.gt_cnt + self.pred_cnt - self.tp_cnt[threshold_idx], 1
         )
@@ -306,16 +259,11 @@ class RayDepthStats:
         return float(np.mean([self.rayiou_at(j) for j in range(len(self.depth_thresholds))]))
 
 
-# ---------------------------------------------------------------------------
-# 结果输出
-# ---------------------------------------------------------------------------
-
 def print_hit_nohit_comparison(
     fast_c: HitNoHitCounter,
     aligned_c: HitNoHitCounter,
     region_name: str,
 ) -> None:
-    """打印某个区域的 fast vs aligned hit/no-hit 四格表。"""
     print(f"\n{'=' * 15} Hit/No-Hit: {region_name} {'=' * 15}")
     header = f"{'Metric':<36} {'Fast Baseline':>14} {'Aligner Output':>14} {'Delta':>14}"
     print(header)
@@ -343,7 +291,6 @@ def print_depth_comparison(
     aligned_stats: RayDepthStats,
     region_name: str,
 ) -> None:
-    """打印某个区域的 fast vs aligned 深度对比表。"""
     header = f"{'Metric':<36} {'Fast Baseline':>14} {'Aligner Output':>14} {'Delta':>14}"
     sep = "-" * len(header)
     print(f"\n{'=' * 20} {region_name} {'=' * 20}")
@@ -370,10 +317,6 @@ def print_depth_comparison(
     _row("RayIoU (mean)", fast_stats.rayiou, aligned_stats.rayiou)
 
 
-# ---------------------------------------------------------------------------
-# sweep pkl 解析（复用 eval_evoocc.py 的逻辑）
-# ---------------------------------------------------------------------------
-
 def resolve_sweep_pkl(sweep_pkl_arg: str, cfg: dict) -> str:
     if sweep_pkl_arg:
         p = Path(sweep_pkl_arg)
@@ -397,10 +340,6 @@ def resolve_sweep_pkl(sweep_pkl_arg: str, cfg: dict) -> str:
         f"无法自动推断 sweep pkl，请用 --sweep-pkl 指定。\n  info_path={info_abs}"
     )
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="按 ray 统计 first-hit 深度误差，诊断 RayIoU 下降")
@@ -426,10 +365,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     args = parse_args()
     cfg = load_config_with_base(args.config)
@@ -440,11 +375,8 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     free_index = data_cfg["free_index"]
 
-    # --- 数据集 ---
     logits_loader = build_logits_loader(data_cfg, cfg["root_path"])
 
-    # 默认 min_history_completeness=0，含全部短历史样本（h=0 走 aligner 退化分支）。
-    # --exclude-short-history 才回退到 config 的阈值（通常 4）过滤短历史。
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval] min_history_completeness={min_hc}"
           + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
@@ -496,7 +428,6 @@ def main() -> None:
         dl_kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
     loader = DataLoader(dataset, **dl_kwargs)
 
-    # --- 模型 ---
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
     model = EvoOccAligner(
         num_classes=data_cfg["num_classes"],
@@ -523,13 +454,11 @@ def main() -> None:
 
     free_conf_thresh = eval_cfg.get("free_conf_thresh", None)
 
-    # --- 阶段 1：推理收集 predictions + mIoU 统计 ---
     print("[phase1] 推理收集 predictions...")
     predictions: list[dict] = []
     total_steps = len(loader)
     t0 = time.time()
 
-    # mIoU 累加器（与 Trainer.evaluate 口径一致：use_image_mask=True, use_lidar_mask=False）
     metric_fast = MetricMiouOcc3D(
         num_classes=data_cfg["num_classes"],
         use_image_mask=True,
@@ -578,7 +507,6 @@ def main() -> None:
             for b in range(pred_aligned_np.shape[0]):
                 token = meta_list[b].get("token", "") if b < len(meta_list) else ""
                 mask_b = mask_np[b] if mask_np is not None else None
-                # 累加 mIoU（fast 和 aligned 各一份）
                 metric_fast.add_batch(
                     semantics_pred=pred_fast_np[b],
                     semantics_gt=gt_np[b],
@@ -605,7 +533,6 @@ def main() -> None:
 
     print(f"[phase1] 共收集 {len(predictions)} 个样本")
 
-    # --- 阶段 1.5：打印 mIoU 和 per-class IoU ---
     print("\n" + "=" * 20 + " mIoU 对比 " + "=" * 20)
     miou_fast = metric_fast.count_miou(verbose=False)
     miou_d_fast = metric_fast.count_miou_d(verbose=False)
@@ -626,18 +553,15 @@ def main() -> None:
     for name, v_f, v_a in zip(metric_fast.class_names, per_class_fast, per_class_aligned):
         print(f"{name:<28} {float(v_f):>14.4f} {float(v_a):>14.4f} {float(v_a) - float(v_f):>+14.4f}")
 
-    # --- 阶段 2：加载 lidar origins ---
     print("[phase2] 加载 lidar origins...")
     sweep_pkl = resolve_sweep_pkl(args.sweep_pkl, cfg)
     from evoocc.ops.dvr.ego_pose import load_origins_from_sweep_pkl
     origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
     print(f"  共 {len(origins_by_token)} 个 token 的 origin")
 
-    # --- 阶段 3：逐样本 ray casting + 统计 ---
     print("[phase3] Ray casting + 深度统计...")
     lidar_rays = torch.from_numpy(generate_lidar_rays())
 
-    # 统计区域：全局 / mask 内外 / 距离桶 / 近距 × static/dynamic
     dist_bins = [(0, 10), (10, 20), (20, 40), (40, float("inf"))]
     regions = [
         "all", "mask_in", "mask_out",
@@ -651,7 +575,6 @@ def main() -> None:
     }
     dist_bin_keys = ["d_0_10", "d_10_20", "d_20_40", "d_40_plus"]
 
-    # hit/no-hit 四格表统计
     hn_regions = ["all", "mask_in", "d_0_10", "d_10_20"]
     hn_stats: dict[tuple[str, str], HitNoHitCounter] = {
         (src, region): HitNoHitCounter()
@@ -671,44 +594,36 @@ def main() -> None:
         gt_vol = np.reshape(item["gt"], [200, 200, 16])
         fast_vol = np.reshape(item["pred_fast"], [200, 200, 16])
         aligned_vol = np.reshape(item["pred_aligned"], [200, 200, 16])
-        mask_vol = item["mask"]  # (200, 200, 16) or None
+        mask_vol = item["mask"]
 
-        # ray cast 三个 volume
         rc_gt = raycast_one_sample(gt_vol, lidar_rays, lidar_origins)
         rc_fast = raycast_one_sample(fast_vol, lidar_rays, lidar_origins)
         rc_aligned = raycast_one_sample(aligned_vol, lidar_rays, lidar_origins)
 
-        # --- hit/no-hit 统计（使用全部 ray）---
         all_gt_hit = rc_gt["class"] != FREE_ID
-        all_gt_coord = rc_gt["coord"]  # (N, 3)
+        all_gt_coord = rc_gt["coord"]
 
         for src_name, rc_src in [("fast", rc_fast), ("aligned", rc_aligned)]:
             all_pred_hit = rc_src["class"] != FREE_ID
 
-            # all
             hn_stats[(src_name, "all")].update(all_gt_hit, all_pred_hit)
 
-            # mask 内（注意：GT no-hit ray 的 coord 是 DVR 最后遍历的栅格点，
-            # 大概率在边界 free 区域、不在 mask 内，因此 mask_in 主要反映 GT hit ray）
             if mask_vol is not None:
                 m = mask_vol[all_gt_coord[:, 0], all_gt_coord[:, 1], all_gt_coord[:, 2]].astype(bool)
                 if m.any():
                     hn_stats[(src_name, "mask_in")].update(all_gt_hit[m], all_pred_hit[m])
 
-            # 距离桶：统一用 gt_dist 分桶，保证 fast/aligned 对比的是同一批 ray
             gt_dist_all = rc_gt["dist"]
             for lo, hi, key in [(0, 10, "d_0_10"), (10, 20, "d_10_20")]:
                 bin_m = (gt_dist_all >= lo) & (gt_dist_all < hi)
                 if bin_m.any():
                     hn_stats[(src_name, key)].update(all_gt_hit[bin_m], all_pred_hit[bin_m])
 
-        # 只分析 GT 命中非 free 的 ray（原有深度统计）
         valid = rc_gt["class"] != FREE_ID
         gt_class = rc_gt["class"][valid]
         gt_dist = rc_gt["dist"][valid]
-        gt_coord = rc_gt["coord"][valid]  # (N, 3) — 用于判断 mask 内/外
+        gt_coord = rc_gt["coord"][valid]
 
-        # 预计算 GT ray 属性 mask
         gt_is_dynamic = np.isin(gt_class, list(DYNAMIC_IDS))
         gt_is_static = ~gt_is_dynamic
 
@@ -716,10 +631,8 @@ def main() -> None:
             pred_class = rc_src["class"][valid]
             pred_dist = rc_src["dist"][valid]
 
-            # all
             stats[(src_name, "all")].update(pred_class, pred_dist, gt_class, gt_dist)
 
-            # mask 内/外
             if mask_vol is not None:
                 in_mask = mask_vol[gt_coord[:, 0], gt_coord[:, 1], gt_coord[:, 2]].astype(bool)
                 out_mask = ~in_mask
@@ -734,7 +647,6 @@ def main() -> None:
                         gt_class[out_mask], gt_dist[out_mask],
                     )
 
-            # 距离桶: 0-10, 10-20, 20-40, 40+
             for (lo, hi), key in zip(dist_bins, dist_bin_keys):
                 bin_mask = (gt_dist >= lo) & (gt_dist < hi)
                 if bin_mask.any():
@@ -743,7 +655,6 @@ def main() -> None:
                         gt_class[bin_mask], gt_dist[bin_mask],
                     )
 
-            # 近距 (<20m) × static / dynamic
             near_mask = gt_dist < 20.0
             ns = near_mask & gt_is_static
             nd = near_mask & gt_is_dynamic
@@ -763,7 +674,6 @@ def main() -> None:
     if skipped:
         print(f"  跳过 {skipped} 个样本（无对应 lidar origin）")
 
-    # --- 阶段 4：输出对比表 ---
     region_display = {
         "all": "全部 ray",
         "mask_in": "mask 内 ray",
@@ -782,12 +692,10 @@ def main() -> None:
             continue
         print_depth_comparison(fast_s, aligned_s, region_display[region])
 
-    # --- 各类别 RayIoU 对比表（与 ray_metrics.py 输出格式一致）---
     def _print_per_class_rayiou(stats_obj: RayDepthStats, label: str) -> None:
-        """打印单个来源的各类别 RayIoU PrettyTable。"""
         table = PrettyTable(['Class Names', 'RayIoU@1', 'RayIoU@2', 'RayIoU@4'])
         table.float_format = '.3'
-        cls_names = occ_class_names[:-1]  # 不含 free
+        cls_names = occ_class_names[:-1]
         iou1 = stats_obj.per_class_rayiou_at(0)
         iou2 = stats_obj.per_class_rayiou_at(1)
         iou4 = stats_obj.per_class_rayiou_at(2)
@@ -808,7 +716,6 @@ def main() -> None:
     if aligned_all.total_rays > 0:
         _print_per_class_rayiou(aligned_all, "Aligner Output")
 
-    # --- hit/no-hit 四格表 ---
     hn_display = {
         "all": "全部 ray",
         "mask_in": "mask 内 ray",

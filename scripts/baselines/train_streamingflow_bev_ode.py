@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""StreamingFlow-style BEV GRU-ODE baseline 训练脚本。"""
 
 from __future__ import annotations
 
@@ -243,7 +242,6 @@ def main() -> None:
             optimizer.load_state_dict(opt_state)
     scheduler = build_scheduler(optimizer, train_cfg, args)
     if scheduler is not None and start_epoch > 1:
-        # resume 时对齐主训练脚本的 LR 进度，避免学习率计划从头开始。
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*before.*optimizer.step.*")
@@ -401,7 +399,6 @@ def main() -> None:
             save_checkpoint(latest_path, raw_model, optimizer=optimizer, epoch=epoch, extra=extra)
             print(f"[ckpt] saved -> {epoch_path}")
 
-        # DDP 下 rank0 做 eval/checkpoint，其他 rank 必须等待，避免下一轮 forward 挂死。
         if use_ddp:
             dist.barrier()
 

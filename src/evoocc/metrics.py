@@ -1,5 +1,3 @@
-"""评估指标实现（与 spconv legacy 对齐）。"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -29,7 +27,6 @@ SURROUNDOCC_CLASS_NAMES = [
 
 
 def apply_free_threshold(logits: torch.Tensor, free_index: int, conf_thresh: float) -> torch.Tensor:
-    """按最大 logit 的 sigmoid 置信度阈值筛为 free。"""
     if logits.dim() == 5:
         max_logits, preds = logits.max(dim=1)
         conf = torch.sigmoid(max_logits)
@@ -50,12 +47,7 @@ def compute_iou(
     num_classes: int,
     free_index: int,
 ) -> dict:
-    """
-    计算每类 IoU 和 mIoU（排除 free 类）。
-    logits: (B, C, X, Y, Z)
-    targets: (B, X, Y, Z)
-    mask: (B, X, Y, Z)
-    """
+    """logits: (B, C, X, Y, Z); targets, mask: (B, X, Y, Z)."""
     preds = logits.argmax(dim=1)
     valid = mask > 0
 
@@ -77,8 +69,6 @@ def compute_iou(
 
 
 class MetricMiouOcc3D:
-    """与 OPUS / spconv legacy 一致的 Occ3D mIoU 统计方式。"""
-
     def __init__(
         self,
         num_classes: int = 18,
@@ -130,7 +120,6 @@ class MetricMiouOcc3D:
         self.cnt = 0
 
     def hist_info(self, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
-        """构建混淆矩阵（与 OPUS 逻辑一致）。"""
         assert pred.shape == gt.shape
         k = (gt >= 0) & (gt < self.num_classes)
         return np.bincount(
@@ -139,7 +128,6 @@ class MetricMiouOcc3D:
         ).reshape(self.num_classes, self.num_classes)
 
     def per_class_iu(self, hist: np.ndarray) -> np.ndarray:
-        """计算每类 IoU，空类置为 NaN。"""
         denom = hist.sum(1) + hist.sum(0) - np.diag(hist)
         result = np.full(hist.shape[0], np.nan, dtype=np.float64)
         valid = denom > 0
@@ -153,7 +141,6 @@ class MetricMiouOcc3D:
         mask_lidar: np.ndarray | None = None,
         mask_camera: np.ndarray | None = None,
     ) -> None:
-        """累计单个样本的统计量。"""
         self.cnt += 1
         if self.use_image_mask and mask_camera is not None:
             mask = mask_camera.astype(bool)
@@ -175,7 +162,6 @@ class MetricMiouOcc3D:
         self.hist += self.hist_info(semantics_pred.flatten(), semantics_gt.flatten())
 
     def count_miou(self, verbose: bool = True) -> float:
-        """输出并返回 mIoU（百分比）。"""
         mIoU = self.per_class_iu(self.hist)
         miou = float(round(np.nanmean(mIoU[: self.num_classes - 1]) * 100, 2))
         miou_d = self.count_miou_d(verbose=False, class_iou=mIoU)
@@ -190,7 +176,6 @@ class MetricMiouOcc3D:
         return miou
 
     def count_miou_d(self, verbose: bool = True, class_iou: np.ndarray | None = None) -> float:
-        """输出并返回动态类 mIoU_D（百分比）。"""
         if class_iou is None:
             class_iou = self.per_class_iu(self.hist)
         if self.dynamic_object_idx.size == 0:
@@ -202,14 +187,11 @@ class MetricMiouOcc3D:
         return miou_d
 
     def get_per_class_iou(self) -> np.ndarray:
-        """返回每类 IoU（百分比，空类为 NaN）。"""
         mIoU = self.per_class_iu(self.hist) * 100.0
         return mIoU
 
 
 class MetricMiouSurroundOcc(MetricMiouOcc3D):
-    """OccStudio SurroundOcc 口径的 mIoU 统计。"""
-
     def __init__(
         self,
         num_classes: int = 17,
@@ -238,7 +220,6 @@ class MetricMiouSurroundOcc(MetricMiouOcc3D):
         mask_lidar: np.ndarray | None = None,
         mask_camera: np.ndarray | None = None,
     ) -> None:
-        """累计语义 IoU 与 OccStudio occupied IoU。"""
         if self.use_image_mask and mask_camera is not None:
             mask = mask_camera.astype(bool)
             occ_pred_src = semantics_pred[mask]
@@ -268,7 +249,6 @@ class MetricMiouSurroundOcc(MetricMiouOcc3D):
         )
 
     def count_occupied_iou(self, verbose: bool = True) -> float:
-        """输出并返回 occupied IoU（百分比）。"""
         occ_iou = self.per_class_iu(self.hist_occ)
         occupied_iou = float(round(occ_iou[1] * 100, 2))
         if verbose and np.isfinite(occupied_iou):
@@ -276,7 +256,6 @@ class MetricMiouSurroundOcc(MetricMiouOcc3D):
         return occupied_iou
 
     def get_occupied_iou(self) -> float:
-        """返回 occupied IoU（百分比）。"""
         return self.count_occupied_iou(verbose=False)
 
 
@@ -286,7 +265,6 @@ def build_miou_metric(
     variant: str = "occ3d",
     **kwargs,
 ) -> MetricMiouOcc3D:
-    """构造 Occ3D / SurroundOcc mIoU metric。"""
     variant = str(variant).strip().lower()
     if variant == "surroundocc":
         return MetricMiouSurroundOcc(num_classes=num_classes, **kwargs)

@@ -1,5 +1,3 @@
-# Acknowledgments: https://github.com/tarashakhurana/4d-occ-forecasting
-# Modified by Haisong Liu
 import copy
 import os
 import numpy as np
@@ -30,17 +28,14 @@ occ_class_names = [
     'terrain', 'manmade', 'vegetation', 'free'
 ]
 
-# https://github.com/tarashakhurana/4d-occ-forecasting/blob/ff986082cd6ea10e67ab7839bf0e654736b3f4e2/test_fgbg.py#L29C1-L46C16
 def get_rendered_pcds(origin, points, tindex, pred_dist):
     pcds = []
     
     for t in range(len(origin)):
         mask = (tindex == t)
-        # skip the ones with no data
         if not mask.any():
             continue
         _pts = points[mask, :3]
-        # use ground truth lidar points for the raycasting direction
         v = _pts - origin[t][None, :]
         d = v / np.sqrt((v ** 2).sum(axis=1, keepdims=True))
         pred_pts = origin[t][None, :] + d * pred_dist[mask][:, None]
@@ -64,8 +59,6 @@ def meshgrid3d(occ_size, pc_range):
 
 
 def process_one_sample(sem_pred, lidar_rays, output_origin):
-    # lidar origin in ego coordinate
-    # lidar_origin = torch.tensor([[[0.9858, 0.0000, 1.8402]]])
     T = output_origin.shape[1]
     pred_pcds_t = []
 
@@ -82,12 +75,12 @@ def process_one_sample(sem_pred, lidar_rays, output_origin):
     lidar_tindex = torch.zeros([1, lidar_rays.shape[0]])
     
     for t in range(T): 
-        lidar_origin = output_origin[:, t:t+1, :]  # [1, 1, 3]
-        lidar_endpts = lidar_rays[None] + lidar_origin  # [1, 15840, 3]
+        lidar_origin = output_origin[:, t:t+1, :]  # [1, 1, 3], ego frame
+        lidar_endpts = lidar_rays[None] + lidar_origin  # [1, N, 3]
 
-        output_origin_render = ((lidar_origin - offset) / scaler).float()  # [1, 1, 3]
-        output_points_render = ((lidar_endpts - offset) / scaler).float()  # [1, N, 3]
-        output_tindex_render = lidar_tindex  # [1, N], all zeros
+        output_origin_render = ((lidar_origin - offset) / scaler).float()
+        output_points_render = ((lidar_endpts - offset) / scaler).float()
+        output_tindex_render = lidar_tindex
 
         with torch.no_grad():
             pred_dist, _, coord_index = dvr.render_forward(
@@ -106,9 +99,9 @@ def process_one_sample(sem_pred, lidar_rays, output_origin):
             lidar_tindex[0].cpu().numpy(),
             pred_dist[0].cpu().numpy()
         )
-        coord_index = coord_index[0, :, :].int().cpu()  # [N, 3]
+        coord_index = coord_index[0, :, :].int().cpu()
 
-        pred_label = torch.from_numpy(sem_pred[coord_index[:, 0], coord_index[:, 1], coord_index[:, 2]])[:, None]  # [N, 1]
+        pred_label = torch.from_numpy(sem_pred[coord_index[:, 0], coord_index[:, 1], coord_index[:, 2]])[:, None]
         pred_dist = pred_dist[0, :, None].cpu()
         pred_pcds = torch.cat([pred_label.float(), pred_dist], dim=-1)
 
@@ -120,13 +113,6 @@ def process_one_sample(sem_pred, lidar_rays, output_origin):
 
 
 class RayIouAccumulator:
-    """RayIoU 流式累积器：逐样本 raycast 后累加三个整数计数器。
-
-    与 `main()` 的批量计算结果逐 bit 相等（整数加法顺序无关），但内存开销
-    仅为 O(类别数 × 阈值数) 的小计数器，适合 stepwise 评估给每个 step 维护
-    一个独立累积器、样本处理完立即丢弃 dense 预测。
-    """
-
     def __init__(self, thresholds=(1, 2, 4)):
         self.thresholds = list(thresholds)
         self.gt_cnt = np.zeros(len(occ_class_names))
@@ -136,21 +122,16 @@ class RayIouAccumulator:
         self.num_samples = 0
 
     def add_sample(self, sem_pred, sem_gt, lidar_origins) -> None:
-        """喂入一个样本：dense (X,Y,Z) 预测 + GT + lidar origins。
-
-        内部完成 raycast、free-ray 过滤与计数累加，不保留 pcd。
-        """
         sem_pred = np.reshape(sem_pred, [200, 200, 16])
         sem_gt = np.reshape(sem_gt, [200, 200, 16])
         pcd_pred = process_one_sample(sem_pred, self._lidar_rays, lidar_origins)
         pcd_gt = process_one_sample(sem_gt, self._lidar_rays, lidar_origins)
-        # 与 main() 一致：只在 GT 非 free 的 ray 上评估
+        # Evaluate only on rays whose GT is not free.
         valid = (pcd_gt[:, 0].astype(np.int32) != len(occ_class_names) - 1)
         self._update_counts(pcd_pred[valid], pcd_gt[valid])
         self.num_samples += 1
 
     def _update_counts(self, pcd_pred, pcd_gt) -> None:
-        """累加当前样本（已过滤）的 TP/GT/Pred 计数。逻辑与 calc_metrics 内层等价。"""
         depth_pred = pcd_pred[:, 1]
         depth_gt = pcd_gt[:, 1]
         l1_error = np.abs(depth_pred - depth_gt)
@@ -167,7 +148,6 @@ class RayIouAccumulator:
                 self.tp_cnt[j][i] += tp_mask.sum()
 
     def finalize(self, print_table: bool = False) -> dict:
-        """结算并返回 RayIoU；num_samples=0 时所有指标填 NaN。"""
         if self.num_samples == 0:
             nan = float("nan")
             return {
@@ -215,7 +195,6 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
 
     for pcd_pred, pcd_gt in zip(pcd_pred_list, pcd_gt_list):
         for j, threshold in enumerate(thresholds):
-            # L1
             depth_pred = pcd_pred[:, 1]
             depth_gt = pcd_gt[:, 1]
             l1_error = np.abs(depth_pred - depth_gt)
@@ -232,7 +211,7 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
                     gt_cnt[i] += gt_cnt_i
                     pred_cnt[i] += pred_cnt_i
 
-                tp_cls = cls_mask_gt & cls_mask_pred  # [N]
+                tp_cls = cls_mask_gt & cls_mask_pred
                 tp_mask = np.logical_and(tp_cls, tp_dist_mask)
                 tp_cnt[j][i] += tp_mask.sum()
     
@@ -244,20 +223,12 @@ def calc_metrics(pcd_pred_list, pcd_gt_list):
 
 
 def main(sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=False):
-    """计算 RayIoU。
-
-    Args:
-        return_pcds: 若为 True，额外返回未过滤的 per-sample pcd 列表，
-            供 binned_ray_stats 等下游分析使用，避免二次 raycasting。
-    """
     torch.cuda.empty_cache()
 
-    # generate lidar rays
     lidar_rays = generate_lidar_rays()
     lidar_rays = torch.from_numpy(lidar_rays)
 
     pcd_pred_list, pcd_gt_list = [], []
-    # 未过滤的原始 pcd（含 free ray），仅 return_pcds=True 时收集
     raw_pcd_pred_list, raw_pcd_gt_list = [], []
     _pb = make_pbar(len(sem_pred_list), prefix="[rayiou] ")
     pbar = _pb.start() if _pb is not None else None
@@ -272,7 +243,6 @@ def main(sem_pred_list, sem_gt_list, lidar_origin_list, return_pcds=False):
             raw_pcd_pred_list.append(pcd_pred.copy())
             raw_pcd_gt_list.append(pcd_gt.copy())
 
-        # evalute on non-free rays
         valid_mask = (pcd_gt[:, 0].astype(np.int32) != len(occ_class_names) - 1)
         pcd_pred = pcd_pred[valid_mask]
         pcd_gt = pcd_gt[valid_mask]

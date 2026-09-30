@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""50×50×16 learned direct window-attention baseline 训练入口。"""
 
 from __future__ import annotations
 

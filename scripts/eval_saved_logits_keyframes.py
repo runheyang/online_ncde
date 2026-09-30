@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""评估保存的 logits 列表：对所有可匹配 keyframe 帧计算各类别 IoU 与 mIoU。"""
 
 from __future__ import annotations
 
@@ -131,7 +130,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_saved_list(path: str) -> list[dict[str, Any]]:
-    """读取保存列表，统一返回 list[dict]。"""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"saved-list 不存在: {p}")
@@ -163,7 +161,6 @@ def load_saved_list(path: str) -> list[dict[str, Any]]:
 
 
 def load_sidecar_index(path: str) -> dict[str, dict[str, Any]]:
-    """读取 sidecar，并按 token 建立索引。"""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"sidecar 不存在: {p}")
@@ -191,20 +188,17 @@ def resolve_pred_logits_path(
     scene_token_layout: bool,
     pred_format: str,
 ) -> str | None:
-    """解析当前样本预测 logits 文件路径。"""
     scene_name = str(info.get("scene_name", ""))
     token = str(info.get("token", ""))
     pred_root_abs = resolve_path(root_path, pred_root) if pred_root else ""
     pred_filename = "logits_full.npz" if pred_format == "full" else "logits.npz"
 
-    # 模式1：按 scene/token 固定目录组织
     if scene_token_layout:
         if not scene_name or not token or not pred_root_abs:
             return None
         path = os.path.join(pred_root_abs, scene_name, token, pred_filename)
         return path if os.path.exists(path) else None
 
-    # 模式2：优先使用指定字段
     path_str = str(info.get(pred_path_key, ""))
     candidates: list[str] = []
     if path_str:
@@ -216,7 +210,6 @@ def resolve_pred_logits_path(
                 candidates.append(os.path.join(pred_root_abs, path_str))
             candidates.append(resolve_path(root_path, path_str))
 
-    # 兼容常见字段名，避免用户每次手动指定。
     if not candidates:
         for fallback_key in ("aligned_logits_path", "saved_logits_path", "logits_path"):
             p = str(info.get(fallback_key, ""))
@@ -231,7 +224,6 @@ def resolve_pred_logits_path(
                 candidates.append(resolve_path(root_path, p))
             break
 
-    # 再兜底一次 scene/token 目录
     if scene_name and token and pred_root_abs:
         candidates.append(os.path.join(pred_root_abs, scene_name, token, pred_filename))
 
@@ -242,7 +234,6 @@ def resolve_pred_logits_path(
 
 
 def rewrite_pred_rel_or_abs_path(path_str: str, pred_filename: str) -> str:
-    """将路径中的 logits 文件名按 pred_format 改写为目标文件名。"""
     parent, basename = os.path.split(path_str)
     if basename in {"logits.npz", "logits_full.npz"}:
         return os.path.join(parent, pred_filename) if parent else pred_filename
@@ -261,7 +252,6 @@ def decode_one_frame_sparse_topk(
     other_fill_value: float,
     free_fill_value: float,
 ) -> torch.Tensor:
-    """仅解码指定帧 top-k 为 dense logits，返回 (C, X, Y, Z)。"""
     x_size, y_size, z_size = grid_size
     num_frames = int(frame_splits.shape[0] - 1)
     if frame_index < 0 or frame_index >= num_frames:
@@ -312,7 +302,6 @@ def decode_one_frame_sparse_full(
     other_fill_value: float,
     free_fill_value: float,
 ) -> torch.Tensor:
-    """仅解码指定帧 full sparse logits 为 dense logits，返回 (C, X, Y, Z)。"""
     x_size, y_size, z_size = grid_size
     num_frames = int(frame_splits.shape[0] - 1)
     if frame_index < 0 or frame_index >= num_frames:
@@ -365,15 +354,6 @@ def postprocess_fast_logits_opusv1(
     free_fill_value: float,
     kernel_size: int = 3,
 ) -> torch.Tensor:
-    """
-    将 dense logits 按 OPUSv1 的 occupancy 后处理规则转成可评估 logits。
-
-    逻辑对齐 third_party/OPUS/models/opusv1/opus_head.py:
-    1. 仅保留 sigmoid(max_non_free_logit) > score_thr 的体素；
-    2. 对非 free 类 score 体执行 max_pool3d dilation + erosion；
-    3. 原始高置信体素保持不变；
-    4. 将保留结果写回 dense logits，其余体素回退为 free 先验。
-    """
     num_classes = int(logits.shape[0])
     class_mask = torch.ones(num_classes, dtype=torch.bool, device=logits.device)
     class_mask[free_index] = False
@@ -418,7 +398,6 @@ def logits_to_pred(
     postprocess_score_thr: float,
     postprocess_kernel_size: int,
 ) -> np.ndarray:
-    """将 dense logits 转成最终语义预测。"""
     dense = logits
     if pred_postprocess == "opusv1":
         dense = postprocess_fast_logits_opusv1(
@@ -433,7 +412,6 @@ def logits_to_pred(
 
 
 def build_step_map_from_sidecar(entry: dict[str, Any]) -> dict[int, str]:
-    """当 frame_tokens 缺失时，使用 sidecar 里的监督映射回退。"""
     out: dict[int, str] = {}
     sup_mask = entry.get("supervision_mask", [])
     sup_steps = entry.get("supervision_step_indices", [])
@@ -453,7 +431,6 @@ def build_step_map_from_sidecar(entry: dict[str, Any]) -> dict[int, str]:
 
 
 def hist_info(pred: np.ndarray, gt: np.ndarray, num_classes: int) -> np.ndarray:
-    """构建混淆矩阵（与 MetricMiouOcc3D.hist_info 逻辑一致）。"""
     assert pred.shape == gt.shape
     k = (gt >= 0) & (gt < num_classes)
     return np.bincount(
@@ -468,7 +445,6 @@ def compute_hist_for_pair(
     gt_mask: np.ndarray,
     num_classes: int,
 ) -> np.ndarray:
-    """按 image mask 过滤后统计单对(pred, gt)的混淆矩阵。"""
     mask = gt_mask.astype(bool)
     pred_use = preds[mask]
     gt_use = gt_semantics[mask]
@@ -497,7 +473,6 @@ def process_one_info(
     postprocess_kernel_size: int,
     deduplicate_gt: bool,
 ) -> dict[str, Any]:
-    """线程 worker：处理单个 info，返回局部统计和元信息。"""
     ret: dict[str, Any] = {
         "all_hist": np.zeros((num_classes, num_classes), dtype=np.float64),
         "all_count": 0,
@@ -647,7 +622,6 @@ def iter_threaded_results(
     io_workers: int,
     prefetch: int,
 ):
-    """并行执行 worker_fn(info)，按完成顺序产出结果。"""
     if io_workers <= 1:
         for info in infos:
             yield worker_fn(info)

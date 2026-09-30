@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""按推演时长 T 分桶评估 mIoU + RayIoU（start-anchored 版本）。
-
-输入 pkl 必须由 gen_evoocc_evolve_infos.py 生成（schema_version =
-evoocc_evolve_infos_v1）。每个 sample 是「以某个 keyframe K_j 为 slow 锚 +
-往后推到 K_{j+max_evolve}」，max_evolve = min(history_keyframes, scene_end - j)。
-
-每个 sample 跑一次完整 forward，按 T 桶分发 step 输出：
-  - desired_step = round(T / dt_per_step)
-  - 若 desired_step > num_real_frames - 1（该 sample 推不到 T）：跳过该桶（无 fallback）
-  - 否则 pred = step_logits[step_indices == desired_step]，GT 取
-    evolve_keyframe_sample_tokens[desired_step // steps_per_kf] 对应的 keyframe GT
-"""
 
 from __future__ import annotations
 
@@ -122,14 +110,12 @@ def main() -> None:
     print(f"[eval] evolution_times={evolution_times}s "
           f"keyframe_interval={keyframe_interval}s")
 
-    # === dataset ===
     logits_loader = build_logits_loader(data_cfg, root_path)
     info_path = args.val_info_path if args.val_info_path else data_cfg.get(
         "val_info_path", data_cfg["info_path"]
     )
     if args.val_info_path:
         print(f"[eval] --val-info-path 覆盖 -> {info_path}")
-    # 校验 schema：必须是 evolve_infos
     info_path_abs = resolve_path(root_path, info_path)
     import pickle
     with open(info_path_abs, "rb") as f:
@@ -149,7 +135,6 @@ def main() -> None:
         root_path=root_path,
         logits_loader=logits_loader,
         fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
-        # evolve_infos 不参与 history-based 过滤（每个 sample 自己的 max_evolve 决定能进哪些桶）
         min_history_completeness=0,
         eval_only_mode=True,
     )
@@ -173,7 +158,6 @@ def main() -> None:
         kwargs["persistent_workers"] = loader_cfg.get("persistent_workers", False)
     loader = DataLoader(dataset, **kwargs)
 
-    # === 推断 dt_per_step（从 pkl 元信息 / 第一条 info） ===
     info0 = dataset_full.infos[0]
     history_keyframes = int(info0.get("history_keyframes", 10))
     stride = int(data_cfg.get("fast_frame_stride", 1))
@@ -193,8 +177,7 @@ def main() -> None:
     print(f"[eval] history_keyframes={history_keyframes} num_frames={num_frames} "
           f"steps_per_kf={steps_per_kf} dt_per_step={dt_per_step:.4f}s")
 
-    # 校验：每个 T 必须落在 keyframe 网格（0.5s 倍数），同时换算到 keyframe distance T_x2
-    # （= T / keyframe_interval）。所有内部分桶用 T_x2 整数索引。
+    # T_x2 = T / keyframe_interval (integer keyframe distance); all bucketing is indexed by T_x2
     T_x2_to_T: dict[int, float] = {}
     grid_eps = 1e-6
     for T in evolution_times:
@@ -217,7 +200,6 @@ def main() -> None:
     print(f"[eval] T_x2 集合: {sorted(T_x2_set)} (max={max_T_x2})")
     print(f"[eval] fallback={'ON (target-anchored，每桶 ~6017 个评估单元)' if args.fallback else 'OFF (每桶只评真能推 T 秒的 sample)'}")
 
-    # === model ===
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
     model = EvoOccAligner(
         num_classes=data_cfg["num_classes"],
@@ -242,8 +224,7 @@ def main() -> None:
     load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
     model.eval()
 
-    # === sweep origins for RayIoU ===
-    nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)  # noqa: F841 (保留以便将来扩展)
+    nusc_dataroot = resolve_path(root_path, args.nusc_dataroot)  # noqa: F841
     sweep_info_path = resolve_path(root_path, args.sweep_info_path)
     enable_rayiou = not args.no_rayiou
     origins_by_token: dict[str, Any] = {}
@@ -259,8 +240,6 @@ def main() -> None:
     dataset_variant = str(data_cfg.get("dataset_variant", "occ3d"))
     metric_variant = str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d")))
 
-    # === 推理 + 收集 buckets ===
-    # buckets[T] -> list of dict(pred uint8 (X,Y,Z), token, scene, source ∈ {'main', 'fallback'})
     buckets: dict[float, list[dict[str, Any]]] = {T: [] for T in evolution_times}
     skip_too_short: dict[float, int] = defaultdict(int)
     skip_no_gt_token: dict[float, int] = defaultdict(int)
@@ -277,10 +256,6 @@ def main() -> None:
     with torch.inference_mode():
         for batch_idx, sample in enumerate(iterator, start=1):
             sample = move_to_device(sample, device)
-            # bs=1 时按 num_real_frames 截断输入，避免模型在 pad 段做无意义的 ODE step
-            # （compute_segment_dt 内部 clamp_min(eps)，pad 段并非真零，会推一点点）。
-            # bs>1 时各样本 num_real 可能不同，这里走完整 num_frames，pad 段输出会被 meta
-            # 的 num_real_frames 过滤掉，但模型仍会跑满，浪费一些算力。
             B_in = sample["fast_logits"].shape[0]
             fast_in = sample["fast_logits"]
             slow_in = sample["slow_logits"]
@@ -305,12 +280,11 @@ def main() -> None:
                 frame_dt=dt_in,
                 rollout_start_step=sample.get("rollout_start_step", None),
             )
-            step_logits = cast(torch.Tensor, outputs["step_logits"])  # (B, S, C, X, Y, Z)
-            step_preds = step_logits.argmax(dim=2).to(torch.uint8).cpu().numpy()  # (B, S, X, Y, Z)
+            step_logits = cast(torch.Tensor, outputs["step_logits"])
+            step_preds = step_logits.argmax(dim=2).to(torch.uint8).cpu().numpy()
             step_indices_arr = cast(torch.Tensor, outputs["step_indices"]).detach().cpu().numpy()
             step_idx_to_local = {int(v): i for i, v in enumerate(step_indices_arr)}
-            # slow_logits.argmax 用作 fallback 路径里 distance=0 (target=K_0) 的预测
-            slow_preds = slow_in.argmax(dim=1).to(torch.uint8).cpu().numpy()  # (B, X, Y, Z)
+            slow_preds = slow_in.argmax(dim=1).to(torch.uint8).cpu().numpy()
 
             B = step_preds.shape[0]
             meta_list = cast(list[dict[str, Any]], sample["meta"])
@@ -318,7 +292,7 @@ def main() -> None:
             for b in range(B):
                 meta = meta_list[b]
                 num_real = int(meta.get("num_real_frames", num_frames))
-                max_real_step = num_real - 1  # 该 sample 真实段最末 abs_step（抽帧后坐标）
+                max_real_step = num_real - 1
                 ek_step_indices = list(meta.get("evolve_keyframe_step_indices", []))
                 ek_sample_tokens = list(meta.get("evolve_keyframe_sample_tokens", []))
                 ek_gt_exists = list(meta.get("evolve_keyframe_gt_exists", []))
@@ -337,7 +311,6 @@ def main() -> None:
                     )
 
                 def _emit(T: float, dist: int, source: str) -> None:
-                    """发射一个 (target=K_{start+dist}, T) 评估单元到桶里。"""
                     if dist >= len(ek_sample_tokens):
                         return
                     if dist < len(ek_gt_exists) and not bool(ek_gt_exists[dist]):
@@ -372,26 +345,18 @@ def main() -> None:
                     else:
                         fallback_count[T] += 1
 
-                # 主路径：每个 d ∈ [1, max_evolve] 贡献到 T_x2=d 桶
-                # （target = K_{start+d}, sample 自身能整步推到 d 个 keyframe）
                 for d in range(1, max_evolve + 1):
                     if d not in T_x2_set:
                         continue
-                    # 确认 d 对应的 step 在 num_real_frames 内（应该总成立，因为 d ≤ max_evolve）
                     step_d = d * steps_per_kf
                     if step_d > max_real_step:
                         skip_too_short[T_x2_to_T[d]] += 1
                         continue
                     _emit(T_x2_to_T[d], d, "main")
 
-                # fallback 路径：仅 start=K_0 的 sample 触发；为 target_idx ∈ [0, max_evolve] 提供
-                # T_x2 > target_idx 桶下的预测。
-                # （target_idx=0 时取 slow_logits；target_idx=k>0 时取 step k*spi 输出，
-                # 即「以 K_0 为 start 推演 k 个 keyframe 到 K_k」。这就是 K_k 在更长 T 桶下的
-                # 「能找到的最早 start 推到 K_k」的输出。）
+                # fallback (start=K_0 only): step k*spi output stands in for K_k in buckets T_x2 > k; k=0 uses slow logits
                 if args.fallback and start_kf_idx == 0:
                     for d in range(0, max_evolve + 1):
-                        # 主路径覆盖 T_x2 = d；fallback 覆盖 T_x2 > d
                         for T_x2 in range(max(d, 0) + 1, max_T_x2 + 1):
                             if T_x2 not in T_x2_set:
                                 continue
@@ -405,7 +370,6 @@ def main() -> None:
               f"main={real_count[T]} fallback={fallback_count[T]} "
               f"too_short={skip_too_short[T]} no_gt_token={skip_no_gt_token[T]}")
 
-    # === 逐桶评估 mIoU + RayIoU ===
     gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] = {}
     summary: dict[str, Any] = {}
     for T in evolution_times:
@@ -485,7 +449,6 @@ def main() -> None:
             summary[str(T)]["occupied_iou"] = (
                 None if occupied_iou is None else float(occupied_iou)
             )
-        # 释放本桶引用
         items.clear()
 
     if args.dump_json:

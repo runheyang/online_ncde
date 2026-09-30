@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""真实快系统 + EvoOcc 端到端 benchmark。"""
 
 from __future__ import annotations
 
@@ -38,8 +37,6 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class ModeStats:
-    """聚合单个模式的耗时与评估统计。"""
-
     step_times_ms: list[float] = field(default_factory=list)
     step0_times_ms: list[float] = field(default_factory=list)
     rollout_times_ms: list[float] = field(default_factory=list)
@@ -256,7 +253,7 @@ def _run_single_mode(
     current_token = ""
     current_sample_failed = False
     final_dense_logits: torch.Tensor | None = None
-    _progress_count = 0  # 已完成样本数（progressbar2 需要绝对值）
+    _progress_count = 0
 
     def finalize_current_sample() -> None:
         nonlocal current_sample_idx, current_info, current_token, current_sample_failed, final_dense_logits, _progress_count
@@ -278,8 +275,6 @@ def _run_single_mode(
         current_sample_failed = False
         final_dense_logits = None
 
-    # 设计文档明确要求 no_grad；这里不能用 inference_mode，
-    # 否则 EvoOcc 的状态张量更新会在部分算子路径下直接报错。
     with torch.no_grad():
         for step_batch in dataloader:
             sample_idx = int(step_batch["sample_idx"])

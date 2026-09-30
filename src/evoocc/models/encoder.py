@@ -1,5 +1,3 @@
-"""全分辨率编码器（不下采样）。"""
-
 from __future__ import annotations
 
 import torch
@@ -9,8 +7,6 @@ from evoocc.utils.nn import resolve_group_norm_groups
 
 
 class DenseEncoder(nn.Module):
-    """单层 3x3x3 卷积编码器，stride=(1,1,1)，保持 200x200x16 分辨率。"""
-
     def __init__(self, in_channels: int, out_channels: int, gn_groups: int = 8) -> None:
         super().__init__()
         resolved_groups = resolve_group_norm_groups(
@@ -28,11 +24,7 @@ class DenseEncoder(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        输入: (B, C, X, Y, Z)
-        输出: (B, C_out, X, Y, Z)  — 空间尺寸不变
-        Conv3d 约定的空间维为 (D, H, W)，这里把 Z 放到 D。
-        """
+        """x: (B,C,X,Y,Z) -> (B,C_out,X,Y,Z); Z is mapped to Conv3d depth."""
         x = x.permute(0, 1, 4, 3, 2).contiguous()
         x = self.relu(self.gn(self.conv(x)))
         x = x.permute(0, 1, 4, 3, 2).contiguous()

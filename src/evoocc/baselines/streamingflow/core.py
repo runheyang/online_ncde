@@ -1,5 +1,3 @@
-"""StreamingFlow-style timestamp event loop。"""
-
 from __future__ import annotations
 
 import time
@@ -17,8 +15,6 @@ from evoocc.baselines.streamingflow.gru_ode import (
 
 
 class StreamingFlowODECore(nn.Module):
-    """BEV latent 上的 GRU-ODE + observation jump 主循环。"""
-
     def __init__(
         self,
         channels: int = 64,
@@ -72,10 +68,7 @@ class StreamingFlowODECore(nn.Module):
         target_times: torch.Tensor,
         return_step_times: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """按 StreamingFlow 事件顺序输出 target BEV states。
-
-        observation 与 target 时间相同时，先 jump 再保存 target state。
-        """
+        """If an observation and a target share a timestamp, jump first, then save the target state."""
         if initial_input.dim() != 4:
             raise ValueError(
                 f"initial_input 需要 (B,C,H,W)，当前: {tuple(initial_input.shape)}"
@@ -127,7 +120,6 @@ class StreamingFlowODECore(nn.Module):
             if obs.dim() != 4:
                 raise ValueError(f"observation 需要 (B,C,H,W)，当前: {tuple(obs.shape)}")
 
-            # target 严格早于下一个 observation：只做 ODE evolve 后保存。
             while target_idx < len(target_list) and target_list[target_idx] < obs_time - eps:
                 state, input_feat = self.ode_step(
                     state, input_feat, target_list[target_idx] - current_time
@@ -139,11 +131,9 @@ class StreamingFlowODECore(nn.Module):
             state, input_feat = self.ode_step(state, input_feat, obs_time - current_time)
             current_time = obs_time
 
-            # observation jump 到达后更新 imputed input。
             state = self.obs_cell(obs, state)
             input_feat = self.infer_state(state)
 
-            # target 与 observation 同时刻时，保存 jump 后状态。
             while target_idx < len(target_list) and abs(target_list[target_idx] - obs_time) <= eps:
                 save_target()
                 target_idx += 1

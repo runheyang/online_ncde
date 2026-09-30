@@ -1,5 +1,3 @@
-"""evoocc 数据与稀疏算子。"""
-
 from evoocc.data.build_logits_loader import build_logits_loader
 from evoocc.data.logits_loader import (
     AloccDenseTopkLoader,

@@ -1,5 +1,3 @@
-"""Neural ODE Δt 50×50×16 baseline 的卷积 FLOPs 估算。"""
-
 from __future__ import annotations
 
 from evoocc.baselines.learned_direct_fusion.profiling import (
@@ -35,10 +33,7 @@ def estimate_neural_ode_dt_100_stepwise(
     decoder_channels: int = 32,
     num_body_blocks: int = 3,
 ) -> ComputeEstimate:
-    """估算四步 Euler rollout 的 Conv3d MACs。
-
-    与 EvoOcc 统计口径一致，不计 warp、插值、归一化和激活。
-    """
+    # Conv3d MACs only; warp, interpolation, norm and activation are not counted.
     input_voxels = int(
         input_grid_size[0] * input_grid_size[1] * input_grid_size[2]
     )
@@ -46,7 +41,6 @@ def estimate_neural_ode_dt_100_stepwise(
         latent_grid_size[0] * latent_grid_size[1] * latent_grid_size[2]
     )
 
-    # 五个 fast frame 加一个 slow anchor。
     encoders = (num_frames + 1) * _conv3d_macs(
         latent_voxels,
         num_classes,

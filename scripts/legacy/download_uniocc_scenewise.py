@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Scene-wise downloader for UniOcc NuScenes-via-Occ3D-2Hz train/val."""
 
 from __future__ import annotations
 

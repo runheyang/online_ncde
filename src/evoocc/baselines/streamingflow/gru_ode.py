@@ -1,5 +1,3 @@
-"""StreamingFlow-style Dual-GRU jump / GRU-ODE cell 本地实现。"""
-
 from __future__ import annotations
 
 import torch
@@ -14,8 +12,6 @@ from evoocc.baselines.streamingflow.blocks import (
 
 
 class DualGRUCell2D(nn.Module):
-    """StreamingFlow observation jump 使用的 dual-branch GRU cell。"""
-
     def __init__(
         self,
         input_size: int = 64,
@@ -89,8 +85,6 @@ class DualGRUCell2D(nn.Module):
 
 
 class DualGRUODECell2D(nn.Module):
-    """StreamingFlow GRU-ODE vector field：DualGRU(x,h) - h。"""
-
     def __init__(
         self,
         input_size: int = 64,
@@ -111,8 +105,6 @@ class DualGRUODECell2D(nn.Module):
 
 
 class PModel2D(nn.Module):
-    """从 hidden state 预测 imputed input 的 mean/log_sigma 参数。"""
-
     def __init__(self, channels: int = 64, gn_groups: int = 8) -> None:
         super().__init__()
         c = int(channels)
@@ -137,6 +129,5 @@ class PModel2D(nn.Module):
 
 
 def infer_state_deterministic(q_params: torch.Tensor) -> torch.Tensor:
-    """只取 mean 作为 imputed input，保留 log_sigma 但不采样。"""
     mean, _log_sigma = q_params.chunk(2, dim=1)
     return mean

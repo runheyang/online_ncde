@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""为 EvoOcc 生成 4 时刻监督 sidecar（t-1.5, t-1.0, t-0.5, t）。"""
 
 from __future__ import annotations
 
@@ -79,9 +78,8 @@ def load_infos(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def collect_target_tokens(sample_table: dict[str, dict[str, Any]], curr_token: str) -> list[str]:
-    """返回按 [t-1.5, t-1.0, t-0.5, t] 顺序排列的 keyframe sample token。"""
     curr = curr_token
-    chain = [curr]  # [t, t-0.5, t-1.0, t-1.5]
+    chain = [curr]
     for _ in range(3):
         sample = sample_table.get(curr, None)
         if sample is None:
@@ -91,7 +89,7 @@ def collect_target_tokens(sample_table: dict[str, dict[str, Any]], curr_token: s
             break
         chain.append(prev_token)
         curr = prev_token
-    chain = chain[::-1]  # oldest -> current
+    chain = chain[::-1]
     if len(chain) < 4:
         chain = [""] * (4 - len(chain)) + chain
     elif len(chain) > 4:
@@ -147,7 +145,6 @@ def main() -> None:
         if token and scene_name and is_valid and frame_tokens:
             target_tokens = collect_target_tokens(sample_table=sample_table, curr_token=token)
 
-            # 在当前 13 帧序列中找到 keyframe sample token -> step_idx
             keyframe_step_map: dict[str, tuple[int, str]] = {}
             for step_idx, frame_token in enumerate(frame_tokens):
                 if not frame_token:
@@ -194,11 +191,11 @@ def main() -> None:
                 "valid": is_valid,
                 "num_output_frames": int(info.get("num_output_frames", len(frame_tokens))),
                 "supervision_labels": SUPERVISION_LABELS,
-                "supervision_mask": supervision_mask,  # 长度4，1表示该时刻可监督
-                "supervision_step_indices": supervision_steps,  # 长度4，缺失为 -1
-                "supervision_gt_tokens": supervision_gt_tokens,  # 长度4，缺失为空串
-                "supervision_gt_rel_paths": supervision_gt_rel_paths,  # 相对 gt_root
-                "supervision_frame_tokens": supervision_frame_tokens,  # 对应 step 的 sample_data token
+                "supervision_mask": supervision_mask,
+                "supervision_step_indices": supervision_steps,
+                "supervision_gt_tokens": supervision_gt_tokens,
+                "supervision_gt_rel_paths": supervision_gt_rel_paths,
+                "supervision_frame_tokens": supervision_frame_tokens,
                 "num_supervision": available,
                 "has_all_4_supervision": bool(available == 4),
             }

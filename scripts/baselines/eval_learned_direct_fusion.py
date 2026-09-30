@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""50×50×16 learned direct fusion baseline 评估入口。"""
 
 from __future__ import annotations
 
@@ -27,8 +26,6 @@ BASELINE_CONFIG_PATH = (
 
 
 class _LearnedDirectFusionAsAligner:
-    """适配 eval_evoocc.py 的 EvoOccAligner 构造签名。"""
-
     def __init__(self, baseline_cfg: dict, data_cfg: dict) -> None:
         self.baseline_cfg = baseline_cfg
         self.data_cfg = data_cfg

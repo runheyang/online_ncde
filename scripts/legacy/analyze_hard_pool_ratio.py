@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""统计 Occ3D GT 中“难类池”样本占比。"""
 
 from __future__ import annotations
 

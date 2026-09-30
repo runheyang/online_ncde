@@ -1,37 +1,4 @@
 #!/usr/bin/env python3
-"""EvoOcc 交互式 Occupancy 可视化工具。
-
-六面板对比（2x3 布局）。约定演化 2s 的 evolve_infos pkl，
-evolve_keyframe_sample_tokens 长度 = max_evolve+1，从老到新：
-  index 0 = -2s（即 dataset 默认 "anchor slow" 对应的 keyframe）
-  index 1 = -1s
-  index -1 = curr（与 sample.token 一致）
-
-第 1 行（curr 相关）：
-  - GT (curr)                : 当前 keyframe ground truth（不应用 camera mask，完整显示）
-  - EvoOcc Aligned (curr)      : aligner 演化到当前帧的输出
-  - Fast (curr frame)        : fast_logits[-1]，当前帧 fast 预测
-第 2 行（slow 历史，按时间从老到新；统一到 curr ego frame）：
-  - Slow (-2s keyframe)      : 倒数第 5 个 keyframe（2s 前），warp 到 curr ego
-  - Slow (-1s keyframe)      : 倒数第 3 个 keyframe（1s 前），warp 到 curr ego
-                                短历史缺 -1s 时回退到最近历史帧，标题显示实际时间
-  - Slow (curr keyframe)     : 倒数第 1 个 keyframe，本身在 curr ego，无需 warp
-
-所有 6 个面板共享同一坐标系：同一 voxel 索引 (i,j,k) 对应同一世界点，
-直接像素级对比 fast 漏检 → aligned 是否补出 / 过期 slow 是否被擦除。
-warp 越界（旧视角的某点跑出 curr pc_range）取 free_index。
-
-用法:
-    python scripts/interactive_occ_viewer.py \
-        --config configs/evoocc/fast_alocc2dmini__slow_alocc3d.yaml \
-        --checkpoint ckpts/.../epoch_9.pth
-
-操作:
-    - 顶部 [◀ N/total ▶] 切样本，立即刷新 GT/Fast/3 路 Slow（不跑模型）
-    - [运行 EvoOcc 对齐] 触发一次 forward，刷新 Aligned 面板
-    - 6 个视图相机自动同步（鼠标松开后）
-    - [保存大图] 把 6 个面板拼成 2x3 PNG 存盘
-"""
 from __future__ import annotations
 
 import argparse
@@ -41,7 +8,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Mayavi / Qt 后端环境（必须在 import mayavi 之前）
 os.environ.setdefault("ETS_TOOLKIT", "qt")
 os.environ.setdefault("QT_API", "pyqt5")
 
@@ -63,7 +29,6 @@ from evoocc.visualization.occ_renderer import (                       # noqa: E4
     render_voxel_into_figure,
 )
 
-# Qt / Mayavi
 from PyQt5 import QtCore, QtGui, QtWidgets                                # noqa: E402
 from traits.api import HasTraits, Instance                                # noqa: E402
 from traitsui.api import View, Item                                       # noqa: E402
@@ -71,7 +36,6 @@ from mayavi.tools.mlab_scene_model import MlabSceneModel                  # noqa
 from tvtk.pyface.scene_editor import SceneEditor                          # noqa: E402
 from mayavi.core.ui.mayavi_scene import MayaviScene                       # noqa: E402
 
-# 2x3 布局，按行展开顺序
 PANEL_KEYS = ["gt", "aligned", "fast", "slow_m2", "slow_m1", "slow_curr"]
 PANEL_NAMES = [
     "GT (curr)",
@@ -81,12 +45,9 @@ PANEL_NAMES = [
     "Slow (-1s keyframe)",
     "Slow (curr keyframe)",
 ]
-# 对应 evolve_keyframe_sample_tokens 索引（slow_curr 走 sample.token）
 SLOW_HIST_KEYS = ("slow_m2", "slow_m1")
-SLOW_HIST_KF_OFFSETS = {"slow_m2": 0, "slow_m1": 1}  # tokens[0] = -2s, tokens[1] = -1s
-
-
-# ────────────────────────── 工具：voxel 坐标系 warp ──────────────────────────
+# indices into evolve_keyframe_sample_tokens (oldest first): tokens[0] = -2s, tokens[1] = -1s
+SLOW_HIST_KF_OFFSETS = {"slow_m2": 0, "slow_m1": 1}
 
 
 def warp_labels_to_ego(
@@ -96,19 +57,11 @@ def warp_labels_to_ego(
     voxel_size: tuple,
     free_index: int,
 ) -> np.ndarray:
-    """把 src ego frame 下的 voxel 类别图重采样到 dst ego frame。
-
-    - labels_src : (X, Y, Z) int 类别（未占据 = free_index）
-    - T_src_to_dst : (4,4) src_ego → dst_ego 的 SE(3) 变换
-    - pc_range : (x_min,y_min,z_min,x_max,y_max,z_max)，src/dst 共用
-    - voxel_size : (vx,vy,vz)
-    - 越界点取 free_index；nearest neighbor，避免给离散类插出虚假类别。
-    """
+    """Nearest-neighbor resample of labels_src (X, Y, Z) from src ego to dst ego via T_src_to_dst (4, 4); out-of-range -> free_index."""
     X, Y, Z = labels_src.shape
     vx, vy, vz = float(voxel_size[0]), float(voxel_size[1]), float(voxel_size[2])
     x_min, y_min, z_min, x_max, y_max, z_max = pc_range
 
-    # 在 dst grid 里枚举每个 voxel 中心
     ii, jj, kk = np.meshgrid(
         np.arange(X), np.arange(Y), np.arange(Z), indexing="ij",
     )
@@ -116,12 +69,10 @@ def warp_labels_to_ego(
     py = y_min + (jj + 0.5) * vy
     pz = z_min + (kk + 0.5) * vz
 
-    # 反向变换：dst voxel center → src ego 坐标
     T_dst_to_src = np.linalg.inv(T_src_to_dst).astype(np.float64)
-    p = np.stack([px, py, pz, np.ones_like(px)], axis=-1).astype(np.float64)  # (X,Y,Z,4)
+    p = np.stack([px, py, pz, np.ones_like(px)], axis=-1).astype(np.float64)
     p_src = p @ T_dst_to_src.T
 
-    # src ego 坐标 → src grid 索引
     si = np.floor((p_src[..., 0] - x_min) / vx).astype(np.int64)
     sj = np.floor((p_src[..., 1] - y_min) / vy).astype(np.int64)
     sk = np.floor((p_src[..., 2] - z_min) / vz).astype(np.int64)
@@ -136,22 +87,7 @@ def warp_labels_to_ego(
     return out
 
 
-# ────────────────────────── 工具：idx 列表加载 ──────────────────────────
-
-
 def load_idx_list(path: str) -> list[int]:
-    """按文件后缀加载 idx 列表，返回 list[int]（保持文件顺序，去重保留先后）。
-
-    支持的格式：
-      - .txt  每行非 # 开头、空白分隔，第一列必须是 int idx；
-              （兼容 tests/evoocc/find_top_*.py 输出的格式：
-               idx \\t fast_miou \\t aligned_miou \\t diff \\t scene \\t end_token）
-      - .json 顶层接受三种 schema：
-          1. [120, 543, 22, ...]
-          2. {"indices": [120, 543, 22, ...], ...其他元信息可有可无...}
-          3. {"samples": [{"idx": 120, ...}, {"idx": 543, ...}], ...}
-              （字段名也接受 "items" 替代 "samples"）
-    """
     p = Path(path)
     if not p.is_absolute():
         p = (Path(__file__).resolve().parents[1] / path).resolve()
@@ -199,7 +135,6 @@ def load_idx_list(path: str) -> list[int]:
     else:
         raise ValueError(f"不支持的后缀: {suffix}（仅支持 .txt / .json）")
 
-    # 去重：保留首次出现顺序
     seen: set[int] = set()
     out: list[int] = []
     for i in raw_idx:
@@ -210,12 +145,7 @@ def load_idx_list(path: str) -> list[int]:
     return out
 
 
-# ────────────────────────── 工具：外部 fast 离散预测 ──────────────────────────
-
-
 class SavedFastPredLoader:
-    """读取 `<root>/<scene>/<token>/<filename>` 形式的离散 fast 预测。"""
-
     def __init__(
         self,
         pred_root: str,
@@ -270,20 +200,15 @@ class SavedFastPredLoader:
         return pred.astype(np.int32, copy=False)
 
 
-# ────────────────────────── Backend：模型 + 数据 ──────────────────────────
-
-
 @dataclass
 class SampleData:
-    """单个样本预处理后供渲染用的体素 + 元信息。"""
     gt: np.ndarray
     gt_mask: np.ndarray
     fast: np.ndarray
-    slow_curr: np.ndarray              # 当前 keyframe slow
-    slow_m1: np.ndarray | None         # -1s keyframe slow（缺失时 None）
-    slow_m2: np.ndarray | None         # -2s keyframe slow（缺失时 None）
-    # -1s/-2s keyframe → curr 的 SE(3) 变换（4x4），用于在 curr ego frame 下
-    # 标出过去时刻自车的位置/朝向。缺失或没做 warp 时为 None。
+    slow_curr: np.ndarray
+    slow_m1: np.ndarray | None
+    slow_m2: np.ndarray | None
+    # SE(3) (4x4) from -1s/-2s keyframe ego to curr ego; None if missing or not warped
     slow_m1_T_kf_to_curr: np.ndarray | None
     slow_m2_T_kf_to_curr: np.ndarray | None
     slow_m1_title: str
@@ -296,8 +221,6 @@ class SampleData:
 
 
 class Backend:
-    """封装 dataset / 模型加载 / 单样本前向。"""
-
     def __init__(
         self,
         config_path: str,
@@ -326,7 +249,7 @@ class Backend:
         self.num_classes = int(data_cfg["num_classes"])
         self.pc_range = tuple(data_cfg["pc_range"])
         self.voxel_size_xyz = tuple(data_cfg["voxel_size"])
-        self.voxel_size_iso = float(self.voxel_size_xyz[0])  # 渲染用各向同性
+        self.voxel_size_iso = float(self.voxel_size_xyz[0])
         self.saved_fast_pred_loader: SavedFastPredLoader | None = None
         if fast_pred_root:
             self.saved_fast_pred_loader = SavedFastPredLoader(
@@ -341,9 +264,6 @@ class Backend:
                 f"root={fast_pred_root}, filename={fast_pred_filename}, key={fast_pred_key}"
             )
 
-        # dataset：跟 eval_evoocc.py 默认 min_history_completeness=0
-        # logits_loader 暴露给后续用：dataset 默认取的 slow 是 anchor（最老 keyframe），
-        # 我们额外用它加载当前 keyframe 的 slow 给 GUI 显示
         self.logits_loader = build_logits_loader(data_cfg, self.cfg["root_path"])
         logits_loader = self.logits_loader
         self.dataset = Occ3DEvoOccDataset(
@@ -359,49 +279,25 @@ class Backend:
             ray_sidecar_split="val",
             fast_frame_stride=int(data_cfg.get("fast_frame_stride", 1)),
             min_history_completeness=0,
-            # viewer 是纯可视化，不算 loss/mIoU；放行 evolve_infos schema
             eval_only_mode=True,
         )
 
         self.device = torch.device(
             self.eval_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu"
         )
-        # 模型懒加载
         self._model: EvoOccAligner | None = None
-        self._raw_sample = None  # 缓存当前样本（含 logits / pose / timestamps）
+        self._raw_sample = None
 
-    # ---------- dataset ----------
     def __len__(self) -> int:
         return len(self.dataset)
 
     def load_sample(self, idx: int) -> SampleData:
-        """读 dataset[idx]，缓存原始 logits 供 aligner 使用，
-        并 argmax 出 GT / Fast / 三路 Slow 体素。
-
-        keyframe 列表来源（兼容两种 pkl schema）：
-          - evolve_infos pkl: 用 info["evolve_keyframe_sample_tokens"]
-              [0]=K_j (start anchor)、[-1]=K_{j+max_evolve} (end, aligner 输出帧)
-          - canonical pkl  : 用 info["keyframe_sample_tokens"]
-              [0]=最老历史、[-1]=curr (当前 keyframe)
-
-        两种 schema 下都按"末尾倒数"取 slow keyframe：
-          - 末尾[-1] = curr/end             → "Slow (curr keyframe)"
-          - 末尾[-3] = 倒退 2 个 keyframe    → "Slow (-1s keyframe)"  （keyframe ~0.5s）
-          - 末尾[-5] = 倒退 4 个 keyframe    → "Slow (-2s keyframe)"
-
-        坐标系：所有 6 个面板都对齐到 curr/end keyframe 的 ego frame。
-        - GT / Fast / Aligned / Slow(curr) 本身就在 curr ego；
-        - Slow(-1s)/Slow(-2s) 通过 frame_ego2global 反向重采样到 curr ego。
-          越界点取 free_index，与"自车在 -1s 时这块 curr 视野超出 src pc_range"语义一致。
-        evolve pkl 里 evolve_keyframe_step_indices 给出每个 keyframe 在帧序列中的
-        step，frame_ego2global 同步抽帧后用同一索引就能拿到 ego2global。
-        """
         sample = self.dataset[idx]
         self._raw_sample = sample
 
         gt = sample["gt_labels"].cpu().numpy().astype(np.int32)
         gt_mask = sample["gt_mask"].cpu().numpy().astype(np.float32)
-        fast_logits = sample["fast_logits"]   # (T, C, X, Y, Z)
+        fast_logits = sample["fast_logits"]
         fast = fast_logits[-1].argmax(0).cpu().numpy().astype(np.int32)
 
         meta = sample.get("meta", {})
@@ -414,7 +310,6 @@ class Backend:
                 fast = saved_fast
                 fast_source = "saved official postprocess"
 
-        # 直接从原始 info 读 keyframe token 列表，兼容 canonical / evolve schema
         info = self.dataset.infos[idx]
         ek_tokens = [str(t) for t in info.get("evolve_keyframe_sample_tokens", [])]
         ek_step_indices: list[int] = []
@@ -423,16 +318,13 @@ class Backend:
         if not ek_tokens:
             ek_tokens = [str(t) for t in info.get("keyframe_sample_tokens", [])]
 
-        # frame_ego2global 已按 fast_frame_stride 抽帧；ek_step_indices 也同步重映射
-        frame_ego2global = sample["frame_ego2global"].cpu().numpy()  # (T_sub, 4, 4)
+        frame_ego2global = sample["frame_ego2global"].cpu().numpy()
         frame_timestamps = sample.get("frame_timestamps", None)
         frame_timestamps_np = (
             frame_timestamps.cpu().numpy()
             if isinstance(frame_timestamps, torch.Tensor)
             else None
         )
-        # canonical_infos 没有显式 keyframe step，但 2Hz 分支下
-        # keyframe_sample_tokens 与抽帧后的 frame_ego2global 一一对应。
         if not ek_step_indices and len(ek_tokens) == frame_ego2global.shape[0]:
             ek_step_indices = list(range(len(ek_tokens)))
 
@@ -443,7 +335,6 @@ class Backend:
             )
             return logits.argmax(0).numpy().astype(np.int32)
 
-        # 取 keyframe token + 同位置的 step（用于查 ego2global）。
         def _pick_pos(pos: int) -> tuple[str | None, int | None]:
             if pos < 0 or pos >= len(ek_tokens):
                 return None, None
@@ -457,12 +348,6 @@ class Backend:
             steps_back: int,
             fallback_to_latest_available: bool = False,
         ) -> tuple[str | None, int | None, int | None, bool]:
-            """按 2Hz keyframe step 取历史 slow。
-
-            steps_back=2 对应约 -1s，steps_back=4 对应约 -2s。
-            短历史样本中目标位置为空时，允许 -1s 面板回退到最近的真实历史帧
-            （例如 idx 3638 的 -0.5s），但标题会显示实际时间。
-            """
             curr_pos = len(ek_tokens) - 1
             target_pos = curr_pos - int(steps_back)
             tok, step = _pick_pos(target_pos)
@@ -500,15 +385,11 @@ class Backend:
         slow_m1_title = _history_title("Slow (-1s keyframe)", m1_step, m1_fallback)
         slow_m2_title = _history_title("Slow (-2s keyframe)", m2_step, m2_fallback)
 
-        # curr 不需要 warp（它就是 dst ego frame）
         slow_curr = _load_slow_for(curr_kf) if curr_kf else _load_slow_for(token)
 
         def _load_and_warp(
             kf_token: str | None, src_step: int | None,
         ) -> tuple[np.ndarray | None, np.ndarray | None]:
-            """加载 src keyframe 的 slow 并 warp 到 curr ego frame。
-            返回 (warped_labels, T_src_to_curr)；缺少 step（如 canonical pkl）
-            时退化为不 warp 直接返回 labels 和 None 矩阵。"""
             if kf_token is None:
                 return None, None
             labels_src = _load_slow_for(kf_token)
@@ -539,7 +420,6 @@ class Backend:
             evolve_keyframe_sample_tokens=ek_tokens,
         )
 
-    # ---------- model ----------
     def ensure_model(self) -> EvoOccAligner:
         if self._model is not None:
             return self._model
@@ -566,13 +446,12 @@ class Backend:
 
     @torch.no_grad()
     def run_aligner(self) -> np.ndarray:
-        """对当前缓存样本跑一次 forward，返回 aligned 体素 (X, Y, Z) int。"""
         if self._raw_sample is None:
             raise RuntimeError("先调用 load_sample 再 run_aligner")
         m = self.ensure_model()
         s = self._raw_sample
-        fast = s["fast_logits"].to(self.device).unsqueeze(0)      # (1, T, C, X, Y, Z)
-        slow = s["slow_logits"].to(self.device).unsqueeze(0)      # (1, C, X, Y, Z)
+        fast = s["fast_logits"].to(self.device).unsqueeze(0)
+        slow = s["slow_logits"].to(self.device).unsqueeze(0)
         ego2g = s["frame_ego2global"].to(self.device).unsqueeze(0)
         ts = s["frame_timestamps"]
         if ts is not None:
@@ -590,15 +469,11 @@ class Backend:
             mode="default",
             rollout_start_step=rss,
         )
-        aligned = out["aligned"][0]  # (C, X, Y, Z)
+        aligned = out["aligned"][0]
         return aligned.argmax(0).cpu().numpy().astype(np.int32)
 
 
-# ────────────────────────── Mayavi widget 包装 ──────────────────────────
-
-
 class _SceneHolder(HasTraits):
-    """traits 容器，每个面板一个，提供给 SceneEditor 渲染。"""
     scene = Instance(MlabSceneModel, ())
     view = View(
         Item("scene", editor=SceneEditor(scene_class=MayaviScene),
@@ -608,8 +483,6 @@ class _SceneHolder(HasTraits):
 
 
 class MayaviPanel(QtWidgets.QWidget):
-    """带标题的 Mayavi widget。"""
-
     def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -633,16 +506,8 @@ class MayaviPanel(QtWidgets.QWidget):
         self.title_label.setText(title)
 
 
-# ────────────────────────── 主窗口 ──────────────────────────
-
-
 class OccViewer(QtWidgets.QMainWindow):
-    # 默认视角调成论文风：
-    #  - elevation 35° 偏侧（旧 55° 太俯视，会"压平"场景）
-    #  - azimuth -60°（旧 -75° 太侧，朝向不够斜对角）
-    #  - dist_ratio 2.2（旧 1.6 太近，场景塞满 panel；论文里留白多）
-    #  - forward_m 10m：focal point 沿 +x（车头方向）推 10m，让自车出现在
-    #    画面下半部，前方道路占大头，更像 SurroundOcc / OccFormer 论文图
+    # default paper-style view; forward_m shifts the focal point along +x so the ego sits in the lower half
     DEFAULT_AZ = -60.0
     DEFAULT_EL = 35.0
     DEFAULT_DIST_RATIO = 2.2
@@ -660,14 +525,12 @@ class OccViewer(QtWidgets.QMainWindow):
     ) -> None:
         super().__init__()
         self.backend = backend
-        self.current_idx = 0  # 当前加载样本的全集 idx
+        self.current_idx = 0
         self.current_sample: SampleData | None = None
         self._syncing_camera = False
         self._panels: dict[str, MayaviPanel] = {}
         self._ego_actors: dict[str, list] = {}
 
-        # idx 列表模式：spinbox / ◀▶ 都按 list 位置走
-        # 不传则退化为全集顺序 [0..N-1]
         if idx_list is None:
             self._idx_list: list[int] = list(range(len(backend)))
             self._has_subset = False
@@ -682,7 +545,6 @@ class OccViewer(QtWidgets.QMainWindow):
             self._has_subset = True
         self._list_pos = max(0, min(start_idx, len(self._idx_list) - 1))
 
-        # 视角参数（CLI 覆盖默认值）
         self._view_az = self.DEFAULT_AZ if view_az is None else float(view_az)
         self._view_el = self.DEFAULT_EL if view_el is None else float(view_el)
         self._view_dist_ratio = (
@@ -699,10 +561,8 @@ class OccViewer(QtWidgets.QMainWindow):
         self._build_panels()
         self._build_statusbar()
 
-        # 配置完控件后再首次加载样本
         QtCore.QTimer.singleShot(50, self._init_after_show)
 
-    # ---------- UI 构建 ----------
     def _build_toolbar(self) -> None:
         tb = self.addToolBar("main")
         tb.setMovable(False)
@@ -757,7 +617,6 @@ class OccViewer(QtWidgets.QMainWindow):
         grid = QtWidgets.QGridLayout(central)
         grid.setContentsMargins(4, 4, 4, 4)
         grid.setSpacing(4)
-        # 2 行 3 列：第 1 行 = curr 三联，第 2 行 = slow 历史三联
         positions = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
         for key, name, pos in zip(PANEL_KEYS, PANEL_NAMES, positions):
             panel = MayaviPanel(name)
@@ -774,16 +633,13 @@ class OccViewer(QtWidgets.QMainWindow):
         self.status.showMessage("ready")
 
     def _init_after_show(self) -> None:
-        # scene 真正初始化后再设置背景 + 注册同步 + 加载首样本
         for key in PANEL_KEYS:
             scene_obj = self._panels[key].scene
             scene_obj.background = (1.0, 1.0, 1.0)
             self._install_camera_sync(key, scene_obj)
         self._load_by_list_pos(self._list_pos)
 
-    # ---------- 相机同步 ----------
     def _install_camera_sync(self, src_key: str, scene_obj: MlabSceneModel) -> None:
-        """在每个 scene 的 interactor 上注册 EndInteractionEvent 回调。"""
         try:
             iren = scene_obj.scene.interactor
         except Exception:
@@ -823,8 +679,6 @@ class OccViewer(QtWidgets.QMainWindow):
         if self.current_sample is None:
             return
         x_min, y_min, z_min, x_max, y_max, z_max = self.backend.pc_range
-        # focal point 沿 +x（车头方向）偏移 view_forward_m，让自车出现在画面
-        # 下半部、前方道路占主区域，构图更像论文图
         fp = (
             (x_min + x_max) * 0.5 + self._view_forward_m,
             (y_min + y_max) * 0.5,
@@ -846,7 +700,6 @@ class OccViewer(QtWidgets.QMainWindow):
         finally:
             self._syncing_camera = False
 
-    # ---------- 数据加载 + 渲染 ----------
     def _step(self, delta: int) -> None:
         new_pos = max(0, min(len(self._idx_list) - 1, self._list_pos + delta))
         if new_pos == self._list_pos:
@@ -890,8 +743,6 @@ class OccViewer(QtWidgets.QMainWindow):
             f"token={sample.token[:12]}…  rss={sample.rollout_start_step}"
         )
 
-        # 渲染 GT / Fast / 3 路 Slow；Aligned 清空，等用户按按钮
-        # GT 不应用 camera mask，完整显示（其他面板沿用其各自的 mask 或不 mask）
         self._render_panel("gt", sample.gt)
         self._render_panel("fast", sample.fast)
         fast_title = (
@@ -935,21 +786,13 @@ class OccViewer(QtWidgets.QMainWindow):
 
     def _clear_panel(self, key: str) -> None:
         clear_figure(self._panels[key].scene.mayavi_scene)
-        # clear_figure 已经清掉 ego marker，丢弃悬挂引用
         self._ego_actors.pop(key, None)
 
     def _draw_ego_marker(self, key: str) -> None:
-        """画红色球 + 朝车头方向的红色箭头，标该 panel 对应时刻的自车。
-
-        - GT/Aligned/Fast/Slow(curr): 自车 = curr ego 原点 (0, 0)
-        - Slow(-1s)/Slow(-2s): 自车 = 那一刻自车原点 warp 到 curr ego frame
-          位置 = T_kf_to_curr[:3, 3]
-          朝向 = T_kf_to_curr[:3, :3] @ +x = T_kf_to_curr[:3, 0]
-        marker 在 z 上抬高 1.5m 避免被路面 voxel 遮挡。"""
         from mayavi import mlab
         fig = self._panels[key].scene.mayavi_scene
 
-        # 默认：当前 panel 的对应时刻 = curr，自车在 ego 原点 + 朝 +x
+        # marker lifted 1.5 m in z to avoid occlusion by road voxels
         px, py, pz = 0.0, 0.0, 1.5
         fx, fy, fz = 1.0, 0.0, 0.0
 
@@ -981,7 +824,6 @@ class OccViewer(QtWidgets.QMainWindow):
             figure=fig,
         )
         self._ego_actors[key] = [sphere, arrow]
-        # 新画的 marker 也要遵循当前 toggle 状态（切样本时不会突然又显示出来）
         if not self._is_ego_visible():
             for a in self._ego_actors[key]:
                 try:
@@ -1009,7 +851,6 @@ class OccViewer(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    # ---------- 按钮：运行 aligner ----------
     def _on_run_aligner(self) -> None:
         if self.current_sample is None:
             return
@@ -1027,7 +868,6 @@ class OccViewer(QtWidgets.QMainWindow):
         finally:
             self.run_btn.setEnabled(True)
 
-    # ---------- 按钮：保存大图 ----------
     def _on_save_composite(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "保存四面板拼图",
@@ -1044,21 +884,9 @@ class OccViewer(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "保存失败", str(e))
 
     def _save_composite_to(self, path: str) -> None:
-        """用 mlab.screenshot 抓每个 panel 的 VTK 渲染图，
-        再用 PIL 加文字注释拼成 2x3 大图。
-
-        布局（自上而下）：
-          [ 顶部 header: 样本元信息 ]
-          [ 行 1: GT | EvoOcc Aligned | Fast ]
-          [ 行 2: Slow(-2s) | Slow(-1s) | Slow(curr) ]
-          [ 底部 footer: 坐标系说明 ]
-        每个 panel 上方有粗体标题条，标题取 self._panels[k].title_label
-        的实时文本（自动反映 "(N/A)" / "未运行" 等状态）。
-        """
         from mayavi import mlab
         from PIL import Image, ImageDraw, ImageFont
 
-        # 1) 抓 6 张 panel 截图（保存时隐藏 ego marker，截完恢复）
         self._set_ego_visible(False)
         try:
             arrs: list[np.ndarray] = []
@@ -1078,7 +906,6 @@ class OccViewer(QtWidgets.QMainWindow):
         ph = max(a.shape[0] for a in arrs)
         pw = max(a.shape[1] for a in arrs)
 
-        # 2) 字体（系统找不到 DejaVu 时退化到 PIL 默认 bitmap font）
         font_dir = "/usr/share/fonts/truetype/dejavu"
         try:
             font_title = ImageFont.truetype(f"{font_dir}/DejaVuSans-Bold.ttf", 22)
@@ -1100,7 +927,6 @@ class OccViewer(QtWidgets.QMainWindow):
         canvas = Image.new("RGB", (total_w, total_h), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
 
-        # 3) 顶部 header：样本元信息
         sample = self.current_sample
         header_text = (
             f"idx={self.current_idx}/{len(self.backend) - 1}   "
@@ -1111,12 +937,11 @@ class OccViewer(QtWidgets.QMainWindow):
         draw.rectangle([0, 0, total_w, header_h], fill=(40, 40, 40))
         draw.text((10, 6), header_text, font=font_header, fill=(230, 230, 230))
 
-        # 4) 6 个 panel：标题条 + 截图
         def _measure(text: str, font) -> tuple[int, int]:
             try:
                 bbox = draw.textbbox((0, 0), text, font=font)
                 return bbox[2] - bbox[0], bbox[3] - bbox[1]
-            except AttributeError:  # Pillow < 9.2
+            except AttributeError:
                 return draw.textsize(text, font=font)
 
         positions = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
@@ -1125,7 +950,6 @@ class OccViewer(QtWidgets.QMainWindow):
             y0_row = header_h + r * row_h
             y0_img = y0_row + title_h
 
-            # 标题条（浅灰底 + 深色字）
             title_text = self._panels[key].title_label.text()
             draw.rectangle(
                 [x0_panel, y0_row, x0_panel + pw, y0_row + title_h],
@@ -1136,13 +960,11 @@ class OccViewer(QtWidgets.QMainWindow):
             ty = y0_row + (title_h - th) // 2 - 2
             draw.text((tx, ty), title_text, font=font_title, fill=(20, 20, 20))
 
-            # 贴截图（在 pw x ph 槽内居中）
             ah, aw, _ = a.shape
             ix = x0_panel + (pw - aw) // 2
             iy = y0_img + (ph - ah) // 2
             canvas.paste(Image.fromarray(a), (ix, iy))
 
-        # 5) 底部 footer：坐标系说明
         footer_text = (
             "All 6 panels share curr/end ego frame; "
             "Slow(-1s)/Slow(-2s) resampled (nearest); out-of-range -> free."
@@ -1155,9 +977,6 @@ class OccViewer(QtWidgets.QMainWindow):
                   font=font_footer, fill=(80, 80, 80))
 
         canvas.save(path, "PNG")
-
-
-# ────────────────────────── CLI ──────────────────────────
 
 
 def parse_args() -> argparse.Namespace:
@@ -1185,7 +1004,6 @@ def parse_args() -> argparse.Namespace:
                         help="pred.npz 中的数组 key；传空字符串则自动猜测")
     parser.add_argument("--strict-fast-pred", action="store_true",
                         help="开启后 saved fast pred 缺失直接报错；默认缺失时回退 raw fast")
-    # 视角微调（不传走默认值；改完后点 [↻ 重置视角] 立即生效）
     parser.add_argument("--view-az", type=float, default=None,
                         help=f"相机方位角 azimuth (默认 {OccViewer.DEFAULT_AZ}°)；"
                              "数字越大越往左侧绕")
@@ -1204,8 +1022,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # PyQt5 在 Wayland 下默认走 XWayland，正常情况无需干预；
-    # 万一弹不出窗口，可在外面 export QT_QPA_PLATFORM=xcb
     app = QtWidgets.QApplication(sys.argv)
 
     backend = Backend(

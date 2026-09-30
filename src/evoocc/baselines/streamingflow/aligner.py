@@ -1,5 +1,3 @@
-"""StreamingFlow-style BEV GRU-ODE baseline aligner。"""
-
 from __future__ import annotations
 
 import time
@@ -23,8 +21,6 @@ from evoocc.data.time_series import compute_segment_dt, cumulative_tau
 
 
 class StreamingFlowBEVOdeAligner(nn.Module):
-    """Occ3D-only StreamingFlow BEV GRU-ODE baseline。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -40,7 +36,7 @@ class StreamingFlowBEVOdeAligner(nn.Module):
         **_: Any,
     ) -> None:
         super().__init__()
-        del pc_range, voxel_size, decoder_init_scale  # 本 baseline 不走几何 warp / 残差初始化。
+        del pc_range, voxel_size, decoder_init_scale
         cfg = dict(streamingflow_cfg or {})
 
         self.num_classes = int(num_classes)
@@ -494,7 +490,7 @@ class StreamingFlowBEVOdeAligner(nn.Module):
                 fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt
             )
         )
-        del frame_ego2global  # StreamingFlow baseline 不使用 ego pose。
+        del frame_ego2global
         if mode == "default":
             return self._forward_batched_default(
                 fast_logits, slow_logits, frame_timestamps, frame_dt, rollout_start_step

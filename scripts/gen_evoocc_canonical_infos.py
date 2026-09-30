@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""生成 EvoOcc 的通用 canonical info pkl。
-
-目标：
-1. 用统一的 13-step / 6Hz 时间轴描述每个样本前 2s 的快系统帧；
-2. 不再假设快系统 logits 是单个打包的 13 帧文件；
-3. 让 OPUS / ALOCC 都依赖同一份时间轴定义，再各自导出逐帧 logits。
-"""
 
 from __future__ import annotations
 
@@ -28,17 +21,12 @@ except Exception:  # pragma: no cover
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TOKEN_CAMERA = "CAM_FRONT"
 
-# 多帧监督定义：4 个 keyframe 时间点（t-1.5 / t-1.0 / t-0.5 / t）
-# 始终锚到 keyframe_sample_tokens 的末 4 个位置，即
-# offsets = [H-3, H-2, H-1, H]（H = history_keyframes），
-# 保证 "t" 永远对应当前帧 step = num_output_frames-1。
-# H=4 时退化为旧版的 [1, 2, 3, 4]，与历史 pkl 完全兼容。
+# Supervision offsets are anchored to the last 4 keyframes: [H-3, H-2, H-1, H], H = history_keyframes.
 SUPERVISION_LABELS = ["t-1.5", "t-1.0", "t-0.5", "t"]
 NUM_SUPERVISION = len(SUPERVISION_LABELS)
 
 
 def compute_supervision_keyframe_offsets(history_keyframes: int) -> list[int]:
-    """返回末 NUM_SUPERVISION 个 keyframe 的 offset（相对起点）。"""
     if history_keyframes < NUM_SUPERVISION:
         raise ValueError(
             f"--history-keyframes 需 >= {NUM_SUPERVISION}（监督点数），"
@@ -268,11 +256,6 @@ def build_supervision_fields(
     scene_name: str,
     gt_root_abs: str,
 ) -> dict[str, Any]:
-    """为一条 valid info 构建多帧监督字段。
-
-    监督 4 个 keyframe 时间点（t-1.5 / t-1.0 / t-0.5 / t），
-    锚到 keyframe_sample_tokens 的末 4 个位置，保证 "t" 对应当前帧。
-    """
     sup_mask = [0] * NUM_SUPERVISION
     sup_step_indices = [-1] * NUM_SUPERVISION
     sup_gt_tokens = [""] * NUM_SUPERVISION
@@ -282,7 +265,6 @@ def build_supervision_fields(
 
     for sup_i, kf_offset in enumerate(supervision_keyframe_offsets):
         sup_sample_token = keyframe_sample_tokens[kf_offset]
-        # pad 段的 keyframe 位置为空字符串，此 sup 点不可用
         if not sup_sample_token:
             continue
         gt_rel = make_gt_rel_path(scene_name, sup_sample_token)
@@ -366,10 +348,8 @@ def build_invalid_entry(
         "slow_ego2global": np.eye(4, dtype=np.float32),
         "T_slow_to_curr": np.eye(4, dtype=np.float32),
         "curr_gt_rel_path": str(Path(scene_name) / current_token / "labels.npz"),
-        # RayIoU 评估所需（invalid 样本用零值占位）
         "lidar2ego_translation": np.zeros(3, dtype=np.float32),
         "lidar2ego_rotation": np.zeros(4, dtype=np.float32),
-        # 多帧监督字段（invalid 样本全为空）
         "supervision_labels": list(SUPERVISION_LABELS),
         "supervision_mask": [0] * NUM_SUPERVISION,
         "supervision_step_indices": [-1] * NUM_SUPERVISION,
@@ -449,7 +429,6 @@ def main() -> None:
 
             enough_history = local_idx >= args.history_keyframes
             invalid_reasons: list[str] = []
-            # 短历史：是否允许取决于 --allow-short-history
             use_short_entry = (not enough_history) and bool(args.allow_short_history)
             if not enough_history and not args.allow_short_history:
                 invalid_reasons.append("insufficient_keyframe_history")
@@ -468,17 +447,16 @@ def main() -> None:
                     invalid_reasons=invalid_reasons,
                 )
             else:
-                # 真实历史数 h ∈ [0, history_keyframes]；pad 是前段填空的 step 数
+                # h = real history count in [0, history_keyframes]; pad = number of leading empty steps
                 h = min(local_idx, args.history_keyframes)
                 pad_intervals = args.history_keyframes - h
                 pad_steps = pad_intervals * args.steps_per_interval
 
                 history_infos_real = scene_infos[local_idx - h : local_idx + 1]
                 keyframe_sample_tokens_real = [str(info["token"]) for info in history_infos_real]
-                # 长度恒为 history_keyframes + 1，前面 pad_intervals 个位置填 ""
+                # Length is always history_keyframes + 1; the first pad_intervals entries are "".
                 keyframe_sample_tokens: list[str] = [""] * pad_intervals + keyframe_sample_tokens_real
 
-                # 初始化按 num_output_frames 长度的占位列表
                 frame_tokens: list[str] = [""] * pad_steps
                 frame_interval_indices: list[int] = [-1] * pad_steps
                 frame_phase_indices: list[int] = [-1] * pad_steps
@@ -488,7 +466,7 @@ def main() -> None:
                 ]
 
                 for real_i in range(h):
-                    interval_idx = pad_intervals + real_i  # 绝对 interval 位置
+                    interval_idx = pad_intervals + real_i
                     start_sample_token = keyframe_sample_tokens_real[real_i]
                     end_sample_token = keyframe_sample_tokens_real[real_i + 1]
                     interval_tokens, end_frame_token = collect_interval_camera_tokens(
@@ -530,7 +508,6 @@ def main() -> None:
                         f"frame_tokens 长度异常：实际 {len(frame_tokens)}，预期 {expected_num_frames}"
                     )
 
-                # 真实帧的 ts / ego 先算出来，pad 段用第一个真实帧的值复制
                 first_real_token = frame_tokens[pad_steps]
                 first_real_ts = int(sample_data_by_token[first_real_token]["timestamp"])
                 first_real_pose = get_pose_matrix_from_frame_token(first_real_token)
@@ -540,8 +517,8 @@ def main() -> None:
                 frame_pose_list: list[np.ndarray] = []
                 frame_is_kf_list: list[int] = []
                 for pos, token in enumerate(frame_tokens):
+                    # Pad frames copy ts/pose of the first real frame, with empty token and is_keyframe=0.
                     if pos < pad_steps or token == "":
-                        # pad 段：sample_token 为空串，ts/ego 用第一个真实帧复制，is_keyframe=0
                         frame_sample_tokens.append("")
                         frame_ts_list.append(first_real_ts)
                         frame_pose_list.append(first_real_pose)
@@ -567,20 +544,18 @@ def main() -> None:
                 ]
                 keyframe_frame_tokens = [frame_tokens[step] for step in keyframe_step_indices]
 
-                # slow 锚到最老真实 keyframe：即 step = pad_steps 的帧
                 slow_sample_token = keyframe_sample_tokens_real[0]
                 slow_frame_token = frame_tokens[pad_steps]
                 slow_ego2global = first_real_pose.copy()
                 current_ego2global = frame_ego2global[-1]
                 T_slow_to_curr = (np.linalg.inv(current_ego2global) @ slow_ego2global).astype(np.float32)
 
-                # 只在真实段统计重复帧
                 real_frame_tokens = frame_tokens[pad_steps:]
                 has_duplicate_fast_frames = len(set(real_frame_tokens)) < len(real_frame_tokens)
                 if has_duplicate_fast_frames:
                     duplicate_fast_frame_count += 1
 
-                # frame_rel_paths：pad 段保持 ""，logits_loader 端用零张量占位
+                # Pad frames keep "" and the logits loader substitutes a zero tensor.
                 frame_rel_paths: list[str] = []
                 for token in frame_tokens:
                     if token == "":
@@ -633,7 +608,6 @@ def main() -> None:
                     "curr_gt_rel_path": str(
                         Path(str(curr_info["scene_name"])) / keyframe_sample_tokens_real[-1] / "labels.npz"
                     ),
-                    # RayIoU 评估所需的 lidar→ego 刚体变换（当前 keyframe）
                     "lidar2ego_translation": np.asarray(
                         curr_info["lidar2ego_translation"], dtype=np.float32
                     ),
@@ -641,7 +615,6 @@ def main() -> None:
                         curr_info["lidar2ego_rotation"], dtype=np.float32
                     ),
                 }
-                # 添加多帧监督字段（pad 段自动置 0，见 build_supervision_fields）
                 sup_fields = build_supervision_fields(
                     keyframe_sample_tokens=keyframe_sample_tokens,
                     keyframe_frame_tokens=keyframe_frame_tokens,

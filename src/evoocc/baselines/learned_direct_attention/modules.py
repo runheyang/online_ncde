@@ -1,5 +1,3 @@
-"""Learned direct window-attention baseline 的融合模块。"""
-
 from __future__ import annotations
 
 from itertools import product
@@ -16,8 +14,6 @@ from evoocc.utils.nn import resolve_group_norm_groups
 
 
 class _WindowCrossAttention3D(nn.Module):
-    """带边界 mask 的3D窗口交叉注意力。"""
-
     def __init__(
         self,
         dim: int,
@@ -221,8 +217,6 @@ class _WindowCrossAttention3D(nn.Module):
 
 
 class _CrossAttentionBlock(nn.Module):
-    """Pre-GN窗口交叉注意力与1×1 FFN。"""
-
     def __init__(
         self,
         dim: int,
@@ -263,8 +257,6 @@ class _CrossAttentionBlock(nn.Module):
 
 
 class DirectWindowAttentionNet(nn.Module):
-    """以current fast为query、warped slow为key/value的融合主干。"""
-
     def __init__(
         self,
         feature_dim: int = 288,

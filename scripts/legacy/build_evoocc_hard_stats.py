@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""离线统计 EvoOcc hard 过采样所需样本信息。"""
 
 from __future__ import annotations
 

@@ -1,5 +1,3 @@
-"""根据配置构造 LogitsLoader 实例的工厂函数。"""
-
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -16,7 +14,6 @@ def build_logits_loader(
     data_cfg: Dict[str, Any],
     root_path: str,
 ) -> LogitsLoader:
-    """根据 data.logits_format 构造 LogitsLoader。"""
     logits_format = str(data_cfg.get("logits_format", "")).strip().lower()
     if not logits_format:
         raise KeyError("data.logits_format 为必填项。")
@@ -44,7 +41,6 @@ def build_logits_loader(
         )
 
     if logits_format == "composite":
-        # 要求 data.fast_logits_format / data.slow_logit_format 指定具体子格式。
         fast_sub = str(data_cfg.get("fast_logits_format", "")).strip().lower()
         slow_sub = str(data_cfg.get("slow_logit_format", "")).strip().lower()
         for name, sub in (("fast_logits_format", fast_sub), ("slow_logit_format", slow_sub)):

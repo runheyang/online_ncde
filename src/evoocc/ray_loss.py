@@ -1,19 +1,3 @@
-"""可微的 ray first-hit loss。
-
-设计目标：针对 RayIoU 的 first-hit 召回率下降问题，直接在 ray 级别上监督
-"沿着 GT 有 hit 的 ray，first-hit 概率质量应集中在 GT 深度附近"。
-
-数据流：
-    logits (B,C,X,Y,Z)
-        → softmax → p_free 通道 → p_occ (B,1,X,Y,Z)
-        → 沿 ray 等步长采样 N 个点
-        → F.grid_sample 三线性插值到 (B,R,N)
-        → first-hit 分布 q_i = p_i * Π_{j<i}(1-p_j)
-        → L_hit：窗口 |d_i - d*| ≤ δ·step 内 q 求和的 NLL
-
-仅 GT finite hit ray 参与监督；GT inf / NaN / 超出 horizon 的 ray 忽略。
-"""
-
 from __future__ import annotations
 
 from typing import Dict, Optional, Sequence, Tuple
@@ -24,35 +8,12 @@ import torch.nn.functional as F
 
 
 def generate_lidar_rays(device: torch.device | str = "cpu") -> torch.Tensor:
-    """生成全场景共享的 14040 条 lidar ray 单位方向（torch 版，对齐评估）。
-
-    delegate 到 `evoocc.ops.dvr.lidar_rays.generate_lidar_rays`，保证训练
-    与 RayIoU 评估用的是同一份 numpy 实现，避免 pitch/azimuth 两侧漂移。
-    """
     from evoocc.ops.dvr.lidar_rays import generate_lidar_rays as _np_rays
 
     return torch.from_numpy(_np_rays()).to(device=device, dtype=torch.float32)
 
 
 class RayLoss(nn.Module):
-    """Ray first-hit loss（可微）。
-
-    Args:
-        pc_range:        (x_min, y_min, z_min, x_max, y_max, z_max) ego 坐标系下的 bbox。
-        free_index:      free 类在 logits 第 1 维的索引。
-        num_samples:     每条 ray 沿深度方向采样点数（默认 50）。
-        step_m:          采样步长（米），默认 0.4（与 voxel_size 对齐）。
-        window_voxels:   L_hit 窗口半宽，以 step 为单位（δ=1 → 窗口 ±0.4m）。
-        near_max_m/mid_max_m: 近场/中场的深度上界。
-        near_weight/mid_weight: 两段的 ray 权重。
-        lambda_hit:      hit loss 的内部权重。
-        gt_dist_bias_m:  从 gt_dist 里减去的系统偏置。DVR 返回的是 hit voxel
-                         的"出射边界距离"（约 center + 0.5 voxel）。None →
-                         默认 0.5 * step_m；手动传 0.0
-                         表示 GT 已经是 center 语义（如单元测试里人造的 GT）。
-        eps:             数值稳定项。
-    """
-
     def __init__(
         self,
         pc_range: Sequence[float],
@@ -83,28 +44,17 @@ class RayLoss(nn.Module):
         self.near_weight = float(near_weight)
         self.mid_weight = float(mid_weight)
         self.lambda_hit = float(lambda_hit)
-        # DVR 输出的是 voxel 出射距离；hit 窗口默认补偿 0.5 * step_m。
-        # 测试/纯 center 语义的 GT 传 0.0 关掉。
+        # DVR gives voxel exit distance; default bias 0.5*step_m maps it to a center-like distance (0.0 for center-semantics GT).
         self.gt_dist_bias_m = (
             0.5 * self.step_m if gt_dist_bias_m is None else float(gt_dist_bias_m)
         )
         self.eps = float(eps)
         self.ray_horizon_m = min(self.mid_max_m, self.num_samples * self.step_m)
 
-        # 预计算采样深度 d_i = (i + 0.5) * step
         d = (torch.arange(self.num_samples, dtype=torch.float32) + 0.5) * self.step_m
         self.register_buffer("sample_depths", d, persistent=False)
 
-    # ------------------------------------------------------------------
-    # 坐标变换
-    # ------------------------------------------------------------------
-
     def _world_to_grid(self, xyz: torch.Tensor) -> torch.Tensor:
-        """ego 世界坐标 (..., 3) → grid_sample 归一化坐标 (..., 3)。
-
-        体素布局约定：logits shape (B, C, X, Y, Z)，对应 grid_sample 的
-        (N, C, D=X, H=Y, W=Z)，其 grid 最后维顺序为 (W, H, D) = (z, y, x)。
-        """
         x_min, y_min, z_min, x_max, y_max, z_max = self.pc_range
         x = xyz[..., 0]
         y = xyz[..., 1]
@@ -112,11 +62,8 @@ class RayLoss(nn.Module):
         nx = 2.0 * (x - x_min) / (x_max - x_min) - 1.0
         ny = 2.0 * (y - y_min) / (y_max - y_min) - 1.0
         nz = 2.0 * (z - z_min) / (z_max - z_min) - 1.0
+        # grid_sample expects (W,H,D) = (z,y,x) for logits laid out (B,C,X,Y,Z).
         return torch.stack([nz, ny, nx], dim=-1)
-
-    # ------------------------------------------------------------------
-    # 主 forward
-    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -127,27 +74,6 @@ class RayLoss(nn.Module):
         valid_mask: Optional[torch.Tensor] = None,
         origin_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """计算 hit-only ray loss（多原点）。
-
-        Args:
-            logits:      (B, C, X, Y, Z) 模型输出 logits。
-            ray_origins: (B, K, 3) ego 系下的 lidar origin。
-            ray_dirs:    (R, 3) 或 (B, R, 3) 单位方向向量。所有 K 个原点共用同一
-                         套方向。
-            gt_dist:     (B, K, R) GT ray 监督。
-                         finite > 0 = first-hit 距离（米）
-                         inf / NaN  = ignore
-            valid_mask:  (B, K, R) bool 可选；false 表示忽略该 ray。
-            origin_mask: (B, K) bool 可选；false 表示该原点是 pad，不贡献 loss。
-
-        Returns:
-            dict 包含:
-                total:      lambda_hit * hit
-                hit:        加权后 hit loss（参与 total）
-                hit_raw:    未加权 hit loss（便于日志）
-                hit_rays:   本 batch 参与 hit 的 ray 数
-                valid_rays: 本 batch 参与计算的 ray 数量（跨 K × R 求和）
-        """
         if logits.dim() != 5:
             raise ValueError(f"logits 必须是 5D (B,C,X,Y,Z)，实际 {tuple(logits.shape)}")
         B = logits.shape[0]
@@ -196,52 +122,41 @@ class RayLoss(nn.Module):
         ray_origins = ray_origins.to(device=device, dtype=dtype)
         gt_dist = gt_dist.to(device=device, dtype=dtype)
 
-        # --- 1. 构造采样点 (B, K, R, N, 3) ---
-        d = self.sample_depths.to(device=device, dtype=dtype)  # (N,)
+        d = self.sample_depths.to(device=device, dtype=dtype)
         origins_e = ray_origins.view(B, K, 1, 1, 3)
-        d_e = d.view(1, 1, 1, N, 1)                             # (1,1,1,N,1)
-        xyz = origins_e + d_e * dirs_base                       # (B,K,R,N,3)
+        d_e = d.view(1, 1, 1, N, 1)
+        xyz = origins_e + d_e * dirs_base
 
-        # --- 2. 归一化到 grid_sample 坐标 ---
-        grid = self._world_to_grid(xyz)                         # (B,K,R,N,3)
-        # 采样点是否落在体积内（三个归一化坐标都在 [-1,1]）
-        sample_valid = (grid.abs() <= 1.0).all(dim=-1)          # (B,K,R,N) bool
-        # grid_sample 5D: input (B,1,X,Y,Z)，grid 需要 (B, D_out, H_out, W_out, 3)。
-        # 把 (K*R*N) 压到 D_out，另外两个维度置 1，一次 kernel 调用搞定。
+        grid = self._world_to_grid(xyz)
+        sample_valid = (grid.abs() <= 1.0).all(dim=-1)
+        # Fold K*R*N into D_out so one grid_sample call covers all samples.
         grid_s = grid.reshape(B, K * R * N, 1, 1, 3)
 
-        # --- 3. p_free → p_occ 三线性插值 ---
-        probs = F.softmax(logits, dim=1)                        # (B,C,X,Y,Z)
-        p_free_vol = probs[:, self.free_index : self.free_index + 1]  # (B,1,X,Y,Z)
+        probs = F.softmax(logits, dim=1)
+        p_free_vol = probs[:, self.free_index : self.free_index + 1]
         p_free = F.grid_sample(
             p_free_vol,
             grid_s,
             mode="bilinear",
             padding_mode="border",
             align_corners=False,
-        )  # (B, 1, K*R*N, 1, 1)
+        )
         p_free = p_free.reshape(B, K, R, N)
-        # 完全越界的 sample：border padding 会复用边界值，这里强制当作 free
-        # (p_free=1 → p_occ=0)，避免边界外 ray 沿用边界 p_free 产生假 first-hit。
-        # 体积内、靠近边界的 sample 仍走 border padding，避免 zeros 在边界内侧把
-        # p_free 低估 / p_occ 高估。
+        # Out-of-volume samples are forced free; border padding would otherwise create false first hits.
         p_free = torch.where(sample_valid, p_free, torch.ones_like(p_free))
-        p_occ = (1.0 - p_free).clamp(max=1.0 - self.eps)  # (B,K,R,N)
+        p_occ = (1.0 - p_free).clamp(max=1.0 - self.eps)
 
-        # --- 4. first-hit 分布 q_i ---
-        # trans_i = Π_{j<i}(1 - p_j)，q_i = p_i * trans_i
         log_one_minus_p = torch.log(
             (1.0 - p_occ).clamp(min=self.eps)
-        )  # (B,K,R,N)
-        cum = torch.cumsum(log_one_minus_p, dim=-1)             # (B,K,R,N)
-        # exclusive cumsum: log_trans_i = sum_{j<i} log(1 - p_j)
+        )
+        # Exclusive cumsum: log_trans_i = sum_{j<i} log(1-p_j); q_i = p_i * trans_i.
+        cum = torch.cumsum(log_one_minus_p, dim=-1)
         log_trans = torch.cat(
             [torch.zeros_like(cum[..., :1]), cum[..., :-1]], dim=-1
         )
-        trans = torch.exp(log_trans)                            # (B,K,R,N)
-        q = p_occ * trans                                       # (B,K,R,N)
+        trans = torch.exp(log_trans)
+        q = p_occ * trans
 
-        # --- 5. GT ray 只保留有限 first-hit，其他 ray 全部忽略 ---
         base_mask = torch.ones((B, K, R), device=device, dtype=torch.bool)
         if origin_mask is not None:
             if origin_mask.dim() != 2 or origin_mask.shape != (B, K):
@@ -256,21 +171,19 @@ class RayLoss(nn.Module):
         hit_mask = hit_mask_raw & (gt_dist < self.ray_horizon_m)
         gt_dist_hit = torch.where(hit_mask, gt_dist, torch.zeros_like(gt_dist))
 
-        # 近/中场权重（DVR 原生语义，与 sidecar / eval 指标口径一致）
         base_w = torch.where(
             gt_dist_hit < self.near_max_m, self.near_weight, self.mid_weight
         )
 
-        # DVR 出射距离 → center-like 距离，对齐 d_hat 的理想位置
         gt_dist_eff = gt_dist_hit - self.gt_dist_bias_m
 
         half_win_m = self.window_voxels * self.step_m
         d_broadcast = d.view(1, 1, 1, N)
-        in_window = (d_broadcast - gt_dist_eff.unsqueeze(-1)).abs() <= half_win_m  # (B,K,R,N)
-        # 窗口内必须至少有一个 sample，否则产生恒定大常数惩罚污染均值
-        has_window = in_window.any(dim=-1)                      # (B,K,R)
+        in_window = (d_broadcast - gt_dist_eff.unsqueeze(-1)).abs() <= half_win_m
+        # Rays without any sample in the window are dropped to avoid a constant large penalty.
+        has_window = in_window.any(dim=-1)
         hit_mask = hit_mask & has_window
-        w_hit = base_w * hit_mask.to(dtype)                     # (B,K,R)
+        w_hit = base_w * hit_mask.to(dtype)
         hit_rays = hit_mask.sum()
         supervised_rays = hit_rays
 
@@ -289,12 +202,10 @@ class RayLoss(nn.Module):
         def _masked_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
             return (values * weights).sum() / weights.sum().clamp_min(self.eps)
 
-        # --- 6. L_hit：窗口内 q 之和的 NLL ---
-        q_in_window = (q * in_window.to(q.dtype)).sum(dim=-1)    # (B,K,R)
-        nll = -torch.log(q_in_window + self.eps)                 # (B,K,R)
+        q_in_window = (q * in_window.to(q.dtype)).sum(dim=-1)
+        nll = -torch.log(q_in_window + self.eps)
         hit_raw = _masked_mean(nll, w_hit)
 
-        # --- 7. 汇总 ---
         hit_weighted = self.lambda_hit * hit_raw
         return {
             "total": hit_weighted,

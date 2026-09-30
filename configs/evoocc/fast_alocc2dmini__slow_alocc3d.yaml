@@ -1,24 +1,16 @@
-# Canonical config for fast=alocc2d_mini, slow=alocc3d.
-
 data:
   logits_format: alocc_dense_topk
   info_path: configs/evoocc/canonical_infos_train_full.pkl
   val_info_path: configs/evoocc/canonical_infos_val_full.pkl
-  # 训练/训练内评估过滤短历史样本（history_completeness<4）。独立评估脚本
-  # 可加 --include-short-history 覆盖为 0，评估全集含短历史。
   min_history_completeness: 4
-  # 2Hz 推演：每 3 帧取 1 帧，13 帧 → 5 帧。
   fast_frame_stride: 3
-  # Ray first-hit sidecar（train_*, val_* 共用一个目录）。非空则启用 RayLoss。
   ray_sidecar_dir: data/evoocc_ray_sidecar
   fast_logits_root: data/alocc2d_mini_wo_mask
   slow_logit_root: data/alocc3d_wo_mask
-  # ALOCC dense top-k 专用参数
   alocc_fill_value: -5.0
   alocc_clamp_min: -5.0
   alocc_topk_k: 3
   alocc_max_centering: false
-  # 通用参数（模型、dataset、loss 均使用）
   gt_root: data/nuscenes/gts
   num_classes: 18
   free_index: 17
@@ -42,24 +34,14 @@ loss:
   gamma: 2.0
   lambda_focal: 1.0
   lambda_lovasz: 1.0
-  # focal 全区域监督：mask 内 ×5.0，mask 外 ×1.0；lovasz 仍只算 mask 内。
-  # 设为 null 或删除此行则回退到原始 train with mask 行为。
   focal_mask_weight: 5.0
   class_weights: [125, 50, 100, 75, 50, 100, 125, 75, 125, 50, 50, 10, 50, 10, 10, 20, 10, 3]
-  # Ray first-hit loss（RayLoss）。pc_range / free_index 由 train 脚本
-  # 从 data 配置注入；下列参数均可注释掉走 RayLoss 默认值。
   ray:
-    # SegAndRayLoss 外层权重：total = seg_total + lambda_ray * ray_total
     lambda_ray: 0.2
-    # ray_total = lambda_hit * hit
     lambda_hit: 0.3
-    # 沿 ray 采样：N 个点、步长 step_m 米。N*step_m 决定最大可探测距离（默认 20m）
     num_samples: 50
-    step_m: 0.4
-    # L_hit 窗口半宽（单位：step_m）。δ=1 → ±0.4m 内的 q 求和作为命中概率
-    window_voxels: 1
-    # 近/中场切分：gt_dist < near_max_m 用 near_weight，其余用 mid_weight；
-    # gt_dist >= mid_max_m 的 ray 直接丢弃（对齐 RayIoU 的口径）
+    step_m: 0.4  # meters; num_samples*step_m = max ray range
+    window_voxels: 1  # hit window half-width in step_m units
     near_max_m: 10.0
     mid_max_m: 20.0
     near_weight: 2.0
@@ -83,7 +65,6 @@ train:
   ema:
     enabled: true
     decay: 0.999
-  # L_kl = λ * mean(m_occ.clamp(min=0) * KL(aligned || fast.detach()))，conf-加权 trust region
   lambda_fast_kl: 0.0
 
 dataloader:

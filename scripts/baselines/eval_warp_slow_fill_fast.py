@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Baseline 评估：warp_slow_fill_fast（无参数纯几何）。
-
-流程（对齐 scripts/eval_evoocc.py）：
-  1. 推理阶段：逐 batch 跑 baseline.predict_sample，累加 mIoU，并把
-     每个样本的 dense pred/gt/token 收集到内存。
-  2. RayIoU 阶段：推理结束后，按 token 查 lidar origin，一次性调
-     ray_metrics.main 统一批量计算 RayIoU@1/2/4。
-  - 另外统计连续 coverage 平均值、退化样本数。
-"""
 
 from __future__ import annotations
 
@@ -22,7 +13,6 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 torch.backends.cudnn.benchmark = True
-# 与 train 对齐：fp32 + TF32（PyTorch 1.12+ matmul TF32 默认关闭，需显式开）
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -45,22 +35,6 @@ except Exception:
 
 
 class _LastFrameOnlyFastLogitsLoader:
-    """Wrap 现有 logits_loader，让 load_fast_logits 只返回末帧 (1, C, X, Y, Z)。
-
-    原理：dataset worker 调用 load_fast_logits 前，把 info.frame_rel_paths
-    裁剪到只剩末帧路径，inner loader 只解码 1 帧并 stack 出 shape (1, ...)。
-    baseline 下游只用 fast_logits[-1]，且 num_frames 从 frame_ego2global
-    读取，不依赖 fast_logits.shape[0]。
-
-    相比前一版（前 T-1 填空串走占位分支），这一版同时省：
-      - 磁盘 I/O 与 sparse→dense 解码（T 次 → 1 次）
-      - worker 侧 dense 张量分配（某些 loader 如 AloccDenseTopkLoader 的
-        _empty_frame 仍分配 full dense，占位≠零成本）
-      - multiprocessing IPC 传输（worker → 主进程，T 帧 → 1 帧）
-
-    5s pkl (T=31) 下 IPC 传输量从 ~700MB/样本 降到 ~23MB/样本。
-    """
-
     def __init__(self, inner: Any) -> None:
         self._inner = inner
 
@@ -121,12 +95,9 @@ def main() -> None:
 
     raw_logits_loader = build_logits_loader(data_cfg, root_path)
     if dataset_variant == "surroundocc":
-        # SurroundOcc dataset 会用 frame_sample_tokens 构造 LIDAR_TOP lidar2global
-        # 序列；保持完整 fast_logits 长度，避免 pose 序列与帧数错位。
         logits_loader = raw_logits_loader
         print("[io] SurroundOcc 使用完整 fast_logits 序列，保留 LIDAR_TOP pose 对齐")
     else:
-        # baseline 只用 fast_logits[-1]，用 wrapper 屏蔽前 T-1 帧的真实解码
         logits_loader = _LastFrameOnlyFastLogitsLoader(raw_logits_loader)
         print("[io] fast_logits worker 只返回末帧 (1,C,X,Y,Z)，省 I/O + 内存分配 + IPC 传输")
 
@@ -189,11 +160,10 @@ def main() -> None:
         enable_rayiou = False
     sweep_info_path = resolve_path(root_path, args.sweep_info_path)
 
-    # 推理阶段累积预测；RayIoU 阶段统一批量计算（不做流式 per-sample raycast）
     collected: list[dict[str, Any]] = []
     coverage_sum = 0.0
     coverage_count = 0
-    degenerate_count = 0  # scene 首帧退化（slow 直出）
+    degenerate_count = 0  # scene first frame, slow output used directly
     processed = 0
 
     total_batches = len(loader)
@@ -206,14 +176,12 @@ def main() -> None:
 
     with torch.inference_mode():
         for batch_idx, sample in enumerate(iterator, start=1):
-            # Occ3D worker 侧 wrapper 会把 fast_logits 裁到末帧；SurroundOcc
-            # 保留完整序列以对齐 LIDAR_TOP pose。baseline 下游只用 [-1]。
             sample = move_to_device(sample, device)
-            fast_logits = cast(torch.Tensor, sample["fast_logits"])   # (B, T_fast, C, X, Y, Z)
-            slow_logits = cast(torch.Tensor, sample["slow_logits"])   # (B, C, X, Y, Z)
-            frame_ego2global = cast(torch.Tensor, sample["frame_ego2global"])  # (B, T, 4, 4)
-            gt_labels = cast(torch.Tensor, sample["gt_labels"])  # (B, X, Y, Z)
-            gt_mask = cast(torch.Tensor, sample["gt_mask"])  # (B, X, Y, Z)
+            fast_logits = cast(torch.Tensor, sample["fast_logits"])
+            slow_logits = cast(torch.Tensor, sample["slow_logits"])
+            frame_ego2global = cast(torch.Tensor, sample["frame_ego2global"])
+            gt_labels = cast(torch.Tensor, sample["gt_labels"])
+            gt_mask = cast(torch.Tensor, sample["gt_mask"])
             rollout_start_step = sample.get("rollout_start_step", None)
             meta_list = cast(list[dict[str, Any]], sample["meta"])
 
@@ -250,7 +218,6 @@ def main() -> None:
                 meta = meta_list[b]
                 token = str(meta.get("token", ""))
                 if enable_rayiou:
-                    # 只存 RayIoU 所需字段，用 uint8 省内存（~640KB/样本）
                     if token:
                         collected.append({
                             "pred": pred_np.astype(np.uint8),

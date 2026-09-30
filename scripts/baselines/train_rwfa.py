@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""RWFA baseline 训练脚本（支持单卡 / DDP）。
-
-设计：复用 trainer / dataset / loss / RayIoU 的全套 wiring，只把 model 构造
-换成 RecurrentWarpFusionAligner（fusion_kind=conv 或 attn）。RWFA 的 forward
-接口与 EvoOccAligner 完全一致（default / stepwise_train / stepwise_eval、
-_fast_kl_active 协议），trainer 内部不需要任何分支改动。
-
-DDP 启动方式与 train_evoocc.py 一致，例如：
-    torchrun --nproc_per_node=2 scripts/baselines/train_rwfa.py --config <yaml>
-单卡时直接 python 调用即可。
-
-精简掉的功能（baseline 实验场景一般不需要，需要时再扩）：
-  - 分箱 RayIoU / metrics json
-
-CLI 与 train_evoocc.py 兼容子集：相同 config 文件可直接复用。attn 分支默认
-使用 hidden/state=32、fusion_inner_dim=func_g_inner_dim(24)，对齐 EvoOcc 计算维度。
-baseline 默认关闭 fast residual / fast KL，并训练 10 epoch；--epochs 可覆盖训练轮数。
-"""
 
 from __future__ import annotations
 
@@ -37,13 +19,11 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 torch.backends.cudnn.benchmark = True
-# 与 train_evoocc 对齐：fp32 + TF32
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
 
-# 多卡共享策略：避免低 ulimit 下多 epoch 重建 DataLoader 时 fd 耗尽
 try:
     mp.set_sharing_strategy("file_system")
 except RuntimeError:
@@ -51,9 +31,8 @@ except RuntimeError:
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
-sys.path.append(str(ROOT / "scripts"))  # 复用 train_evoocc 中的 helper
+sys.path.append(str(ROOT / "scripts"))
 
-# 复用主训练脚本里已经写好的 helper，避免重复实现
 from train_evoocc import (  # noqa: E402
     build_dataset,
     build_scheduler,
@@ -121,7 +100,6 @@ def _cleanup_gpu_cache() -> None:
 
 
 def _resolve_fusion_channels(model_kind: str, model_cfg: dict) -> tuple[int, int]:
-    """解析 RWFA 主干计算维度；attn 默认对齐 EvoOcc 的 func_g_inner_dim。"""
     if model_kind == "rwfa-attn":
         inner_dim = int(model_cfg.get("fusion_inner_dim", model_cfg.get("func_g_inner_dim", 24)))
         num_heads = int(model_cfg.get("fusion_attn_num_heads", 3))
@@ -142,17 +120,11 @@ def _build_model(
     device: torch.device,
     use_fast_residual: bool,
 ) -> RecurrentWarpFusionAligner:
-    """根据 fusion_kind 构造 RWFA。conv/attn 共用同一个 Aligner 类。
-
-    use_fast_residual=False 时，decoder 走 PyTorch 默认初始化（直接输出绝对 logits）；
-    True 时沿用残差范式默认（init_scale=1e-3，输出 ≈ 残差）。
-    """
     fusion_kind = "conv" if model_kind == "rwfa-conv" else "attn"
     fusion_inner_dim, fusion_attn_num_heads = _resolve_fusion_channels(model_kind, model_cfg)
     if use_fast_residual:
         decoder_init_scale = model_cfg.get("decoder_init_scale", 1.0e-3)
     else:
-        # 无残差：decoder 必须输出完整 logits，走 PyTorch Conv3d 默认初始化
         decoder_init_scale = None
     return RecurrentWarpFusionAligner(
         num_classes=data_cfg["num_classes"],
@@ -180,7 +152,6 @@ def main() -> None:
     args = parse_args()
     local_rank, use_ddp = setup_ddp_early()
 
-    # baseline 默认短训且不蒸馏 fast logits；显式 --epochs 可覆盖。
     if args.epochs == 0:
         args.epochs = 10
     args.lambda_fast_kl = 0.0
@@ -246,7 +217,6 @@ def main() -> None:
             val_indices = [i for i, n in enumerate(scene_names) if n in keep]
             val_dataset = Subset(val_dataset, val_indices)
 
-    # DDP 模式按 local_rank 分卡，否则用配置/cuda
     device = torch.device(
         f"cuda:{local_rank}" if use_ddp
         else (train_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
@@ -270,7 +240,6 @@ def main() -> None:
         if args.wandb_new_run:
             resumed_wandb_id = None
 
-    # 初始化进程组（必须在模型创建并加载权重之后，与主脚本对齐）
     rank, local_rank, world_size = setup_ddp_init(local_rank)
     is_main = rank == 0
     if is_main and args.resume:
@@ -280,7 +249,7 @@ def main() -> None:
     ema_cfg = train_cfg.get("ema", {}) or {}
     if bool(ema_cfg.get("enabled", True)):
         ema_decay = float(ema_cfg.get("decay", 0.999))
-        # EMA 在 DDP 包装前基于原始权重构建，避免 deepcopy DDP
+        # Build EMA from raw weights before DDP wrapping.
         ema = ModelEMA(model, decay=ema_decay, device=device)
         if is_main:
             print(f"[ema] enabled, decay={ema_decay}")
@@ -289,7 +258,6 @@ def main() -> None:
             if is_main:
                 print(f"[ema] resumed num_updates={ema.num_updates}")
 
-    # DDP 包装
     if use_ddp:
         model = DDP(model, device_ids=[local_rank])
 
@@ -302,7 +270,7 @@ def main() -> None:
     )
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-        # DDP 多进程时强制关闭 persistent_workers，避免 train/val 切换期间内存峰值过高
+        # Disable persistent workers under DDP to avoid memory peaks across train/val switches.
         train_loader_kwargs["persistent_workers"] = (
             False if use_ddp else loader_cfg.get("persistent_workers", False)
         )
@@ -361,20 +329,19 @@ def main() -> None:
         ema=ema,
     )
 
-    # 输出目录：和主脚本规则一致（configs 相对路径 + 时间戳），但放在 outputs/baselines/ 下
     if args.resume:
         output_dir = os.path.dirname(os.path.abspath(args.resume))
     else:
         config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
         output_base = os.path.join(str(ROOT), "outputs", "baselines", args.model_kind, config_subdir)
         if use_ddp:
-            # 各 rank 时间戳可能不同，必须从 rank 0 广播一份
             if rank == 0:
                 ts_tensor = torch.tensor(
                     [int(datetime.now().strftime("%Y%m%d%H%M%S"))], dtype=torch.long, device=device
                 )
             else:
                 ts_tensor = torch.zeros(1, dtype=torch.long, device=device)
+            # Per-rank timestamps may differ; broadcast rank 0 value.
             dist.broadcast(ts_tensor, src=0)
             ts_str = str(ts_tensor.item())
             timestamp = f"{ts_str[:8]}_{ts_str[8:]}"
@@ -385,7 +352,6 @@ def main() -> None:
     if is_main:
         print(f"[ckpt] output_dir: {output_dir}")
 
-    # --- wandb 初始化：仅 rank 0，resume 时续接同一个 run ---
     run = None
     if args.wandb and is_main:
         if wandb is None:
@@ -424,7 +390,6 @@ def main() -> None:
         )
 
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
-        # DDP 模式下每 epoch 设置 sampler epoch，保证打乱不同
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -531,7 +496,6 @@ def main() -> None:
             trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
             print(f"[ckpt] saved -> {ckpt_path}")
 
-        # 同步所有 rank，等待 rank 0 完成 eval/checkpoint
         if use_ddp:
             dist.barrier()
 

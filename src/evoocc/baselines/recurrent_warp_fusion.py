@@ -1,18 +1,3 @@
-"""Recurrent Warp-Fusion Aligner (RWFA) baseline。
-
-可学习的对比方法：每一步对运行隐状态做 ego-warp，然后用一个 FusionNet
-融合当前帧 fast 特征与 Δt 标量通道，得到 t+1 时刻的隐状态；解码后与
-当前 fast logits 残差相加。
-
-设计目标：除把 EvoOcc 的连续时间动力学换成普通递归 CNN 融合外，其余结构
-（双独立 encoder、全分辨率、warp 算子、Δt 条件、fast 残差、多步监督接口）
-全部对齐 EvoOccAligner —— 算力/参数量在 ±少量误差内可比，便于消融
-归因 EvoOcc formulation 本身的贡献。
-
-forward / forward_stepwise_eval 接口签名与 EvoOccAligner 一致，
-方便复用 trainer 与 evaluation 脚本。
-"""
-
 from __future__ import annotations
 
 import time
@@ -34,8 +19,6 @@ from evoocc.utils.nn import resolve_group_norm_groups
 
 
 class _ResidualDilatedBlock(nn.Module):
-    """Conv3d(dilation=d) + GN + SiLU + Residual。结构与 FuncG 内部块一致。"""
-
     def __init__(self, channels: int, dilation: int, gn_groups: int) -> None:
         super().__init__()
         self.conv = nn.Conv3d(
@@ -54,16 +37,6 @@ class _ResidualDilatedBlock(nn.Module):
 
 
 class _WindowAttention3D(nn.Module):
-    """3D (shifted) window multi-head self-attention。
-
-    把 (X, Y, Z) 切成不重叠的 (Wx, Wy, Wz) 窗口，窗口内做 MHSA；shift_size > 0 时
-    先做 cyclic shift，attn 后再 shift 回去 —— 与 Swin 一致。窗口边界 attn mask
-    暂未实现（shift 引入的"环绕"语义对体素任务影响微弱，且 mask 会显著拖慢前向；
-    若实证表明影响明显，可后续补 mask）。
-
-    输入/输出形状均为 (B, C, X, Y, Z)。要求 X/Wx, Y/Wy, Z/Wz 整除。
-    """
-
     def __init__(
         self,
         dim: int,
@@ -84,7 +57,6 @@ class _WindowAttention3D(nn.Module):
         self.proj = nn.Linear(dim, dim, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, X, Y, Z)
         B, C, X, Y, Z = x.shape
         Wx, Wy, Wz = self.window_size
         Sx, Sy, Sz = self.shift_size
@@ -94,7 +66,6 @@ class _WindowAttention3D(nn.Module):
                 f"空间形状 ({X},{Y},{Z}) 必须能被 window ({Wx},{Wy},{Wz}) 整除"
             )
 
-        # cyclic shift（提供跨窗口交互）
         if Sx or Sy or Sz:
             x = torch.roll(x, shifts=(-Sx, -Sy, -Sz), dims=(2, 3, 4))
 
@@ -105,29 +76,23 @@ class _WindowAttention3D(nn.Module):
         N_tok = Wx * Wy * Wz
         h = h.view(B * nWx * nWy * nWz, N_tok, C)
 
-        # MHSA：用 F.scaled_dot_product_attention 走 SDPA backend（FlashAttention/MEA），
-        # fp16 下显著加速且数值稳定，比展开式 matmul+softmax 更高效。
         qkv = self.qkv(h).view(-1, N_tok, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4).contiguous()  # (3, Bw, heads, N, hd)
+        qkv = qkv.permute(2, 0, 3, 1, 4).contiguous()
         q, k, v = qkv[0], qkv[1], qkv[2]
-        out = F.scaled_dot_product_attention(q, k, v)  # (Bw, heads, N, hd)
+        out = F.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).reshape(-1, N_tok, C)
         out = self.proj(out)
 
-        # 还原窗口
         out = out.view(B, nWx, nWy, nWz, Wx, Wy, Wz, C)
         out = out.permute(0, 7, 1, 4, 2, 5, 3, 6).contiguous()
         out = out.view(B, C, X, Y, Z)
 
-        # reverse cyclic shift
         if Sx or Sy or Sz:
             out = torch.roll(out, shifts=(Sx, Sy, Sz), dims=(2, 3, 4))
         return out
 
 
 class _WindowAttentionBlock(nn.Module):
-    """Swin 风格 block：Pre-GN + W-MSA + Residual，再 Pre-GN + 1x1 FFN + Residual。"""
-
     def __init__(
         self,
         dim: int,
@@ -158,18 +123,6 @@ class _WindowAttentionBlock(nn.Module):
 
 
 class FusionAttnNet(nn.Module):
-    """RWFA-Attn 主干：dilated conv → W-MSA → SW-MSA → dilated conv。
-
-    设计取舍：头尾保留 dilation conv 提供局部归纳偏置 + 跨窗口扩散，中间一对
-    Swin 风格 block（unshifted + shifted）做窗口内长程交互。窗口默认 (8, 8, 4)，
-    在 200×200×16 上整除（25×25×4=2500 windows，256 tokens/window）；sanity
-    测试用的 40×40×8 也整除（5×5×2 windows）。
-
-    参数量与 FusionNet 相近：head/stem 与 FusionNet 一致；body 中 attn pair 的
-    Q/K/V/proj+FFN 参数量比 dilated conv 略低（attn ≈ 3·d² + d²，conv ≈ 27·d²），
-    整体在 ±10% 内可比。
-    """
-
     def __init__(
         self,
         in_channels: int,
@@ -188,13 +141,11 @@ class FusionAttnNet(nn.Module):
             )
         groups = resolve_group_norm_groups(num_channels=inner_dim, preferred_groups=gn_groups)
 
-        # stem 与 FusionNet 一致
         self.stem_conv = nn.Conv3d(in_channels, inner_dim, kernel_size=1, bias=False)
         self.stem_gn = nn.GroupNorm(num_groups=groups, num_channels=inner_dim)
         self.stem_act = nn.SiLU(inplace=True)
 
-        # Z 轴不做 cyclic shift：16 层高度下 shift_z=2 会让顶/底层直接互相 attend，
-        # 语义错误明显；XY 上 shift 的"环绕"对体素任务影响微弱可接受。
+        # No shift along Z: with 16 layers it would wrap top and bottom layers together.
         shift = (window_size[0] // 2, window_size[1] // 2, 0)
         self.body = nn.ModuleList(
             [
@@ -225,6 +176,7 @@ class FusionAttnNet(nn.Module):
         fast_curr: torch.Tensor,
         dt_channel: torch.Tensor,
     ) -> torch.Tensor:
+        # Input channels: h_warp(C_h) + fast_prev_adv(C_f) + fast_curr(C_f) + dt(1).
         x = torch.cat([h_warp, fast_prev_adv, fast_curr, dt_channel], dim=0).unsqueeze(0)
         x = self.stem_act(self.stem_gn(self.stem_conv(x)))
         for block in self.body:
@@ -234,7 +186,7 @@ class FusionAttnNet(nn.Module):
 
 
 def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
-    """conf 权重：m_occ = max_{c != free}(logit[c]) - logit[free]。与 EvoOcc 同口径。"""
+    """m_occ = max_{c != free} logit[c] - logit[free]."""
     masked = fast_logits.clone()
     masked.narrow(-4, free_index, 1).fill_(float("-inf"))
     max_non_free = masked.amax(dim=-4, keepdim=True)
@@ -243,12 +195,6 @@ def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
 
 
 class FusionNet(nn.Module):
-    """与 FuncG 同构的融合主干：1x1 stem + N 层膨胀残差 3x3x3 + 1x1 head。
-
-    输入由 (h_warp, fast_feat, dt_channel) 沿 channel 维拼接而成。不带 tanh 头部，
-    因为输出是状态本体而非 dh/dt（避免对运行特征范围的隐式截断）。
-    """
-
     def __init__(
         self,
         in_channels: int,
@@ -277,10 +223,10 @@ class FusionNet(nn.Module):
 
     def forward(
         self,
-        h_warp: torch.Tensor,         # (C_h, X, Y, Z)
-        fast_prev_adv: torch.Tensor,  # (C_f, X, Y, Z)
-        fast_curr: torch.Tensor,      # (C_f, X, Y, Z)
-        dt_channel: torch.Tensor,     # (1, X, Y, Z)
+        h_warp: torch.Tensor,
+        fast_prev_adv: torch.Tensor,
+        fast_curr: torch.Tensor,
+        dt_channel: torch.Tensor,
     ) -> torch.Tensor:
         x = torch.cat([h_warp, fast_prev_adv, fast_curr, dt_channel], dim=0).unsqueeze(0)
         x = self.stem_act(self.stem_gn(self.stem_conv(x)))
@@ -291,8 +237,6 @@ class FusionNet(nn.Module):
 
 
 class RecurrentWarpFusionAligner(nn.Module):
-    """RWFA baseline：与 EvoOccAligner 同接口的可学习对比方法。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -308,7 +252,6 @@ class RecurrentWarpFusionAligner(nn.Module):
         fusion_inner_dim: int = 32,
         fusion_body_dilations: Tuple[int, ...] = (1, 2, 3),
         fusion_gn_groups: int = 8,
-        # attn 分支专用配置（fusion_kind="attn" 时生效）
         fusion_attn_num_heads: int = 4,
         fusion_attn_window_size: Tuple[int, int, int] = (8, 8, 4),
         fusion_attn_head_dilations: Tuple[int, ...] = (1, 2),
@@ -335,7 +278,6 @@ class RecurrentWarpFusionAligner(nn.Module):
         self.voxel_size = tuple(voxel_size)
         self.timestamp_scale = float(timestamp_scale)
 
-        # 双独立 encoder：与 EvoOcc 一致
         self.fast_encoder = DenseEncoder(
             in_channels=self.encoder_in_channels,
             out_channels=feat_dim,
@@ -344,9 +286,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             in_channels=self.encoder_in_channels,
             out_channels=feat_dim,
         )
-        # FusionNet：输入 = h_warp(C_h) + fast_prev_adv(C_f) + fast_curr(C_f) + dt(1)
-        # 输入信号与 EvoOcc 对齐：每步多 warp 一次 fast_feat[k] 提供 ego-aligned 的上一帧
-        # fast 副本，让 fusion 自己学是否需要做差分 —— 把"用增量做动力学"留作 EvoOcc 独有特性。
         fusion_in_channels = hidden_dim + 2 * feat_dim + 1
         fusion_kind_lower = str(fusion_kind).lower()
         self.fusion_kind = fusion_kind_lower
@@ -379,10 +318,7 @@ class RecurrentWarpFusionAligner(nn.Module):
             init_scale=decoder_init_scale,
         )
 
-        # Trainer 根据 lambda_fast_kl 注入；False 时 forward 跳过 KL 计算（与 EvoOcc 同协议）。
         self._fast_kl_active: bool = False
-
-    # ----------------- 编码 / 解码 -----------------
 
     def _encode_fast(self, fast_logits: torch.Tensor) -> torch.Tensor:
         return self.fast_encoder(fast_logits)
@@ -392,7 +328,7 @@ class RecurrentWarpFusionAligner(nn.Module):
 
     def _decode_dense_state(self, h_dense: torch.Tensor) -> torch.Tensor:
         h_tensor = h_dense.unsqueeze(0)
-        h_tensor = h_tensor.permute(0, 1, 4, 3, 2).contiguous()  # (1, C, Z, Y, X)
+        h_tensor = h_tensor.permute(0, 1, 4, 3, 2).contiguous()
         out_dense = self.decoder(h_tensor)
         return out_dense.permute(0, 1, 4, 3, 2).contiguous()[0]
 
@@ -401,10 +337,6 @@ class RecurrentWarpFusionAligner(nn.Module):
         fast_logits_t: torch.Tensor,
         aligned_logits: torch.Tensor,
     ) -> torch.Tensor:
-        """conf-weighted KL(aligned || fast)：与 EvoOcc 实现一致。
-
-        权重 m_occ.clamp(min=0) —— 仅在 fast 自信判占用处把 aligned 拉回 fast，
-        保留 fast 自信判空处 aligner 自由填补。"""
         aligned_f = aligned_logits.float()
         fast_f = fast_logits_t.float()
         w = _compute_m_occ(fast_f, self.free_index).clamp(min=0.0)
@@ -418,19 +350,13 @@ class RecurrentWarpFusionAligner(nn.Module):
     @staticmethod
     def _make_dt_channel(dt_value: torch.Tensor, spatial_shape_xyz: Tuple[int, int, int],
                         device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        """把 0-dim dt 张量广播成 (1, X, Y, Z) 通道。
-
-        关键：用 .expand 而非 .fill_(float(...))，避免把 GPU 标量同步回 CPU
-        触发 host sync —— 否则 rollout 循环里每步都会 stall 一次。
-        """
+        # expand (not fill_) avoids a GPU->CPU sync per rollout step.
         x_size, y_size, z_size = spatial_shape_xyz
         return (
             dt_value.to(device=device, dtype=dtype)
             .reshape(1, 1, 1, 1)
             .expand(1, x_size, y_size, z_size)
         )
-
-    # ----------------- 单样本：默认（仅末帧） -----------------
 
     def _forward_single(
         self,
@@ -518,8 +444,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             "delta_scene_abs_mean": torch.tensor(avg_delta, device=fast_logits.device),
         }
         return {"aligned": logits.float(), "diagnostics": {k: v.float() for k, v in diagnostics.items()}}
-
-    # ----------------- 单样本：stepwise train -----------------
 
     def _forward_single_stepwise_train(
         self,
@@ -651,8 +575,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             out["fast_kl"] = fast_kl_accum / fast_kl_step_count
         return out
 
-    # ----------------- 单样本：stepwise eval（含分段计时） -----------------
-
     def _forward_single_stepwise_eval(
         self,
         fast_logits: torch.Tensor,
@@ -719,7 +641,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             else:
                 tp0 = time.perf_counter()
 
-            # ---- warp 段（h + fast_prev）----
             transform = compute_transform_prev_to_curr(
                 pose_prev_ego2global=frame_ego2global[k],
                 pose_curr_ego2global=frame_ego2global[k + 1],
@@ -749,7 +670,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             else:
                 tp1 = time.perf_counter()
 
-            # ---- fusion 段（对应 EvoOcc 的 solver 段）----
             f_t = fast_feat[k + 1]
             dt_ch = self._make_dt_channel(
                 dt[k], spatial_shape_xyz, fast_logits.device, h_warp.dtype
@@ -765,7 +685,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             else:
                 tp2 = time.perf_counter()
 
-            # ---- decode 段 ----
             logits_delta = self._decode_dense_state(h_dense)
             if self.use_fast_residual:
                 logits_now = logits_delta + fast_logits[k + 1]
@@ -818,8 +737,6 @@ class RecurrentWarpFusionAligner(nn.Module):
             "step_indices": step_indices,
             "diagnostics": {k: v.float() for k, v in diagnostics.items()},
         }
-
-    # ----------------- batch 包装 / 公共入口 -----------------
 
     def _unsqueeze_inputs(
         self,

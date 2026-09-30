@@ -1,5 +1,3 @@
-"""统一的 dense occupancy 内存评估协议。"""
-
 from __future__ import annotations
 
 import json
@@ -18,8 +16,6 @@ _SURROUNDOCC_LIDAR_INDEX_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 @dataclass
 class DenseOccPrediction:
-    """单个 dense occupancy 预测记录。"""
-
     pred: np.ndarray
     token: str
     scene_name: str = ""
@@ -50,7 +46,6 @@ def make_dense_occ_prediction(
     gt: np.ndarray | None = None,
     mask_camera: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """构造向后兼容的 dict 预测记录。"""
     return DenseOccPrediction(
         pred=np.asarray(pred).astype(np.uint8, copy=False),
         token=str(token),
@@ -105,7 +100,6 @@ def attach_occ3d_targets(
     grid_size: tuple[int, int, int] = (200, 200, 16),
     gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """为预测记录补齐 GT/mask；已有 GT 的记录会直接复用。"""
     attached: list[dict[str, Any]] = []
     missing_gt_count = 0
     for record in records:
@@ -158,7 +152,6 @@ def _build_surroundocc_lidar_filename_index(
     nuscenes_root: str,
     nuscenes_version: str,
 ) -> dict[str, str]:
-    """建立 sample_token -> LIDAR_TOP 文件名索引。"""
     cache_key = (os.path.abspath(nuscenes_root), str(nuscenes_version))
     cached = _SURROUNDOCC_LIDAR_INDEX_CACHE.get(cache_key, None)
     if cached is not None:
@@ -235,7 +228,7 @@ def _load_surroundocc_dense_gt(
 
     occ = np.zeros(grid_size, dtype=np.uint8)
     occ[coords[:, 0], coords[:, 1], coords[:, 2]] = labels
-    # 对齐 OccStudio: dense 中 label 0 视为 free，再压缩 1..17 -> 0..16。
+    # Align with OccStudio: dense label 0 is free, then shift 1..17 to 0..16.
     occ[occ == 0] = 17
     occ = occ - 1
     mask = np.ones(grid_size, dtype=np.float32)
@@ -251,7 +244,6 @@ def attach_surroundocc_targets(
     grid_size: tuple[int, int, int] = (200, 200, 16),
     gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """为预测记录补齐 SurroundOcc GT/mask；record token 必须是 sample_token。"""
     lidar_index = _build_surroundocc_lidar_filename_index(
         nuscenes_root=nuscenes_root,
         nuscenes_version=nuscenes_version,
@@ -320,7 +312,6 @@ def attach_dense_occ_targets(
     nuscenes_version: str = "v1.0-trainval",
     gt_cache: dict[tuple[str, str], tuple[np.ndarray | None, np.ndarray | None]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """按数据集类型为 dense 预测补齐 GT。"""
     variant = str(dataset_variant).strip().lower()
     if variant == "occ3d":
         return attach_occ3d_targets(
@@ -380,7 +371,6 @@ def compute_dense_miou(
     use_lidar_mask: bool = False,
     metric_variant: str = "occ3d",
 ) -> dict[str, Any]:
-    """从内存 dense 预测记录计算 all/per-step mIoU。"""
     metric_all = build_miou_metric(
         num_classes=num_classes,
         use_image_mask=use_image_mask,
@@ -476,7 +466,6 @@ def compute_dense_rayiou(
     origins_by_token: Mapping[str, Any] | None = None,
     print_table_all: bool = True,
 ) -> dict[str, Any]:
-    """从内存 dense 预测记录计算 all/per-step RayIoU。"""
     from evoocc.ops.dvr.ray_metrics import RayIouAccumulator
 
     ray_items, meta = _prepare_rayiou_items(
@@ -513,7 +502,6 @@ def compute_dense_rayiou_with_pcds(
     sweep_pkl: str | None = None,
     origins_by_token: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[Any], list[Any], dict[str, int]]:
-    """计算 RayIoU 并返回 raw pcd，供分箱 Ray 统计复用。"""
     from evoocc.ops.dvr.ray_metrics import main as calc_rayiou
 
     ray_items, meta = _prepare_rayiou_items(
@@ -548,7 +536,6 @@ def evaluate_dense_occ(
     origins_by_token: Mapping[str, Any] | None = None,
     print_rayiou_table: bool = True,
 ) -> dict[str, Any]:
-    """统一计算 dense occupancy 的 mIoU/RayIoU，并合并为脚本友好的结构。"""
     miou_result = compute_dense_miou(
         records,
         num_classes=num_classes,

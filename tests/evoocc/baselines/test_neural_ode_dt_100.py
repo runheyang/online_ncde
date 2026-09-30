@@ -1,5 +1,3 @@
-"""50×50×16 Neural ODE Δt baseline 单元测试。"""
-
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""实时 benchmark 里 OPUS 单步推理的胶水封装。"""
 
 from __future__ import annotations
 
@@ -48,8 +47,6 @@ CAM_ORDER = [
 
 @dataclass
 class PreparedSample:
-    """缓存单个 info 在 OPUS 侧需要的只读上下文。"""
-
     info: dict[str, Any]
     dataset_idx: int
     scene_name: str
@@ -64,8 +61,6 @@ class PreparedSample:
 
 
 class OpusPreparedStepDataset(Dataset):
-    """把逐 step 的 pipeline 预处理前移到 DataLoader worker。"""
-
     def __init__(self, dataset: Any, samples: Sequence[PreparedSample]) -> None:
         self.dataset = dataset
         self.samples = list(samples)
@@ -101,8 +96,6 @@ class OpusPreparedStepDataset(Dataset):
                 "processed": processed,
             }
         except Exception as exc:
-            # worker 里不要直接抛异常，否则整个 DataLoader 会中断；
-            # benchmark 主循环收到错误标记后再按整条 rollout 跳过。
             return {
                 "status": "error",
                 "sample_idx": sample_idx,
@@ -115,7 +108,6 @@ class OpusPreparedStepDataset(Dataset):
 
 
 def _register_opus_modules() -> None:
-    """绑定 registry，保持与 OPUS 原始入口一致。"""
     DefaultScope.get_instance("mmdet3d", scope_name="mmdet3d")
 
     from mmdet.registry import MODELS as MMDET_MODELS  # noqa: E402
@@ -130,7 +122,6 @@ def _register_opus_modules() -> None:
 
 
 def _resolve_data_root(data_root: str) -> str:
-    """优先相对当前仓库解析，其次保持绝对路径。"""
     if os.path.isabs(data_root):
         return data_root
     cwd_candidate = os.path.abspath(os.path.join(str(ROOT), data_root))
@@ -140,7 +131,6 @@ def _resolve_data_root(data_root: str) -> str:
 
 
 def _to_nusc_filename(data_path: str, data_root_abs: str) -> str:
-    """把路径规范成 NuScenes sample_data['filename'] 形态。"""
     path = os.path.normpath(str(data_path)).replace("\\", "/")
     root = os.path.normpath(str(data_root_abs)).replace("\\", "/")
     if os.path.isabs(path) and path.startswith(root + "/"):
@@ -157,7 +147,6 @@ def build_cam_front_ego_pose_lookup(
     data_root_abs: str,
     nusc_version: str,
 ) -> dict[str, dict[str, np.ndarray]]:
-    """给历史 camera sweeps 还原 ego pose，用于构造正确的 step 输入。"""
     nusc = NuScenes(version=nusc_version, dataroot=data_root_abs, verbose=False)
     lookup: dict[str, dict[str, np.ndarray]] = {}
     for rec in nusc.sample_data:
@@ -182,8 +171,6 @@ def build_frame_list(
     pose_lookup: dict[str, dict[str, np.ndarray]] | None = None,
     data_root_abs: str | None = None,
 ) -> list[dict[str, Any]]:
-    """复用 gen_fast_logits_new 的时序约定：frames[0] 是当前关键帧。"""
-
     def _pose_from_cam_front(cam_front: dict[str, Any]) -> dict[str, np.ndarray] | None:
         if pose_lookup is None:
             return None
@@ -225,7 +212,6 @@ def build_frame_list(
         sweep_cam_front = cast(dict[str, Any], sweep.get("CAM_FRONT", {}))
         sweep_pose = _pose_from_cam_front(sweep_cam_front)
         if sweep_pose is None:
-            # pose 查不到时退回当前帧，会让几何略差，但至少不让 benchmark 中断。
             sweep_pose = {
                 "ego2global_translation": np.array(ego_pose["ego2global_translation"], dtype=np.float32),
                 "ego2global_rotation": np.array(ego_pose["ego2global_rotation"], dtype=np.float32),
@@ -247,7 +233,6 @@ def build_virtual_input_dict(
     frames: list[dict[str, Any]],
     current_idx: int,
 ) -> dict[str, Any]:
-    """构造与 OPUS dataset.get_data_info + test_pipeline 对齐的 step 输入。"""
     current_frame = frames[current_idx]
     current_cams = cast(dict[str, dict[str, Any]], current_frame["cams"])
     current_pose = cast(dict[str, np.ndarray], current_frame["ego_pose"])
@@ -271,7 +256,6 @@ def build_virtual_input_dict(
             )
         )
 
-    # 关键点：当前 step 的历史序列必须相对“该 step 的当前帧”回溯。
     cam_sweeps_prev = [frames[j]["cams"] for j in range(current_idx + 1, len(frames))]
 
     out = copy.deepcopy(base_input)
@@ -288,7 +272,6 @@ def build_virtual_input_dict(
 
 
 def force_offline_sweeps_for_pipeline(pipeline: Any) -> int:
-    """递归打开 force_offline，避免 online shortcut 低估 IO 耗时。"""
     if pipeline is None:
         return 0
 
@@ -328,7 +311,6 @@ def force_offline_sweeps_for_pipeline(pipeline: Any) -> int:
 
 @contextmanager
 def temporary_force_offline_sweeps_for_pipeline(pipeline: Any, enabled: bool):
-    """临时切换 pipeline 里的 force_offline，退出时恢复原值。"""
     if pipeline is None:
         yield
         return
@@ -371,7 +353,6 @@ def temporary_force_offline_sweeps_for_pipeline(pipeline: Any, enabled: bool):
 
 
 def opus_collate_fn(batch: list[Any]) -> dict[str, Any]:
-    """沿用 OPUS val.py 的测试 collate 契约。"""
     while batch and isinstance(batch[0], list):
         batch = [sample[0] if isinstance(sample, list) and len(sample) > 0 else sample for sample in batch]
     if not batch or not isinstance(batch[0], dict):
@@ -397,7 +378,6 @@ def opus_collate_fn(batch: list[Any]) -> dict[str, Any]:
 
 
 def opus_move_to_device(obj: Any, device: torch.device) -> Any:
-    """递归把 pipeline 输出搬到指定设备。"""
     if torch.is_tensor(obj):
         return obj.to(device, non_blocking=True)
     if isinstance(obj, dict):
@@ -410,7 +390,6 @@ def opus_move_to_device(obj: Any, device: torch.device) -> Any:
 
 
 def opus_prefetch_collate_fn(batch: list[Any]) -> dict[str, Any]:
-    """batch_size=1 时直接解包，保留 worker 产出的 step 结构。"""
     if not batch:
         raise RuntimeError("OPUS 预取 DataLoader 返回了空 batch。")
     if len(batch) != 1:
@@ -437,7 +416,6 @@ def _infer_num_output_frames(info: dict[str, Any]) -> int:
 
 
 def build_step_source_indices(info: dict[str, Any]) -> list[int]:
-    """把 oldest -> newest 的逻辑 step 映射回 build_frame_list 的索引。"""
     num_output_frames = _infer_num_output_frames(info)
     output_stride = int(info.get("output_stride", 2))
     return [
@@ -447,8 +425,6 @@ def build_step_source_indices(info: dict[str, Any]) -> list[int]:
 
 
 class OpusRealtimeStepRunner:
-    """管理 OPUS dataset / model 初始化，以及单步真实推理。"""
-
     def __init__(
         self,
         config_path: str,
@@ -518,7 +494,6 @@ class OpusRealtimeStepRunner:
         self.loader_num_workers = int(getattr(self.cfg.data, "workers_per_gpu", 4))
 
     def reset_model_cache(self) -> None:
-        """重置 OPUS online 模式的逐帧特征缓存。"""
         if hasattr(self.model_impl, "memory"):
             self.model_impl.memory = {}
         if hasattr(self.model_impl, "queue"):
@@ -547,10 +522,6 @@ class OpusRealtimeStepRunner:
             pose_lookup=self.pose_lookup,
             data_root_abs=self.data_root_abs,
         )
-        # 这里只要求 oldest step 的“当前帧”存在即可。
-        # 对于 oldest step 再往前缺失的 past 7 帧，不在这里直接判失败，
-        # 而是交给 OPUS 的 LoadMultiViewImageFromMultiSweeps.load_offline()
-        # 按作者原生逻辑用当前帧/最老可用 sweep 自动补齐。
         if len(frames) <= max_output_idx:
             raise RuntimeError(
                 "OPUS 共享缓冲连 oldest step 的当前帧都不存在，无法构造这条 rollout: "
@@ -663,7 +634,6 @@ class OpusRealtimeStepRunner:
         free_fill_value: float,
         topk: int | None = 3,
     ) -> torch.Tensor:
-        """在内存中复现离线 fast logits 的 dense 重建，支持 top-k 或全量语义通道。"""
         logits_value = result_dict["logits"]
         occ_loc_value = result_dict["occ_loc"]
 
@@ -720,13 +690,10 @@ class OpusRealtimeStepRunner:
                 dim=-1,
             )
             free_logits = hit_logits[:, int(free_index)]
-            # dense logits 输入里 free 通道可能仍然存在，先过滤掉被判成 free 的体素。
             not_free_mask = sem_logits.max(dim=-1).values > free_logits
             occ_loc_t = occ_loc_t[not_free_mask]
             sem_logits = sem_logits[not_free_mask]
         elif hit_logits.shape[-1] == int(num_classes) - 1:
-            # 稀疏返回路径只包含语义通道，occ_loc 自身就代表占据体素，
-            # 因此无需再和 free 通道比较。
             sem_logits = hit_logits
         else:
             raise RuntimeError(

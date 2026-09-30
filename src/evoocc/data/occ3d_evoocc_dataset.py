@@ -1,5 +1,3 @@
-"""Occ3D-nuScenes evoocc 数据集。"""
-
 from __future__ import annotations
 
 import os
@@ -16,13 +14,10 @@ from evoocc.data.ray_sidecar import RaySidecar
 
 _EVOLVE_SCHEMAS = {"evoocc_evolve_infos_v1", "online_ncde_evolve_infos_v1"}
 
-# 进程级 flag：缺 token warning 每个 worker 进程只打一次
 _RAY_MISSING_WARNED = False
 
 
 class Occ3DEvoOccDataset(Dataset):
-    """读取 evoocc 训练/评估样本。"""
-
     def __init__(
         self,
         info_path: str,
@@ -56,18 +51,15 @@ class Occ3DEvoOccDataset(Dataset):
             )
         self.supervision_labels = ["t-1.5", "t-1.0", "t-0.5", "t"]
         self.supervision_by_token: Dict[str, Dict[str, Any]] | None = None
-        # ray sidecar 延后到 supervision_labels 定版后再构造，方便做顺序校验
         self.ray_sidecar: RaySidecar | None = None
         self._ray_sidecar_dir = ray_sidecar_dir
         self._ray_sidecar_split = ray_sidecar_split
 
         with open(self.info_path, "rb") as f:
             payload = pickle.load(f)
-        # 拒绝 evolve_infos schema（start-anchored 评估专用），除非显式 eval_only_mode=True。
-        # 防止被误指给 train/eval_evoocc 等入口：那些入口默认按 token=current keyframe 取
-        # GT/sup，对 start-anchored sample（token=start keyframe）会算到错位 GT。
         _md = payload.get("metadata", {}) if isinstance(payload, dict) else {}
         schema_ver = str(_md.get("schema_version", ""))
+        # evolve_infos are start-anchored (token=start keyframe); train/eval entrypoints would read misaligned GT
         if schema_ver in _EVOLVE_SCHEMAS and not eval_only_mode:
             raise ValueError(
                 f"info_path={info_path} 是 start-anchored evolve_infos schema，"
@@ -78,8 +70,7 @@ class Occ3DEvoOccDataset(Dataset):
         self._is_evolve_schema = schema_ver in _EVOLVE_SCHEMAS
         infos = payload["infos"] if isinstance(payload, dict) else payload
         self.infos: List[Dict[str, Any]] = [info for info in infos if info.get("valid", True)]
-        # 训练默认只吃完整 2s 历史的样本，评估可以显式传 0 覆盖全集。
-        # 若 pkl 不含 history_completeness 字段（旧格式），视为 history_keyframes（兼容）。
+        # old pkls without history_completeness fall back to history_keyframes
         if min_history_completeness is not None:
             thr = int(min_history_completeness)
             self.infos = [
@@ -89,7 +80,6 @@ class Occ3DEvoOccDataset(Dataset):
         self.min_history_completeness = min_history_completeness
 
         if self.infos and "supervision_mask" in self.infos[0]:
-            # canonical pkl 直接包含多帧监督字段
             metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
             labels = metadata.get("supervision_labels", self.supervision_labels)
             if isinstance(labels, list) and labels:
@@ -100,7 +90,6 @@ class Occ3DEvoOccDataset(Dataset):
                 if token:
                     self.supervision_by_token[token] = info
 
-        # supervision_labels 已定版，构造 ray sidecar 并校验时刻顺序
         if self._ray_sidecar_dir:
             split = self._ray_sidecar_split or "train"
             self.ray_sidecar = RaySidecar(
@@ -131,8 +120,6 @@ class Occ3DEvoOccDataset(Dataset):
                 label_cache[path] = load_labels_npz(path)
             return label_cache[path]
 
-        # stride>1 时抽帧：用切片而非 fancy index，numpy 数组零拷贝（view）。
-        # 要求 (num_frames-1) 是 stride 的倍数，保证 supervision_step_indices 整除对齐。
         stride = self.fast_frame_stride
         if stride > 1:
             frame_paths_src = info.get("frame_rel_paths", None)
@@ -149,17 +136,15 @@ class Occ3DEvoOccDataset(Dataset):
                     f" [scene={_ctx_scene} token={_ctx_token}]"
                 )
             info_view: Dict[str, Any] = dict(info)
+            # slice (view) instead of fancy indexing; (num_frames-1) must be divisible by stride
             info_view["frame_rel_paths"] = frame_paths_src[::stride]
             for key in ("frame_ego2global", "frame_timestamps", "frame_dt"):
                 if key in info_view:
                     info_view[key] = info[key][::stride]
-            # frame_tokens 是 list[str]，也要按 stride 抽帧，让 meta 里的 token
-            # 索引与 aligner 的 step_indices（抽帧后坐标）保持一致。
             if "frame_tokens" in info_view:
                 info_view["frame_tokens"] = list(info["frame_tokens"])[::stride]
             if "frame_sample_tokens" in info_view:
                 info_view["frame_sample_tokens"] = list(info["frame_sample_tokens"])[::stride]
-            # rollout_start_step 在抽帧后也要重映射，要求与 stride 整除
             if "rollout_start_step" in info_view:
                 rss = int(info_view["rollout_start_step"])
                 if rss % stride != 0:
@@ -169,7 +154,6 @@ class Occ3DEvoOccDataset(Dataset):
                         f" [scene={_ctx_scene} token={_ctx_token}]"
                     )
                 info_view["rollout_start_step"] = rss // stride
-            # evolve_infos schema：抽帧后同步重映射 step / num_real_frames，并切 mask
             if "frame_valid_mask" in info_view:
                 info_view["frame_valid_mask"] = info["frame_valid_mask"][::stride]
             if "num_real_frames" in info_view:
@@ -231,14 +215,13 @@ class Occ3DEvoOccDataset(Dataset):
                 if step_idx < 0 or not gt_rel:
                     continue
                 if self.fast_frame_stride > 1:
-                    # 抽帧后 aligner 的 step_indices 为 arange(1, T_sub)，
-                    # 原始 [3,6,9,12] 需要按 stride 重映射到 [1,2,3,4]。
                     if step_idx % self.fast_frame_stride != 0:
                         raise ValueError(
                             f"supervision_step_indices={step_idx} 不是 "
                             f"fast_frame_stride={self.fast_frame_stride} 的整数倍，"
                             "无法对齐到抽帧后的 rollout step。"
                         )
+                    # remap original step indices (e.g. 3,6,9,12) to subsampled ones (1,2,3,4)
                     step_idx = step_idx // self.fast_frame_stride
                 loaded = self._load_sup_gt(info, sup_i, gt_rel, _load_label_cached)
                 if loaded is None:
@@ -267,8 +250,6 @@ class Occ3DEvoOccDataset(Dataset):
             num_rays = self.ray_sidecar.num_rays
             num_origins = self.ray_sidecar.num_origins
             if hit is None:
-                # token 缺失：整条样本跳过 ray loss。每个 worker 进程首次遇到时
-                # 打印一次 warning（DataLoader 多 worker 下无法做到全局唯一）。
                 global _RAY_MISSING_WARNED
                 if not _RAY_MISSING_WARNED:
                     pid = os.getpid()
@@ -285,12 +266,12 @@ class Occ3DEvoOccDataset(Dataset):
                 ray_sup_valid = torch.zeros((num_sup,), dtype=torch.float32)
             else:
                 dist_np, origin_np, sup_mask_np, origin_mask_np = hit
-                ray_gt_dist = torch.from_numpy(dist_np)                    # (sup, K, R)
-                ray_origin = torch.from_numpy(origin_np)                   # (sup, K, 3)
-                ray_sup_valid = torch.from_numpy(sup_mask_np.astype("float32"))  # (sup,)
-                ray_origin_mask = torch.from_numpy(origin_mask_np.astype("float32"))  # (sup, K)
+                # ray_gt_dist (sup, K, R), ray_origin (sup, K, 3), ray_sup_valid (sup,), ray_origin_mask (sup, K)
+                ray_gt_dist = torch.from_numpy(dist_np)
+                ray_origin = torch.from_numpy(origin_np)
+                ray_sup_valid = torch.from_numpy(sup_mask_np.astype("float32"))
+                ray_origin_mask = torch.from_numpy(origin_mask_np.astype("float32"))
 
-        # rollout 起点：旧格式 pkl 无此字段，默认 0（完整历史）
         rollout_start_step = int(info.get("rollout_start_step", 0))
         history_completeness = int(
             info.get("history_completeness", info.get("history_keyframes", 0))
@@ -324,8 +305,6 @@ class Occ3DEvoOccDataset(Dataset):
                 "supervision_labels": self.supervision_labels,
                 "rollout_start_step": rollout_start_step,
                 "history_completeness": history_completeness,
-                # evolve_infos schema：start-anchored 评估专用字段。旧 schema 下这些字段缺失，
-                # 调用方读 .get(...) 即可（评估脚本只在新 schema 下用）。
                 "num_real_frames": int(info.get("num_real_frames", num_frames)),
                 "max_evolve_keyframes": int(info.get("max_evolve_keyframes", -1)),
                 "evolve_keyframe_step_indices": list(
@@ -342,17 +321,11 @@ class Occ3DEvoOccDataset(Dataset):
             },
         }
 
-    # ------- GT 加载钩子（子类可 override 以支持其它 GT 格式） ------- #
     def _load_curr_gt(
         self,
         info: Dict[str, Any],
         load_npz_cached,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """读取当前帧 GT，返回 (semantics: long (X,Y,Z), mask: float (X,Y,Z))。
-
-        Occ3D 默认实现：从 `<gt_root>/<scene_name>/<token>/labels.npz` 读
-        `semantics` 与 `gt_mask_key` 字段（缺 mask 时全 1）。
-        """
         scene_name = info.get("scene_name", "")
         token = info.get("token", "")
         curr_gt_path = os.path.join(self.gt_root, scene_name, token, "labels.npz")
@@ -371,10 +344,6 @@ class Occ3DEvoOccDataset(Dataset):
         gt_rel: str,
         load_npz_cached,
     ) -> Tuple[torch.Tensor, torch.Tensor] | None:
-        """读取指定 supervision 帧 GT，返回 (semantics, mask)，找不到返回 None。
-
-        Occ3D 默认实现：以 pkl 中的 `supervision_gt_rel_paths[sup_index]` 拼路径。
-        """
         gt_path = gt_rel if os.path.isabs(gt_rel) else os.path.join(self.gt_root, gt_rel)
         if not os.path.exists(gt_path):
             return None

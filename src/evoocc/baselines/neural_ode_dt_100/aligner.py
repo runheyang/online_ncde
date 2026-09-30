@@ -1,5 +1,3 @@
-"""在 50×50×16 latent 中演化的 Neural ODE Δt baseline。"""
-
 from __future__ import annotations
 
 from typing import Optional, Sequence, Tuple, cast
@@ -16,12 +14,6 @@ from evoocc.baselines.neural_ode_dt_100.rollout import (
 
 
 class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
-    """仅以真实 ``Δt`` 驱动、在固定低分辨率空间递归演化的对齐器。
-
-    继承父类的双状态初始化、相邻帧 ego-warp、ODE solver、stepwise 接口和
-    Fast-KL 协议，只替换空间编码与解码路径。类名保留 ``100`` 以兼容已有入口。
-    """
-
     def __init__(
         self,
         num_classes: int,
@@ -65,7 +57,7 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
             input_voxel_size[2],
         )
 
-        # 父类负责完整 rollout；其 voxel_size 应对应实际演化网格。
+        # Parent voxel_size must match the evolved latent grid
         super().__init__(
             num_classes=int(num_classes),
             feat_dim=int(latent_dim),
@@ -98,7 +90,7 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
         self.latent_dim = int(latent_dim)
         self.decoder_channels = int(decoder_channels)
 
-        # 仅下采样 XY；Z 方向始终保持 16。
+        # Downsample XY only; Z stays 16
         self.fast_encoder = XYDownsampleEncoder(
             in_channels=self.encoder_in_channels,
             out_channels=self.latent_dim,
@@ -155,7 +147,6 @@ class NeuralOdeDt100Aligner(_NeuralOdeDtRolloutBase):
         return encoded
 
     def _decode_dense_state(self, z_dense: torch.Tensor) -> torch.Tensor:
-        """只在状态演化完成后恢复到 200×200×16 logits。"""
         if tuple(z_dense.shape) != (
             self.latent_dim,
             *self.latent_grid_size,

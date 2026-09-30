@@ -1,5 +1,3 @@
-"""可复现性工具。"""
-
 from __future__ import annotations
 
 import random
@@ -9,7 +7,6 @@ import torch
 
 
 def set_seed(seed: int, deterministic: bool = False) -> None:
-    """设置随机种子。"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

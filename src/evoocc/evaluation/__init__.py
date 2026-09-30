@@ -1,5 +1,3 @@
-"""评估工具。"""
-
 from evoocc.evaluation.dense_occ import (
     DenseOccPrediction,
     attach_dense_occ_targets,

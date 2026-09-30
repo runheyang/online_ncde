@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""训练 EvoOcc 的 Euler + next-fast 测试版本。"""
 
 from __future__ import annotations
 
@@ -71,7 +70,6 @@ def build_subset(dataset, limit: int):
 
 
 def build_scheduler(optimizer, train_cfg: dict, args):
-    """构建学习率调度器（线性 warmup + 可选余弦退火）。"""
     total_epochs = int(train_cfg["epochs"])
     warmup_epochs = int(train_cfg.get("warmup_epochs", 1))
     base_lr = float(train_cfg["lr"])
@@ -103,7 +101,6 @@ def build_dataset(
     slow_logit_root: str,
     supervision_sidecar_path: str | None = None,
 ) -> Occ3DEvoOccDataset:
-    """根据 data_cfg 构造 Occ3DEvoOccDataset。"""
     return Occ3DEvoOccDataset(
         info_path=info_path,
         root_path=root_path,
@@ -121,7 +118,6 @@ def build_dataset(
 
 
 def to_float(value):
-    """将标量安全转换为 Python float，无法转换时返回 None。"""
     if isinstance(value, numbers.Real):
         return float(value)
     return None
@@ -138,8 +134,6 @@ def _resolve_variant_output_dir(root_path: str, configured_output_dir: str) -> s
 
 
 class EulerNextFastSolver(nn.Module):
-    """Euler 更新器：仅调用一次 func_g，并使用下一时刻快系统特征。"""
-
     def __init__(self, func_g: FuncG, ctrl_proj: CtrlProjector) -> None:
         super().__init__()
         self.func_g = func_g
@@ -158,8 +152,6 @@ class EulerNextFastSolver(nn.Module):
 
 
 class EvoOccEulerNextFastAligner(EvoOccAligner):
-    """测试版 aligner：将 Heun 改为 Euler，func_g 只拼接下一时刻快系统特征。"""
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.solver = EulerNextFastSolver(func_g=self.func_g, ctrl_proj=self.ctrl_proj)
@@ -234,7 +226,6 @@ class EvoOccEulerNextFastAligner(EvoOccAligner):
             padding_mode="border",
             prebuilt_grid=grid,
         )
-        # 这里仍保留上一帧快系统 warp，仅用于构造 delta_ctrl；不再送入 func_g。
         f_prev_adv = backward_warp_dense_trilinear(
             dense_prev_feat=fast_feat[step_idx],
             transform_prev_to_curr=None,
@@ -621,7 +612,6 @@ def main() -> None:
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("val/*", step_metric="epoch")
 
-    # 从 config 路径推导输出目录
     config_subdir = config_output_subdir(args.config, os.path.join(str(ROOT), "configs"))
     output_base = os.path.join(str(ROOT), "outputs", config_subdir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""评估 EvoOcc（同时计算 mIoU 和 RayIoU）。"""
 
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
 
-# 输入形状固定，开启 benchmark 让 cuDNN 自动选 conv 算法
 torch.backends.cudnn.benchmark = True
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,11 +48,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_sweep_pkl(args, cfg) -> str:
-    """确定 source sweep pkl 路径。"""
     if args.sweep_pkl:
         p = Path(args.sweep_pkl)
         return str(p if p.is_absolute() else (ROOT / p).resolve())
-    # 从 canonical pkl 的 metadata 中找 source_info_path
     info_path = cfg["data"].get("val_info_path", cfg["data"]["info_path"])
     info_abs = Path(info_path) if Path(info_path).is_absolute() else (ROOT / info_path).resolve()
     with open(info_abs, "rb") as f:
@@ -79,8 +75,7 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     logits_loader = build_logits_loader(data_cfg, cfg["root_path"])
 
-    # 默认 min_history_completeness=0，含全部短历史样本（h=0 走 aligner 退化分支）。
-    # --exclude-short-history 才回退到 config 的阈值（通常 4）过滤短历史。
+    # 0 keeps all short-history samples (h=0 uses the aligner's degenerate branch).
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval] min_history_completeness={min_hc}"
           + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
@@ -135,7 +130,6 @@ def main() -> None:
     load_checkpoint_for_eval(args.checkpoint, model=model, strict=False)
 
     loss_cfg = cfg["loss"]
-    # build_loss 在带 ray_cfg 时需要 pc_range / free_index，保持与 train 脚本一致
     ray_cfg = loss_cfg.get("ray", None)
     if ray_cfg is not None:
         ray_cfg.setdefault("pc_range", list(data_cfg["pc_range"]))
@@ -161,7 +155,6 @@ def main() -> None:
         metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
     )
 
-    # 单次推理只收集 dense prediction；mIoU/RayIoU 统一在推理后计算。
     metrics = trainer.evaluate(loader, collect_predictions=True, compute_miou=False)
     enable_rayiou = bool(eval_cfg.get("enable_rayiou", True))
     sweep_pkl = None
@@ -186,7 +179,6 @@ def main() -> None:
     if dense_all.get("occupied_iou", None) is not None:
         metrics["occupied_iou"] = dense_all["occupied_iou"]
 
-    # --- mIoU 结果 ---
     occupied_text = ""
     if metrics.get("occupied_iou", None) is not None:
         occupied_text = f" occupied_iou={float(metrics['occupied_iou']):.4f}"

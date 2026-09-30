@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generate 4-step supervision sidecar for transport_online_nde."""
 
 from __future__ import annotations
 
@@ -87,7 +86,6 @@ def load_infos(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def collect_target_tokens(sample_table: dict[str, dict[str, Any]], curr_token: str) -> list[str]:
-    """Return keyframe sample tokens ordered as [t-1.5, t-1.0, t-0.5, t]."""
     curr = curr_token
     chain = [curr]
     for _ in range(3):

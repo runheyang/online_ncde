@@ -1,15 +1,3 @@
-"""低分辨率 Neural ODE baseline 的内部 rollout 实现。
-
-更新语义：
-  - EvoOcc：每步控制增量 = (Fast_t - Fast_{t-1→t}) ‖ τ 拼接 → 1x1x1 conv → hidden_dim，
-    再与 func_g 输出做 odot；
-  - 本 rollout：每步控制增量 = 标量 Δt，广播为 (hidden_dim, X, Y, Z) 后与 func_g
-    输出做 odot。形式上即 h' = g(h, f) * Δt 的经典 Neural ODE 离散化。
-
-该模块只提供低分辨率 aligner 复用的 solver 与 rollout 骨架，不再作为
-独立全分辨率 baseline 对外导出。
-"""
-
 from __future__ import annotations
 
 import time
@@ -31,7 +19,6 @@ from evoocc.models.func_g import FuncG
 
 
 def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
-    """与 EvoOcc 同口径：m_occ = max_{c != free}(logit[c]) - logit[free]。"""
     masked = fast_logits.clone()
     masked.narrow(-4, free_index, 1).fill_(float("-inf"))
     max_non_free = masked.amax(dim=-4, keepdim=True)
@@ -40,12 +27,6 @@ def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
 
 
 class NeuralOdeDtSolver(nn.Module):
-    """Δt 驱动的更新器，签名与 HeunSolver / EulerNextFastSolver 风格保持平行。
-
-    - heun  : h_hat = h + Δt * g(h, f_prev_adv); h_next = h + 0.5 * Δt * (g(h, f_prev) + g(h_hat, f_t))
-    - euler : h_next = h + Δt * g(h, f_t)
-    """
-
     def __init__(self, func_g: FuncG, variant: str = "heun") -> None:
         super().__init__()
         variant_lower = str(variant).lower()
@@ -59,9 +40,8 @@ class NeuralOdeDtSolver(nn.Module):
         h_adv: torch.Tensor,
         f_prev_adv: torch.Tensor,
         f_t: torch.Tensor,
-        dt: torch.Tensor,  # 0-dim 标量张量，与 h_adv 同 device/dtype
+        dt: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # 标量 Δt 直接与 (C_h, X, Y, Z) 广播相乘 —— 等价于把 Δt 广播成同形向量
         if self.variant == "heun":
             s1 = self.func_g(h_adv, f_prev_adv)
             k1 = s1 * dt
@@ -69,22 +49,16 @@ class NeuralOdeDtSolver(nn.Module):
             s2 = self.func_g(h_hat, f_t)
             k2 = s2 * dt
             h_next = h_adv + 0.5 * (k1 + k2)
-            # 诊断量：与 EvoOcc 的 delta_scene 对齐 —— 整体平均更新幅度
             delta_scene = 0.5 * (k1 + k2)
         else:
             slope = self.func_g(h_adv, f_t)
+            # Scalar dt broadcasts against (C_h,X,Y,Z).
             delta_scene = slope * dt
             h_next = h_adv + delta_scene
         return h_next, delta_scene
 
 
 class _NeuralOdeDtRolloutBase(nn.Module):
-    """Neural ODE Δt 对齐器的内部 rollout 基类。
-
-    子类负责提供实际 encoder、decoder 与演化网格；本类保留统一的
-    forward / stepwise / ego-warp / Fast-KL 实现。
-    """
-
     def __init__(
         self,
         num_classes: int,
@@ -122,7 +96,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
         self.voxel_size = tuple(voxel_size)
         self.timestamp_scale = float(timestamp_scale)
 
-        # 双独立 encoder + FuncG + Decoder：与 EvoOcc 一致；唯一差别是没有 CtrlProjector
         self.fast_encoder = DenseEncoder(
             in_channels=self.encoder_in_channels,
             out_channels=feat_dim,
@@ -146,10 +119,7 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             init_scale=decoder_init_scale,
         )
 
-        # Trainer 根据 lambda_fast_kl 注入；False 时跳过 KL（与 EvoOcc 同协议）
         self._fast_kl_active: bool = False
-
-    # ----------------- 编码 / 解码 -----------------
 
     def _encode_fast(self, fast_logits: torch.Tensor) -> torch.Tensor:
         return self.fast_encoder(fast_logits)
@@ -159,7 +129,8 @@ class _NeuralOdeDtRolloutBase(nn.Module):
 
     def _decode_dense_state(self, z_dense: torch.Tensor) -> torch.Tensor:
         z_tensor = z_dense.unsqueeze(0)
-        z_tensor = z_tensor.permute(0, 1, 4, 3, 2).contiguous()  # (1, C, Z, Y, X)
+        # (1,C,X,Y,Z) -> (1,C,Z,Y,X) so Z maps to Conv3d depth.
+        z_tensor = z_tensor.permute(0, 1, 4, 3, 2).contiguous()
         out_dense = self.decoder(z_tensor)
         return out_dense.permute(0, 1, 4, 3, 2).contiguous()[0]
 
@@ -178,8 +149,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
         ).sum(dim=0, keepdim=True)
         return (w * kl_per_voxel).mean()
 
-    # ----------------- 共用：单帧 warp + solver 一步 -----------------
-
     def _rollout_step(
         self,
         Z_dense: torch.Tensor,
@@ -191,7 +160,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
         dt_k: torch.Tensor,
         k: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """k -> k+1 的 warp + solver 单步；返回 (Z_next, delta_scene)。"""
         transform = compute_transform_prev_to_curr(
             pose_prev_ego2global=frame_ego2global[k],
             pose_curr_ego2global=frame_ego2global[k + 1],
@@ -221,8 +189,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
         )
         return Z_next, delta_scene
 
-    # ----------------- 单样本：默认（仅末帧） -----------------
-
     def _forward_single(
         self,
         fast_logits: torch.Tensor,
@@ -234,7 +200,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         num_frames = fast_logits.shape[0]
 
-        # h=0 退化：scene 第一帧 keyframe
         if rollout_start_step >= num_frames - 1:
             return {
                 "aligned": slow_logits.float(),
@@ -261,7 +226,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             timestamp_scale=self.timestamp_scale,
         ).to(device=fast_logits.device)
 
-        # 与 EvoOcc 同步：use_fast_residual 时初始锚到最老真实 keyframe
         if self.use_fast_residual:
             Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
@@ -293,8 +257,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             "delta_scene_abs_mean": torch.tensor(avg_delta, device=fast_logits.device),
         }
         return {"aligned": logits.float(), "diagnostics": {k: v.float() for k, v in diagnostics.items()}}
-
-    # ----------------- 单样本：stepwise train -----------------
 
     def _forward_single_stepwise_train(
         self,
@@ -408,8 +370,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             out["fast_kl"] = fast_kl_accum / fast_kl_step_count
         return out
 
-    # ----------------- 单样本：stepwise eval（含分段计时） -----------------
-
     def _forward_single_stepwise_eval(
         self,
         fast_logits: torch.Tensor,
@@ -479,7 +439,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             else:
                 tp0 = time.perf_counter()
 
-            # ---- warp 段 ----
             transform = compute_transform_prev_to_curr(
                 pose_prev_ego2global=frame_ego2global[k],
                 pose_curr_ego2global=frame_ego2global[k + 1],
@@ -509,7 +468,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             else:
                 tp1 = time.perf_counter()
 
-            # ---- solver 段 ----
             f_t = fast_feat[k + 1]
             Z_dense, delta_scene = self.solver.step(
                 h_adv=Z_warp, f_prev_adv=f_prev_adv, f_t=f_t, dt=dt[k]
@@ -520,7 +478,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             else:
                 tp2 = time.perf_counter()
 
-            # ---- decode 段 ----
             logits_delta = self._decode_dense_state(Z_dense)
             if self.use_fast_residual:
                 logits_now = logits_delta + fast_logits[k + 1]
@@ -575,8 +532,6 @@ class _NeuralOdeDtRolloutBase(nn.Module):
             "step_indices": step_indices,
             "diagnostics": {k: v.float() for k, v in diagnostics.items()},
         }
-
-    # ----------------- batch 包装 / 公共入口 -----------------
 
     def _unsqueeze_inputs(
         self,

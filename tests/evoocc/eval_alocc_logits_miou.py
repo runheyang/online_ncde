@@ -1,23 +1,4 @@
 #!/usr/bin/env python3
-"""评估 ALOCC 预测 logits 的 mIoU：基于 canonical_infos_val.pkl 的最后一帧 (step 12) keyframe。
-
-用法示例：
-    # 评估 alocc3d（sample_token 组织）
-    python tests/evoocc/eval_alocc_logits_miou.py \
-        --pred-root data/alocc3d \
-        --token-type sample
-
-    # 评估 alocc2d_mini（frame_token 组织）
-    python tests/evoocc/eval_alocc_logits_miou.py \
-        --pred-root data/alocc2d_mini \
-        --token-type frame
-
-    # 使用 lidar mask
-    python tests/evoocc/eval_alocc_logits_miou.py \
-        --pred-root data/alocc3d \
-        --token-type sample \
-        --mask-type lidar
-"""
 
 from __future__ import annotations
 
@@ -103,14 +84,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def topk_to_pred(topk_indices: np.ndarray) -> np.ndarray:
-    """将 top-3 logits 转为语义预测：取 top-1 类别。
-
-    Args:
-        topk_indices: (X, Y, Z, 3) uint8, top-3 类别 id
-
-    Returns:
-        pred: (X, Y, Z) uint8, 语义预测
-    """
     return topk_indices[..., 0]
 
 
@@ -118,7 +91,6 @@ def main() -> None:
     args = parse_args()
     root_path = str(ROOT)
 
-    # 解析 pred_root 为绝对路径
     pred_root = args.pred_root
     if not os.path.isabs(pred_root):
         pred_root = os.path.join(root_path, pred_root)
@@ -127,12 +99,10 @@ def main() -> None:
     if not os.path.isabs(gt_root):
         gt_root = os.path.join(root_path, gt_root)
 
-    # 加载 canonical info
     with open(args.canonical_info, "rb") as f:
         canonical_data = pickle.load(f)
     infos = canonical_data["infos"]
 
-    # 筛选 valid 样本
     valid_infos = [info for info in infos if info.get("valid", False)]
     print(f"总样本数: {len(infos)}, 有效样本数: {len(valid_infos)}")
 
@@ -140,7 +110,6 @@ def main() -> None:
         valid_infos = valid_infos[: args.limit]
         print(f"限制评估前 {args.limit} 个有效样本")
 
-    # 初始化 metric
     use_lidar = args.mask_type == "lidar"
     use_camera = args.mask_type == "camera"
     metric = MetricMiouOcc3D(
@@ -154,25 +123,22 @@ def main() -> None:
     missing_gt = 0
     evaluated = 0
 
-    # RayIoU: 收集 pred/gt/token 用于后续计算
     rayiou_items: list[dict] = [] if args.rayiou else []
 
     iterator = progressbar.progressbar(valid_infos, prefix="Evaluating ") if progressbar else valid_infos
     for info in iterator:
         scene_name = info["scene_name"]
 
-        # 确定预测 logits 路径
         if args.token_type == "sample":
-            pred_token = info["token"]  # sample_token
+            pred_token = info["token"]
         else:
-            pred_token = info["frame_tokens"][12]  # frame_token (step 12)
+            pred_token = info["frame_tokens"][12]
 
         pred_path = os.path.join(pred_root, scene_name, pred_token, "logits.npz")
         if not os.path.exists(pred_path):
             missing_pred += 1
             continue
 
-        # GT 路径：使用 curr_gt_rel_path 或 sample_token
         gt_rel = info.get("curr_gt_rel_path", "")
         if gt_rel:
             gt_path = os.path.join(gt_root, gt_rel) if not os.path.isabs(gt_rel) else gt_rel
@@ -183,18 +149,15 @@ def main() -> None:
             missing_gt += 1
             continue
 
-        # 加载预测
         pred_data = np.load(pred_path)
-        topk_indices = pred_data["topk_indices"]  # (200, 200, 16, 3) uint8
-        pred_sem = topk_to_pred(topk_indices)  # (200, 200, 16)
+        topk_indices = pred_data["topk_indices"]
+        pred_sem = topk_to_pred(topk_indices)
 
-        # 加载 GT
         gt_data = np.load(gt_path)
-        gt_semantics = gt_data["semantics"].astype(np.uint8)  # (200, 200, 16)
+        gt_semantics = gt_data["semantics"].astype(np.uint8)
         mask_lidar = gt_data.get("mask_lidar", None)
         mask_camera = gt_data.get("mask_camera", None)
 
-        # 累计统计
         metric.add_batch(
             semantics_pred=pred_sem,
             semantics_gt=gt_semantics,
@@ -203,7 +166,6 @@ def main() -> None:
         )
         evaluated += 1
 
-        # 收集 RayIoU 所需数据
         if args.rayiou:
             rayiou_items.append({
                 "token": info["token"],
@@ -211,7 +173,6 @@ def main() -> None:
                 "gt": gt_semantics,
             })
 
-    # 输出结果
     print(f"\n评估完成: {evaluated} 个样本")
     print(f"缺失预测: {missing_pred}, 缺失 GT: {missing_gt}")
     print(f"Mask 类型: {args.mask_type}")
@@ -219,7 +180,6 @@ def main() -> None:
 
     miou = metric.count_miou(verbose=True)
 
-    # --- RayIoU ---
     rayiou_result = None
     if args.rayiou:
         print("\n[rayiou] 加载 lidar origins...")
@@ -255,7 +215,6 @@ def main() -> None:
         print(f"[rayiou] RayIoU@2={rayiou_result['RayIoU@2']:.4f}")
         print(f"[rayiou] RayIoU@4={rayiou_result['RayIoU@4']:.4f}")
 
-    # 可选输出 json
     if args.output_json:
         per_class_iou = metric.get_per_class_iou()
         result = {

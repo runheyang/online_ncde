@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Generate backward velocity GT files from UniOcc occ_flow_backward."""
 
 from __future__ import annotations
 
@@ -33,7 +32,7 @@ UNI_OCC_CLASS_TO_ID: dict[str, int] = {
     "free": 10,
 }
 
-# Foreground/background split follows UniOcc 11-class encoding.
+# Foreground/background split follows the UniOcc 11-class encoding.
 FOREGROUND_CLASS_NAMES = [
     "car",
     "bicycle",
@@ -282,7 +281,7 @@ def build_occ_coords(grid_shape: tuple[int, int, int]) -> np.ndarray:
     ys = np.arange(w, dtype=np.float32)
     zs = np.arange(h, dtype=np.float32)
     xg, yg, zg = np.meshgrid(xs, ys, zs, indexing="ij")
-    return np.stack([xg, yg, zg], axis=-1)  # (L,W,H,3)
+    return np.stack([xg, yg, zg], axis=-1)
 
 
 def occ_frame_to_ego(
@@ -290,7 +289,6 @@ def occ_frame_to_ego(
     voxel_size: float,
     center_ego: np.ndarray = UNI_OCC_CENTER_EGO,
 ) -> np.ndarray:
-    """Match UniOcc's OccFrameToEgoFrame mapping exactly."""
     ego_coords = np.zeros_like(occ_coords, dtype=np.float32)
     ego_coords[..., 0] = occ_coords[..., 0] * float(voxel_size) - float(center_ego[0])
     ego_coords[..., 1] = occ_coords[..., 1] * float(voxel_size) - float(center_ego[1])
@@ -334,8 +332,7 @@ def build_velocity_xy_residual(
     occ_curr = occ_coords[fg_mask].astype(np.float32, copy=False)
     flow_bwd_vox = occ_flow_backward[fg_mask].astype(np.float32, copy=False)
 
-    # UniOcc stores flow in num_voxels. Add it in occupancy coordinates first,
-    # then map both current and previous positions to ego-frame metric coordinates.
+    # UniOcc flow is in voxels: add in occupancy coords, then map to ego-frame metric coords
     occ_prev_local = occ_curr + flow_bwd_vox
     xyz_curr = occ_frame_to_ego(occ_curr, voxel_size=voxel_size)
     xyz_prev_local = occ_frame_to_ego(occ_prev_local, voxel_size=voxel_size)
@@ -347,7 +344,7 @@ def build_velocity_xy_residual(
     ego_t_inv = np.linalg.inv(ego_to_world_t).astype(np.float32, copy=False)
     prev_to_t_h = world_h @ ego_t_inv.T
 
-    # Disp_residual = P_{t-1->t} - x
+    # disp_residual = P_{t-1->t} - x
     disp_residual = prev_to_t_h[:, :3] - xyz_curr
     vel_xy_fg = disp_residual[:, :2] / float(dt_seconds) / float(voxel_size)
 
@@ -362,7 +359,7 @@ def build_mask(occ_label: np.ndarray) -> np.ndarray:
         raise ValueError(f"occ_label should be 3D, got shape={tuple(occ_label.shape)}")
     labels = occ_label.astype(np.int64, copy=False)
 
-    # 0: free, 1: background, 2: foreground
+    # mask values: 0 free, 1 background, 2 foreground
     mask = np.ones(labels.shape, dtype=np.uint8)
     mask[labels == FREE_ID] = np.uint8(0)
     mask[np.isin(labels, FOREGROUND_IDS)] = np.uint8(2)
@@ -512,7 +509,6 @@ def main() -> None:
         pose_by_token: dict[str, np.ndarray] = {}
         frame_meta: list[tuple[Path, str, np.ndarray]] = []
 
-        # Pass-1: light metadata scan for sample_token + ego pose in current scene.
         for rel_path in rel_paths:
             total_frames += 1
             uniocc_npz_path = uniocc_root / rel_path
@@ -551,7 +547,6 @@ def main() -> None:
             pose_by_token[sample_token] = ego_to_world_t
             frame_meta.append((uniocc_npz_path, sample_token, ego_to_world_t))
 
-        # Pass-2: build per-frame compute tasks.
         for uniocc_npz_path, sample_token, ego_to_world_t in frame_meta:
             out_file = output_root / scene_name / sample_token / "gts.npz"
             if out_file.exists() and not args.overwrite:

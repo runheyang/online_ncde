@@ -1,10 +1,4 @@
-# StreamingFlow BEV GRU-ODE baseline 的 Occ3D 配置覆盖层。
-# 由 scripts/baselines/train_streamingflow_bev_ode.py 和
-# scripts/baselines/eval_streamingflow_bev_ode.py 自动叠加到用户传入的
-# 任意 Occ3D base config 上，不需要为每个 fast/slow 组合单独写 yaml。
-
 data:
-  # StreamingFlow baseline 主设定固定为 2Hz，13 帧历史按 stride=3 抽成 5 帧。
   fast_frame_stride: 3
 
 model:

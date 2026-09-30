@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""实时 benchmark 的评估适配工具。"""
 
 from __future__ import annotations
 
@@ -20,7 +19,6 @@ if str(OPUS_ROOT) not in sys.path:
 
 
 def get_dataset_infos(dataset: Any) -> list[dict[str, Any]]:
-    """兼容旧版 data_infos 与新版 data_list。"""
     infos = getattr(dataset, "data_infos", None)
     if infos is None:
         infos = getattr(dataset, "data_list", None)
@@ -30,8 +28,6 @@ def get_dataset_infos(dataset: Any) -> list[dict[str, Any]]:
 
 
 class FilteredValidationDataset:
-    """只为 benchmark 评估保留子集视图，不改原始 dataset。"""
-
     def __init__(self, base_dataset: Any, keep_indices: list[int]) -> None:
         self.base_dataset = base_dataset
         self.keep_indices = list(keep_indices)
@@ -72,7 +68,6 @@ def dense_logits_to_occ_result(
     dense_logits: torch.Tensor,
     free_index: int,
 ) -> dict[str, np.ndarray]:
-    """把 dense logits 适配回 OPUS evaluate() 需要的稀疏结果格式。"""
     sem_grid = dense_logits.argmax(dim=0)
     occ_loc = torch.nonzero(sem_grid != int(free_index), as_tuple=False)
     if occ_loc.numel() == 0:
@@ -92,7 +87,6 @@ def evaluate_final_predictions(
     token_to_dataset_idx: dict[str, int],
     results_by_token: dict[str, dict[str, np.ndarray]],
 ) -> dict[str, Any]:
-    """按 dataset index 排序后，复用 OPUS dataset.evaluate() 出主指标。"""
     keep_indices: list[int] = []
     sorted_results: list[dict[str, np.ndarray]] = []
 
@@ -123,7 +117,7 @@ def _pushd(path: Path):
 
 
 def _ensure_opus_ray_metrics_loaded() -> None:
-    """OPUS 的 ray_metrics 会按 cwd 查找 lib/dvr，需要先在 OPUS 根目录导入。"""
+    # OPUS ray_metrics locates lib/dvr via cwd, so import it from the OPUS root
     if "loaders.ray_metrics" in sys.modules:
         return
     with _pushd(OPUS_ROOT):

@@ -1,30 +1,3 @@
-"""
-MIT License
-
-Copyright (c) 2018 Maxim Berman
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Lovasz-Softmax and Jaccard hinge loss in PyTorch
-Maxim Berman 2018 ESAT-PSI KU Leuven (MIT License)
-"""
-
 from __future__ import print_function, division
 
 import torch
@@ -35,25 +8,17 @@ from itertools import filterfalse as ifilterfalse
 
 
 def lovasz_grad(gt_sorted):
-    """
-    Computes gradient of the Lovasz extension w.r.t sorted errors
-    See Alg. 1 in paper
-    """
     p = len(gt_sorted)
     gts = gt_sorted.sum()
     intersection = gts - gt_sorted.float().cumsum(0)
     union = gts + (1 - gt_sorted).float().cumsum(0)
     jaccard = 1. - intersection / union
-    if p > 1: # cover 1-pixel case
+    if p > 1:
         jaccard[1:p] = jaccard[1:p] - jaccard[0:-1]
     return jaccard
 
 
 def iou_binary(preds, labels, EMPTY=1., ignore=None, per_image=True):
-    """
-    IoU for foreground class
-    binary: 1 foreground, 0 background
-    """
     if not per_image:
         preds, labels = (preds,), (labels,)
     ious = []
@@ -65,21 +30,18 @@ def iou_binary(preds, labels, EMPTY=1., ignore=None, per_image=True):
         else:
             iou = float(intersection) / float(union)
         ious.append(iou)
-    iou = mean(ious)    # mean accross images if per_image
+    iou = mean(ious)
     return 100 * iou
 
 
 def iou(preds, labels, C, EMPTY=1., ignore=None, per_image=False):
-    """
-    Array of IoU for each (non ignored) class
-    """
     if not per_image:
         preds, labels = (preds,), (labels,)
     ious = []
     for pred, label in zip(preds, labels):
         iou = []    
         for i in range(C):
-            if i != ignore: # The ignored label is sometimes among predicted classes (ENet - CityScapes)
+            if i != ignore:
                 intersection = ((label == i) & (pred == i)).sum()
                 union = ((label == i) | ((pred == i) & (label != ignore))).sum()
                 if not union:
@@ -87,21 +49,11 @@ def iou(preds, labels, C, EMPTY=1., ignore=None, per_image=False):
                 else:
                     iou.append(float(intersection) / float(union))
         ious.append(iou)
-    ious = [mean(iou) for iou in zip(*ious)] # mean accross images if per_image
+    ious = [mean(iou) for iou in zip(*ious)]
     return 100 * np.array(ious)
 
 
-# --------------------------- BINARY LOSSES ---------------------------
-
-
 def lovasz_hinge(logits, labels, per_image=True, ignore=None):
-    """
-    Binary Lovasz hinge loss
-      logits: [B, H, W] Variable, logits at each pixel (between -\\infty and +\\infty)
-      labels: [B, H, W] Tensor, binary ground truth masks (0 or 1)
-      per_image: compute the loss per image instead of per batch
-      ignore: void class id
-    """
     if per_image:
         loss = mean(lovasz_hinge_flat(*flatten_binary_scores(log.unsqueeze(0), lab.unsqueeze(0), ignore))
                           for log, lab in zip(logits, labels))
@@ -111,14 +63,7 @@ def lovasz_hinge(logits, labels, per_image=True, ignore=None):
 
 
 def lovasz_hinge_flat(logits, labels):
-    """
-    Binary Lovasz hinge loss
-      logits: [P] Variable, logits at each prediction (between -\\infty and +\\infty)
-      labels: [P] Tensor, binary ground truth labels (0 or 1)
-      ignore: label to ignore
-    """
     if len(labels) == 0:
-        # only void pixels, the gradients should be 0
         return logits.sum() * 0.
     signs = 2. * labels.float() - 1.
     errors = (1. - logits * Variable(signs))
@@ -131,10 +76,6 @@ def lovasz_hinge_flat(logits, labels):
 
 
 def flatten_binary_scores(scores, labels, ignore=None):
-    """
-    Flattens predictions in the batch (binary case)
-    Remove labels equal to 'ignore'
-    """
     scores = scores.view(-1)
     labels = labels.view(-1)
     if ignore is None:
@@ -155,30 +96,12 @@ class StableBCELoss(torch.nn.modules.Module):
 
 
 def binary_xloss(logits, labels, ignore=None):
-    """
-    Binary Cross entropy loss
-      logits: [B, H, W] Variable, logits at each pixel (between -\\infty and +\\infty)
-      labels: [B, H, W] Tensor, binary ground truth masks (0 or 1)
-      ignore: void class id
-    """
     logits, labels = flatten_binary_scores(logits, labels, ignore)
     loss = StableBCELoss()(logits, Variable(labels.float()))
     return loss
 
 
-# --------------------------- MULTICLASS LOSSES ---------------------------
-
-
 def lovasz_softmax(probas, labels, classes='present', per_image=False, ignore=None):
-    """
-    Multi-class Lovasz-Softmax loss
-      probas: [B, C, H, W] Variable, class probabilities at each prediction (between 0 and 1).
-              Interpreted as binary (sigmoid) output with outputs of size [B, H, W].
-      labels: [B, H, W] Tensor, ground truth labels (between 0 and C - 1)
-      classes: 'all' for all, 'present' for classes present in labels, or a list of classes to average.
-      per_image: compute the loss per image instead of per batch
-      ignore: void class labels
-    """
     if per_image:
         loss = mean(lovasz_softmax_flat(*flatten_probas(prob.unsqueeze(0), lab.unsqueeze(0), ignore), classes=classes)
                           for prob, lab in zip(probas, labels))
@@ -188,20 +111,13 @@ def lovasz_softmax(probas, labels, classes='present', per_image=False, ignore=No
 
 
 def lovasz_softmax_flat(probas, labels, classes='present'):
-    """
-    Multi-class Lovasz-Softmax loss
-      probas: [P, C] Variable, class probabilities at each prediction (between 0 and 1)
-      labels: [P] Tensor, ground truth labels (between 0 and C - 1)
-      classes: 'all' for all, 'present' for classes present in labels, or a list of classes to average.
-    """
     if probas.numel() == 0:
-        # only void pixels, the gradients should be 0
         return probas * 0.
     C = probas.size(1)
     losses = []
     class_to_sum = list(range(C)) if classes in ['all', 'present'] else classes
     for c in class_to_sum:
-        fg = (labels == c).float() # foreground for class c
+        fg = (labels == c).float()
         if (classes == 'present' and fg.sum() == 0):
             continue
         if C == 1:
@@ -219,15 +135,11 @@ def lovasz_softmax_flat(probas, labels, classes='present'):
 
 
 def flatten_probas(probas, labels, ignore=None):
-    """
-    Flattens predictions in the batch
-    """
     if probas.dim() == 3:
-        # assumes output of a sigmoid layer
         B, H, W = probas.size()
         probas = probas.view(B, 1, H, W)
     B, C, H, W = probas.size()
-    probas = probas.permute(0, 2, 3, 1).contiguous().view(-1, C)  # B * H * W, C = P, C
+    probas = probas.permute(0, 2, 3, 1).contiguous().view(-1, C)  # (B*H*W, C)
     labels = labels.view(-1)
     if ignore is None:
         return probas, labels
@@ -237,21 +149,14 @@ def flatten_probas(probas, labels, ignore=None):
     return vprobas, vlabels
 
 def xloss(logits, labels, ignore=None):
-    """
-    Cross entropy loss
-    """
     return F.cross_entropy(logits, Variable(labels), ignore_index=255)
 
 
-# --------------------------- HELPER FUNCTIONS ---------------------------
 def isnan(x):
     return x != x
     
     
 def mean(l, ignore_nan=False, empty=0):
-    """
-    nanmean compatible with generators.
-    """
     l = iter(l)
     if ignore_nan:
         l = ifilterfalse(isnan, l)

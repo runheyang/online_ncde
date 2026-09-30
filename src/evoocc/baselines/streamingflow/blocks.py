@@ -1,5 +1,3 @@
-"""StreamingFlow baseline 使用的轻量 2D building blocks。"""
-
 from __future__ import annotations
 
 import torch
@@ -24,8 +22,6 @@ def _make_activation(name: str) -> nn.Module | None:
 
 
 class ConvNormAct2d(nn.Module):
-    """Conv2d + GroupNorm + activation。"""
-
     def __init__(
         self,
         in_channels: int,
@@ -68,8 +64,6 @@ class ConvNormAct2d(nn.Module):
 
 
 class ResBlock2D(nn.Module):
-    """两层 3x3 Conv 的残差块。"""
-
     def __init__(
         self,
         in_channels: int,
@@ -102,8 +96,6 @@ class ResBlock2D(nn.Module):
 
 
 class SELayer2D(nn.Module):
-    """Squeeze-and-Excitation，用于 p_model。"""
-
     def __init__(self, channels: int, reduction: int = 8) -> None:
         super().__init__()
         c = int(channels)
@@ -124,8 +116,6 @@ class SELayer2D(nn.Module):
 
 
 class TrustBottleBlock2D(nn.Module):
-    """StreamingFlow trusting gate 使用的 Bottleblock 本地实现。"""
-
     def __init__(self, in_channels: int, out_channels: int, gn_groups: int = 8) -> None:
         super().__init__()
         in_c = int(in_channels)

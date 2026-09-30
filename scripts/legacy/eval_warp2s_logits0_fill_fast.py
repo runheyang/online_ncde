@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""评估基线：warp 慢系统 slow_logit.npz，并用快系统末帧 logits 填充未知区域。"""
 
 from __future__ import annotations
 
@@ -126,7 +125,6 @@ def load_infos(info_path: str) -> list[dict[str, Any]]:
 
 
 def safe_logit(prob: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
-    """数值稳定的 logit 变换。"""
     prob = prob.clamp(min=float(eps), max=1.0 - float(eps))
     return torch.log(prob) - torch.log1p(-prob)
 
@@ -136,12 +134,7 @@ def predict_opusv2_style(
     free_index: int,
     conf_thresh: float,
 ) -> torch.Tensor:
-    """
-    按 OPUSv2 口径从 dense logits 生成语义预测。
-
-    只看非 free 语义通道的最大 logit；
-    sigmoid(max_logit) >= conf_thresh 则输出该类别，否则输出 free。
-    """
+    """OPUSv2 style: sigmoid(max non-free logit) >= conf_thresh gives that class, else free."""
     num_classes = int(logits.shape[0])
     class_mask = torch.ones(num_classes, dtype=torch.bool, device=logits.device)
     class_mask[free_index] = False
@@ -161,15 +154,6 @@ def postprocess_fast_logits_opusv1(
     free_fill_value: float,
     kernel_size: int = 3,
 ) -> torch.Tensor:
-    """
-    将快系统 dense logits 按 OPUSv1 的 occupancy 后处理规则转成可填充 logits。
-
-    逻辑对齐 third_party/OPUS/models/opusv1/opus_head.py:
-    1. 仅保留 sigmoid(max_non_free_logit) > score_thr 的体素；
-    2. 对非 free 类 score 体执行 max_pool3d dilation + erosion；
-    3. 原始高置信体素保持不变；
-    4. 将保留结果写回 dense logits，其余体素回退为 free 先验。
-    """
     num_classes = int(logits.shape[0])
     class_mask = torch.ones(num_classes, dtype=torch.bool, device=logits.device)
     class_mask[free_index] = False
@@ -185,6 +169,7 @@ def postprocess_fast_logits_opusv1(
 
     occ = sem_scores * keep_mask.unsqueeze(0).to(dtype=sem_scores.dtype)
     occ = occ.unsqueeze(0)
+    # Mirrors OPUSv1 opus_head.py: keep voxels above score_thr, dilate+erode non-free scores, reset the rest to the free prior.
     pad = int(kernel_size) // 2
     dilated = F.max_pool3d(occ, kernel_size=kernel_size, stride=1, padding=pad)
     eroded = -F.max_pool3d(-dilated, kernel_size=kernel_size, stride=1, padding=pad)
@@ -210,7 +195,6 @@ def load_labels_selected_npz(
     mask_key: str,
     default_mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """仅读取 labels.npz 的必要字段，减少不必要的解压与拷贝。"""
     with np.load(path, allow_pickle=False) as data:
         semantics = data["semantics"]
         mask = data[mask_key] if mask_key in data.files else default_mask
@@ -218,7 +202,6 @@ def load_labels_selected_npz(
 
 
 def normalize_frame_index(frame_index: int, num_frames: int) -> int:
-    """将负索引转换为正索引，并做合法性校验。"""
     idx = frame_index if frame_index >= 0 else num_frames + frame_index
     if idx < 0 or idx >= num_frames:
         raise IndexError(
@@ -241,7 +224,6 @@ def decode_one_frame_sparse_topk(
     device: torch.device,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """仅解码指定帧 top-k logits，返回 (C, X, Y, Z)。"""
     x_size, y_size, z_size = grid_size
     num_frames = int(frame_splits.shape[0] - 1)
     if num_frames <= 0:
@@ -284,7 +266,6 @@ def resolve_relative_sample_file(
     root_rel: str,
     rel_path: str,
 ) -> str:
-    """按 root_rel + 相对路径解析样本文件。"""
     if not rel_path:
         raise FileNotFoundError("样本缺少相对路径字段，无法读取文件。")
     path = resolve_path(root_path, os.path.join(root_rel, rel_path))
@@ -300,7 +281,6 @@ def resolve_sample_logits_path(
     info_key: str,
     default_name: str,
 ) -> str:
-    """优先使用 info 中的相对路径字段，缺失时回退到 scene/token 命名。"""
     rel_path = str(info.get(info_key, ""))
     if rel_path:
         return resolve_relative_sample_file(root_path, logits_root, rel_path)
@@ -325,7 +305,6 @@ def load_sample_payload(
     gt_mask_key: str,
     default_mask_np: np.ndarray,
 ) -> dict[str, Any]:
-    """读取单样本评估所需的全部 CPU 数据。"""
     slow_logits_path = resolve_sample_logits_path(
         root_path=root_path,
         logits_root=slow_logits_root,
@@ -364,7 +343,6 @@ def iter_prefetched(
     io_workers: int,
     prefetch: int,
 ) -> Iterator[dict[str, Any]]:
-    """按顺序产出样本，后台并发读取后续样本以隐藏磁盘 I/O。"""
     total = len(infos)
     if io_workers <= 0 or total <= 1:
         for info in infos:
@@ -446,7 +424,6 @@ def main() -> None:
 
     with torch.inference_mode():
         for sample in iterator:
-            # 1) 慢系统单帧 slow_logit.npz 解码
             if normalize_frame_index(int(args.slow_frame_index), 1) != 0:
                 raise IndexError("slow_logit.npz 仅包含单帧，slow-frame-index 只能指向该单帧。")
             slow_logits = decode_single_frame_sparse_topk(
@@ -462,7 +439,6 @@ def main() -> None:
                 dtype=torch.float32,
             )
 
-            # 2) 快系统末帧 logits 解码（用于填充）
             fast_now = decode_one_frame_sparse_topk(
                 sparse_coords=sample["fast_logits_npz"]["sparse_coords"],
                 sparse_topk_values=sample["fast_logits_npz"]["sparse_topk_values"],
@@ -486,7 +462,6 @@ def main() -> None:
                 kernel_size=FAST_FILL_KERNEL_SIZE,
             )
 
-            # 3) 直接使用 grid_sample warp 慢系统 logits（不依赖 image_mask）
             transform = torch.from_numpy(sample["T_slow_to_curr"]).to(
                 device=device, dtype=torch.float32
             )
@@ -499,7 +474,6 @@ def main() -> None:
                 padding_mode=args.padding_mode,
             )
 
-            # 4) zero padding 区域用快系统末帧 logits 填充，其余区域使用 warp 结果
             padded_mask = warped_slow.abs().amax(dim=0) <= float(args.zero_eps)
             merged = warped_slow.clone()
             merged[:, padded_mask] = fast_now[:, padded_mask]
@@ -509,7 +483,6 @@ def main() -> None:
                 conf_thresh=float(args.free_conf_thresh),
             ).cpu().numpy()
 
-            # 5) 累计 IoU（评估口径保持与当前脚本一致）
             metric.add_batch(
                 semantics_pred=pred,
                 semantics_gt=sample["gt_semantics"],

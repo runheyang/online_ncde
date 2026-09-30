@@ -1,5 +1,3 @@
-"""3D occupancy logits 与 StreamingFlow BEV latent 之间的桥接模块。"""
-
 from __future__ import annotations
 
 import torch
@@ -10,8 +8,6 @@ from evoocc.baselines.streamingflow.blocks import ConvNormAct2d, ResBlock2D
 
 
 class LogitsToBEVAdapter(nn.Module):
-    """Occ3D 3D logits -> BEV feature。"""
-
     def __init__(
         self,
         num_classes: int = 18,
@@ -50,7 +46,6 @@ class LogitsToBEVAdapter(nn.Module):
         )
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        """输入 `(B, C, X, Y, Z)`，输出 `(B, C_bev, X/stride, Y/stride)`。"""
         if logits.dim() != 5:
             raise ValueError(f"logits 需要 5D (B,C,X,Y,Z)，当前: {tuple(logits.shape)}")
         b, c, x_size, y_size, z_size = logits.shape
@@ -65,8 +60,6 @@ class LogitsToBEVAdapter(nn.Module):
 
 
 class LightNoPoolSmallEncoder(nn.Module):
-    """不下采样的 SRVP-style pre-ODE transform。"""
-
     def __init__(self, channels: int = 64, num_blocks: int = 3, gn_groups: int = 8) -> None:
         super().__init__()
         blocks = [ResBlock2D(int(channels), int(channels), gn_groups=gn_groups) for _ in range(num_blocks)]
@@ -87,8 +80,6 @@ class LightNoPoolSmallEncoder(nn.Module):
 
 
 class LightNoPoolSmallDecoder(nn.Module):
-    """不改变分辨率的 post-ODE BEV latent decode。"""
-
     def __init__(self, channels: int = 64, num_blocks: int = 3, gn_groups: int = 8) -> None:
         super().__init__()
         blocks = [ResBlock2D(int(channels), int(channels), gn_groups=gn_groups) for _ in range(num_blocks)]
@@ -113,8 +104,6 @@ class LightNoPoolSmallDecoder(nn.Module):
 
 
 class StreamingFlowSmallEncoder2D(nn.Module):
-    """StreamingFlow 风格的 200x200 -> 100x100 SRVP encoder。"""
-
     def __init__(
         self,
         in_channels: int = 64,
@@ -155,8 +144,6 @@ class StreamingFlowSmallEncoder2D(nn.Module):
 
 
 class StreamingFlowSmallDecoder2D(nn.Module):
-    """StreamingFlow 风格的 100x100 -> 200x200 SRVP decoder。"""
-
     def __init__(
         self,
         latent_channels: int = 96,
@@ -208,8 +195,6 @@ class StreamingFlowSmallDecoder2D(nn.Module):
 
 
 class BEVTo3DDecoder(nn.Module):
-    """BEV latent -> 200x200x16 absolute occupancy logits。"""
-
     def __init__(
         self,
         in_channels: int = 64,
@@ -261,8 +246,6 @@ class BEVTo3DDecoder(nn.Module):
 
 
 class SameTimeGatedFusion(nn.Module):
-    """融合 t0 同时刻 slow / fast BEV observation。"""
-
     def __init__(self, channels: int = 64) -> None:
         super().__init__()
         self.gate = nn.Conv2d(int(channels) * 2, int(channels), kernel_size=3, padding=1)
@@ -273,8 +256,6 @@ class SameTimeGatedFusion(nn.Module):
 
 
 class SpatialGRU2D(nn.Module):
-    """StreamingFlow 风格的 BEV sequence spatial GRU refinement。"""
-
     def __init__(self, channels: int = 64, gru_bias_init: float = 0.0) -> None:
         super().__init__()
         c = int(channels)
@@ -304,8 +285,6 @@ class SpatialGRU2D(nn.Module):
 
 
 class SpatialGRURefiner2D(nn.Module):
-    """可选的 target BEV sequence refinement。"""
-
     def __init__(
         self,
         channels: int = 64,

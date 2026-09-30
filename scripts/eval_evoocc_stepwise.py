@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""EvoOcc 逐步评估：每步解码 + key_frame IoU + 推理时延。"""
 
 from __future__ import annotations
 
@@ -14,9 +13,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-# 输入形状固定，开启 benchmark 让 cuDNN 自动选 conv 算法
 torch.backends.cudnn.benchmark = True
-# 与 train 对齐：fp32 + TF32（PyTorch 1.12+ matmul TF32 默认关闭，需显式开）
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -106,11 +103,8 @@ def main() -> None:
     loader_cfg = cfg.get("dataloader", {})
     root_path = cfg["root_path"]
 
-    # 按 data.logits_format 构造 LogitsLoader
     logits_loader = build_logits_loader(data_cfg, root_path)
 
-    # 默认 min_history_completeness=0，含全部短历史样本（h=0 走 aligner 退化分支）。
-    # --exclude-short-history 才回退到 config 的阈值（通常 4）过滤短历史。
     min_hc = int(data_cfg.get("min_history_completeness", 4)) if args.exclude_short_history else 0
     print(f"[eval] min_history_completeness={min_hc}"
           + (f"  (--exclude-short-history 使用 config 阈值 {min_hc})" if args.exclude_short_history else ""))
@@ -194,7 +188,6 @@ def main() -> None:
 
     step_time_sum = defaultdict(float)
     step_time_count = defaultdict(int)
-    # 分段计时：warp / solver / decode
     step_warp_sum = defaultdict(float)
     step_solver_sum = defaultdict(float)
     step_decode_sum = defaultdict(float)
@@ -226,12 +219,12 @@ def main() -> None:
                 frame_dt=sample.get("frame_dt", None),
                 rollout_start_step=sample.get("rollout_start_step", None),
             )
-            step_logits = cast(torch.Tensor, outputs["step_logits"])  # (B, S, C, X, Y, Z)
-            step_time_ms = cast(torch.Tensor, outputs["step_time_ms"])  # (B, S)
-            step_warp_ms = cast(torch.Tensor, outputs["step_warp_ms"])  # (B, S)
-            step_solver_ms = cast(torch.Tensor, outputs["step_solver_ms"])  # (B, S)
-            step_decode_ms = cast(torch.Tensor, outputs["step_decode_ms"])  # (B, S)
-            step_indices = cast(torch.Tensor, outputs["step_indices"])  # (S,)
+            step_logits = cast(torch.Tensor, outputs["step_logits"])
+            step_time_ms = cast(torch.Tensor, outputs["step_time_ms"])
+            step_warp_ms = cast(torch.Tensor, outputs["step_warp_ms"])
+            step_solver_ms = cast(torch.Tensor, outputs["step_solver_ms"])
+            step_decode_ms = cast(torch.Tensor, outputs["step_decode_ms"])
+            step_indices = cast(torch.Tensor, outputs["step_indices"])
             step_indices_list = [int(v) for v in step_indices.detach().cpu().tolist()]
             step_preds = step_logits.argmax(dim=2).to(torch.uint8).cpu().numpy()
             if tuple(step_preds.shape[-3:]) != grid_size:
@@ -269,7 +262,6 @@ def main() -> None:
                     no_frame_tokens_count += 1
                     continue
 
-                # key_frame 判定不依赖当前对齐 pkl 的扩展字段，直接用 NuScenes sample_data 元数据。
                 keyframe_steps = keyframe_resolver.resolve_keyframe_steps(frame_tokens)
 
                 for local_step_idx, step_idx in enumerate(step_indices_list):

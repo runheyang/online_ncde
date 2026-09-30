@@ -1,5 +1,3 @@
-"""Direct window attention 与卷积 direct fusion 的 FLOPs 估算。"""
-
 from __future__ import annotations
 
 from evoocc.baselines.learned_direct_fusion.profiling import (
@@ -37,7 +35,6 @@ def estimate_learned_direct_attention_stepwise(
     num_attention_blocks: int = 2,
     num_local_blocks: int = 2,
 ) -> ComputeEstimate:
-    """估算四目标window cross-attention的乘加计算量。"""
     input_voxels = int(
         input_grid_size[0] * input_grid_size[1] * input_grid_size[2]
     )
@@ -56,7 +53,6 @@ def estimate_learned_direct_attention_stepwise(
         attention_inner_dim,
     )
 
-    # 一个slow anchor，加num_targets个current fast。
     encoders = (num_targets + 1) * _conv3d_macs(
         latent_voxels,
         num_classes,
@@ -64,14 +60,12 @@ def estimate_learned_direct_attention_stepwise(
         kernel_volume=27,
     )
 
-    # q/kv stems与输出head。
     fusion_per_target = 3 * _conv3d_macs(
         latent_voxels,
         latent_dim,
         attention_inner_dim,
         kernel_volume=1,
     )
-    # 每层包含Q/K/V/out projection、FFN以及QK^T/AV。
     fusion_per_target += num_attention_blocks * (
         4
         * _conv3d_macs(

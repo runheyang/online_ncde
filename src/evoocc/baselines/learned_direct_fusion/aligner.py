@@ -1,5 +1,3 @@
-"""50×50×16 learned direct fusion aligner。"""
-
 from __future__ import annotations
 
 import time
@@ -22,7 +20,6 @@ from evoocc.data.ego_warp_list import (
 
 
 def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
-    """计算 fast occupied confidence，与 EvoOcc 保持一致。"""
     masked = fast_logits.clone()
     masked.narrow(-4, free_index, 1).fill_(float("-inf"))
     max_non_free = masked.amax(dim=-4, keepdim=True)
@@ -31,12 +28,6 @@ def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
 
 
 class LearnedDirectFusionAligner(nn.Module):
-    """从同一个 delayed slow anchor 独立预测各目标时刻。
-
-    本 baseline 不维护递归状态：每个目标时刻都重新 warp 原始 slow feature，
-    再与该时刻的 fast feature 做卷积融合。
-    """
-
     def __init__(
         self,
         num_classes: int,
@@ -56,7 +47,8 @@ class LearnedDirectFusionAligner(nn.Module):
         timestamp_scale: float = 1.0e-6,
     ) -> None:
         super().__init__()
-        del timestamp_scale  # direct fusion 不使用物理时间输入。
+        # Direct fusion takes no physical-time input.
+        del timestamp_scale
         self.num_classes = int(num_classes)
         self.encoder_in_channels = int(encoder_in_channels)
         self.free_index = int(free_index)
@@ -163,7 +155,6 @@ class LearnedDirectFusionAligner(nn.Module):
         pose_anchor: torch.Tensor,
         pose_target: torch.Tensor,
     ) -> torch.Tensor:
-        """始终从原始 slow anchor 直接 warp 到目标时刻。"""
         transform = compute_transform_prev_to_curr(
             pose_prev_ego2global=pose_anchor,
             pose_curr_ego2global=pose_target,
@@ -239,7 +230,6 @@ class LearnedDirectFusionAligner(nn.Module):
         target_indices: Sequence[int],
         anchor_index: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """批量预测目标时刻；各目标共享编码后的 slow anchor，但不存在递归。"""
         self._validate_sample_shapes(fast_logits, slow_logits)
         if not target_indices:
             empty = fast_logits.new_zeros(
@@ -483,9 +473,9 @@ class LearnedDirectFusionAligner(nn.Module):
         return {
             "step_logits": torch.stack(step_logits, dim=0),
             "step_indices": target_tensor,
+            # Reuses existing eval field names; values here are direct-fusion timings.
             "step_time_ms": warp_tensor + fusion_tensor + decode_tensor,
             "step_warp_ms": warp_tensor,
-            # 复用现有评估字段名；这里表示 direct fusion 耗时。
             "step_solver_ms": fusion_tensor,
             "step_decode_ms": decode_tensor,
             "diagnostics": {"fusion_abs_mean": magnitude.float()},

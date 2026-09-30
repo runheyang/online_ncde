@@ -1,5 +1,3 @@
-"""Heun 更新器。"""
-
 from __future__ import annotations
 
 import torch
@@ -10,8 +8,6 @@ from evoocc.models.heads import CtrlProjector
 
 
 class HeunSolver(nn.Module):
-    """按照文档定义执行半拉格朗日补偿后的 Heun 步。"""
-
     def __init__(self, func_g: FuncG, ctrl_proj: CtrlProjector) -> None:
         super().__init__()
         self.func_g = func_g
@@ -24,11 +20,6 @@ class HeunSolver(nn.Module):
         f_t: torch.Tensor,
         delta_ctrl: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        返回:
-          - h_next: Heun 更新后的隐状态
-          - delta_scene: 投影后的控制增量（供诊断统计）
-        """
         delta_scene = self.ctrl_proj(delta_ctrl)
 
         s1 = self.func_g(h_adv, f_prev_adv)

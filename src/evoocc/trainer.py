@@ -1,5 +1,3 @@
-"""evoocc 训练与评估流程。"""
-
 from __future__ import annotations
 
 from contextlib import nullcontext
@@ -31,7 +29,6 @@ def _stack_or_none(batch: list, key: str) -> torch.Tensor | None:
 
 
 def evoocc_collate(batch):
-    """组 batch，并处理可选时序字段。"""
     fast_logits = torch.stack([item["fast_logits"] for item in batch], dim=0)
     slow_logits = torch.stack([item["slow_logits"] for item in batch], dim=0)
     frame_ego2global = torch.stack([item["frame_ego2global"] for item in batch], dim=0)
@@ -61,8 +58,6 @@ def evoocc_collate(batch):
 
 
 def move_to_device(sample: Dict, device: torch.device) -> Dict:
-    """递归搬运 batch 到目标设备。"""
-
     def _move(x):
         if torch.is_tensor(x):
             return x.to(device)
@@ -76,8 +71,6 @@ def move_to_device(sample: Dict, device: torch.device) -> Dict:
 
 
 class Trainer:
-    """封装 train/eval。"""
-
     def __init__(
         self,
         model: torch.nn.Module,
@@ -158,7 +151,6 @@ class Trainer:
 
     @staticmethod
     def _require_multistep_supervision(sample: Dict[str, Any], context: str) -> None:
-        """多帧监督现在是唯一路径，缺字段时立刻报错，提示去补 sidecar。"""
         missing = [
             k for k in ("sup_labels", "sup_masks", "sup_step_indices", "sup_valid_mask")
             if sample.get(k, None) is None
@@ -187,11 +179,6 @@ class Trainer:
         return dist.is_available() and dist.is_initialized()
 
     def _ddp_stats_device(self) -> torch.device:
-        """统计 all_reduce 的设备选择。
-
-        默认双卡训练使用 gloo，统计张量需放在 CPU；若切回 nccl，则放回当前
-        rank 的 CUDA 设备。
-        """
         if not self._ddp_enabled():
             return self.device
         backend = dist.get_backend()
@@ -200,7 +187,6 @@ class Trainer:
         return torch.device("cpu")
 
     def _all_reduce_sums(self, values: list[float]) -> list[float]:
-        """对一组标量做一次性 sum all_reduce。"""
         if not self._ddp_enabled():
             return values
         stats = torch.tensor(values, dtype=torch.float64, device=self._ddp_stats_device())
@@ -220,13 +206,6 @@ class Trainer:
         ray_origin_mask: torch.Tensor | None = None,
         ray_sup_valid: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, float], dict[str, int]]:
-        """按 sidecar 指定 step 做 4 时刻联合监督（不做 detach）。
-
-        ray_* 字段齐全时对每个 sup 额外把该 sup 的 origin/gt_dist/origin_mask 以
-        kwargs 形式传给 loss_fn，由 SegAndRayLoss 内部决定是否启用 ray loss 分支。
-        数据布局约定：ray_origin (B,sup,K,3)、ray_gt_dist (B,sup,K,R)、
-        ray_origin_mask (B,sup,K)。
-        """
         step_map = {int(v): i for i, v in enumerate(step_indices.detach().cpu().tolist())}
         num_sup = len(self.supervision_labels)
         if sup_labels.shape[1] != num_sup:
@@ -234,8 +213,8 @@ class Trainer:
                 f"监督时刻数不一致: labels.shape[1]={sup_labels.shape[1]} vs expected={num_sup}"
             )
 
-        # 既要 sidecar 数据齐全，又要 loss_fn 明确声明接受 ray_* kwargs；
-        # 否则把 kwargs 透传给普通 seg loss 会直接 TypeError。
+        # ray_origin (B,sup,K,3), ray_gt_dist (B,sup,K,R), ray_origin_mask (B,sup,K)
+        # loss_fn must declare accepts_ray_kwargs, otherwise the kwargs would raise TypeError
         has_ray = (
             ray_gt_dist is not None
             and ray_origin is not None
@@ -292,15 +271,12 @@ class Trainer:
 
             loss_kwargs: dict[str, torch.Tensor] = {}
             if has_ray:
-                # (B_eff,K,3) / (B_eff,K,R) / (B_eff,K) —— row-mask gather，
-                # 一次拿全。ray_sup_valid 为 0 的行对应的 origin_mask 本身就是 0，
-                # RayLoss 会自己过滤。
                 row_idx = torch.tensor(kept_rows, device=ray_origin.device, dtype=torch.long)
                 sup_sel = torch.full_like(row_idx, sup_i)
                 loss_kwargs["ray_origins"] = ray_origin[row_idx, sup_sel]
                 loss_kwargs["gt_dist"] = ray_gt_dist[row_idx, sup_sel]
-                # origin_mask 对 ray_sup_valid=0 的行整段清零，让 RayLoss 早退
                 sup_valid_vec = ray_sup_valid[row_idx, sup_sel].to(ray_origin_mask.dtype)
+                # Zeroing origin_mask on invalid sups lets RayLoss exit early
                 loss_kwargs["origin_mask"] = (
                     ray_origin_mask[row_idx, sup_sel] * sup_valid_vec.unsqueeze(-1)
                 )
@@ -314,7 +290,7 @@ class Trainer:
             total_focal = total_focal + weighted_focal
             total_aux = total_aux + weighted_aux
             if "ray_total" in loss_i:
-                # ray_total 已经含 lambda_ray，这里再乘以 sup 权重保持整体加权一致。
+                # ray_total already includes lambda_ray
                 total_ray = total_ray + loss_i["ray_total"] * weight
                 total_ray_hit = total_ray_hit + loss_i["ray_hit"] * weight
                 if int(loss_i.get("ray_valid_rays", torch.tensor(0)).item()) > 0:
@@ -324,7 +300,7 @@ class Trainer:
             active_any = True
 
         if not active_any:
-            # 无有效监督时返回可反传的零损失，避免 backward 报错。
+            # Differentiable zero loss so backward does not fail
             zero = step_logits.sum() * 0.0
             total = zero
             total_focal = zero
@@ -342,7 +318,6 @@ class Trainer:
         }, per_step_loss, per_step_count
 
     def _forward_stepwise(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        # 统一通过 forward(mode=...) 调用逐步训练路径
         model = self.model.module if hasattr(self.model, "module") else self.model
         kwargs = dict(
             fast_logits=sample["fast_logits"],
@@ -351,7 +326,6 @@ class Trainer:
             frame_timestamps=sample.get("frame_timestamps", None),
             frame_dt=sample.get("frame_dt", None),
         )
-        # rollout_start_step：短历史 pad 长度，训练侧默认全 0（过滤过的）
         rss = sample.get("rollout_start_step", None)
         if hasattr(model, "forward_stepwise_train"):
             return model.forward_stepwise_train(
@@ -406,8 +380,7 @@ class Trainer:
         step_indices: torch.Tensor,
         sample: Dict[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # 兜底：若 step_logits 为空（短历史 h=0 理应已由 aligner 返回 slow_logits，
-        # 但保留一道兜底），用 slow_logits 作为当前时刻的对齐输出，而非 fast 末帧。
+        # Empty step_logits (short history) falls back to slow_logits, not the last fast frame
         logits = (
             step_logits[:, -1]
             if step_logits.shape[1] > 0
@@ -439,7 +412,6 @@ class Trainer:
         torch.Tensor,
         torch.Tensor,
     ]:
-        # eval 带 log_multistep_losses=False 时可以不依赖 sup_*，其它情况都必须有。
         if not for_eval or self.log_multistep_losses:
             self._require_multistep_supervision(
                 sample, context="eval" if for_eval else "train"
@@ -460,8 +432,6 @@ class Trainer:
                 step_indices=step_indices,
                 sample=sample,
             )
-            # eval 不关心 ray 指标，单点 loss 和 multistep sup loss 都不传 ray，
-            # 避免每个 val batch 白跑 4 次 ray forward。
             loss_dict = self.loss_fn(logits, eval_labels, eval_masks)
             sup_loss_batch: dict[str, float] = {}
             sup_count_batch: dict[str, int] = {}
@@ -518,7 +488,6 @@ class Trainer:
         loader: DataLoader,
         epoch: int,
     ) -> Dict[str, float]:
-        """训练一个 epoch。"""
         self.model.train()
         total_loss = 0.0
         total_focal = 0.0
@@ -649,15 +618,6 @@ class Trainer:
         use_ema: bool = True,
         compute_miou: bool = True,
     ) -> Dict[str, Any]:
-        """评估并返回 loss + mIoU。
-
-        Args:
-            collect_predictions: 为 True 时额外收集每个样本的 dense pred/gt/token，
-                用于后续 RayIoU 等需要完整预测结果的指标计算。
-                结果存于返回字典的 ``"predictions"`` 键。
-            use_ema: 若为 True 且 self.ema 存在，则用 EMA 权重评估。
-            compute_miou: 若为 False，只做推理/loss/预测收集，mIoU 留给统一评估 helper。
-        """
         original_model = self.model
         if use_ema and self.ema is not None:
             self.model = self.ema.module
@@ -729,7 +689,6 @@ class Trainer:
                         mask_camera=mask_np[b] if mask_np is not None else None,
                     )
 
-            # 收集 dense 预测用于 RayIoU 等后续指标
             if collect_predictions:
                 meta_list = sample.get("meta", [])
                 if isinstance(meta_list, dict):
@@ -789,7 +748,6 @@ class Trainer:
         return metrics
 
     def save_checkpoint(self, path: str, epoch: int | None = None, extra: dict | None = None) -> None:
-        """保存模型参数及 optimizer 状态（自动解包 DDP）。"""
         raw_model = self.model.module if hasattr(self.model, "module") else self.model
         merged_extra = dict(extra) if extra else {}
         if self.ema is not None:

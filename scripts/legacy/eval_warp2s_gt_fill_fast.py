@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""评估基线：2s 前 GT warp 到当前，并用当前 fast logits 填充未知区域。"""
 
 from __future__ import annotations
 
@@ -92,7 +91,6 @@ def load_labels_selected_npz(
     mask_key: str,
     default_mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """仅读取 labels.npz 的必要字段，减少不必要的解压与拷贝。"""
     with np.load(path, allow_pickle=False) as data:
         semantics = data["semantics"]
         mask = data[mask_key] if mask_key in data.files else default_mask
@@ -100,7 +98,6 @@ def load_labels_selected_npz(
 
 
 def load_logits_last_frame_inputs(path: str) -> dict[str, np.ndarray]:
-    """仅读取解码最后一帧需要的稀疏字段。"""
     with np.load(path, allow_pickle=False) as data:
         return {
             "sparse_coords": data["sparse_coords"],
@@ -118,7 +115,6 @@ def labels_to_logits_on_device(
     neg_value: float = -5.0,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """在目标设备直接构造 one-hot logits，避免 CPU one-hot 后再整块搬运。"""
     labels = torch.from_numpy(semantics.astype(np.int64, copy=False)).to(
         device=device, dtype=torch.long
     )
@@ -139,7 +135,6 @@ def load_sample_payload(
     gt_mask_key: str,
     default_mask_np: np.ndarray,
 ) -> dict[str, Any]:
-    """读取单样本评估所需的全部 CPU 数据。"""
     slow_gt_path = resolve_path(root_path, info["slow_gt_path"])
     slow_semantics, slow_mask = load_labels_selected_npz(
         slow_gt_path,
@@ -172,7 +167,6 @@ def iter_prefetched(
     io_workers: int,
     prefetch: int,
 ) -> Iterator[dict[str, Any]]:
-    """按顺序产出样本，后台并发读取后续样本以隐藏磁盘 I/O。"""
     total = len(infos)
     if io_workers <= 0 or total <= 1:
         for info in infos:
@@ -212,7 +206,6 @@ def decode_last_frame_sparse_topk(
     device: torch.device,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """仅解码最后一帧 fast logits，返回 (C, X, Y, Z)。"""
     x_size, y_size, z_size = grid_size
     num_frames = int(frame_splits.shape[0] - 1)
     if num_frames <= 0:
@@ -303,7 +296,6 @@ def main() -> None:
 
     with torch.inference_mode():
         for sample in iterator:
-            # 1) slow(2s 前) GT -> logits（直接在目标设备构造）
             slow_logits = labels_to_logits_on_device(
                 semantics=sample["slow_semantics"],
                 num_classes=num_classes,
@@ -315,7 +307,6 @@ def main() -> None:
             ).to(device=device)
             slow_logits.mul_(slow_mask.unsqueeze(0))
 
-            # 2) 解码当前时刻 fast logits（logits.npz 最后一帧）
             logits_npz = sample["logits"]
             fast_now = decode_last_frame_sparse_topk(
                 sparse_coords=logits_npz["sparse_coords"],
@@ -331,7 +322,6 @@ def main() -> None:
                 dtype=torch.float32,
             )
 
-            # 3) 2s 前 GT warp 到当前时刻（logits+cover 一次性 warp）
             transform = torch.from_numpy(sample["T_slow_to_curr"]).to(
                 device=device, dtype=torch.float32
             )
@@ -348,11 +338,9 @@ def main() -> None:
             warped_cover = warped[num_classes]
             known_mask = warped_cover > float(args.mask_thresh)
 
-            # 4) 未覆盖区域用当前 fast logits 填充
             fast_now[:, known_mask] = warped_slow[:, known_mask]
             pred = fast_now.argmax(dim=0).cpu().numpy()
 
-            # 5) 累计 IoU
             metric.add_batch(
                 semantics_pred=pred,
                 semantics_gt=sample["gt_semantics"],

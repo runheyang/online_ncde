@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""多线程评估已保存的 SurroundOcc ALOcc dense top-k logits。
-
-默认评估 alocc3d_surroundocc 的 val split：
-
-    conda run -n neural_ode python tests/evoocc/eval_surroundocc_saved_logits_miou.py
-
-仅快速检查前 100 个样本：
-
-    conda run -n neural_ode python tests/evoocc/eval_surroundocc_saved_logits_miou.py --limit 100
-"""
 
 from __future__ import annotations
 
@@ -229,7 +219,7 @@ def _eval_one(
         )
     except FileNotFoundError as exc:
         return {"status": "missing_gt", "token": token, "path": str(exc)}
-    except Exception as exc:  # noqa: BLE001 - 评估脚本需要不中断地统计坏样本
+    except Exception as exc:  # noqa: BLE001
         return {"status": "error", "token": token, "error": repr(exc)}
 
     return {

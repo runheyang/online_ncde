@@ -1,20 +1,3 @@
-"""Ray first-hit sidecar 加载器（供 RayLoss 训练使用）。
-
-数据布局（由 scripts/gen_evoocc_ray_sidecar.py 产出）：
-
-    <dir>/
-      <split>_dist.npy        (N, 4, K, R) float16
-                           finite = hit 距离（米）
-                           +inf   = 监督视野内 no-hit
-                           NaN    = ignore
-      <split>_origin.npy      (N, 4, K, 3) float32
-      <split>_origin_mask.npy (N, 4, K)    uint8     1 = 该 origin 有效
-      <split>_sup_mask.npy    (N, 4)       uint8     1 = 该 sup 有效
-      <split>_meta.pkl        {"schema_version", "num_origins", "token_to_idx", ...}
-
-RaySidecar 以 mmap 方式打开 npy，按 token 查表，返回 (num_sup, K, *) 形状。
-"""
-
 from __future__ import annotations
 
 import os
@@ -30,8 +13,6 @@ _SUPPORTED_SCHEMAS = {_SCHEMA_V3, _LEGACY_SCHEMA_V3}
 
 
 class RaySidecar:
-    """按 token 查 ray sidecar 的轻量包装。"""
-
     def __init__(self, sidecar_dir: str, split: str) -> None:
         prefix = f"{split}_"
         dist_path = os.path.join(sidecar_dir, prefix + "dist.npy")
@@ -56,7 +37,6 @@ class RaySidecar:
         )
         self.ray_horizon_m = float(meta.get("ray_horizon_m", 0.0))
 
-        # mmap 打开，worker 进程 / DDP rank 间共享 page cache
         self.dist = np.load(dist_path, mmap_mode="r")
         self.origin = np.load(origin_path, mmap_mode="r")
         self.sup_mask = np.load(sup_mask_path, mmap_mode="r")
@@ -84,26 +64,13 @@ class RaySidecar:
     def has(self, token: str) -> bool:
         return token in self.token_to_idx
 
+    # dist (num_sup, K, R): finite = hit distance in meters, inf = no-hit within view, NaN = ignore
     def query(
         self, token: str
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-        """按 token 查一条样本。
-
-        返回 tuple:
-            dist:        (num_sup, K, R) float32
-                         finite = hit 距离（米）
-                         inf    = 监督视野内 no-hit
-                         NaN    = ignore
-            origin:      (num_sup, K, 3) float32
-            sup_mask:    (num_sup,)      uint8     1 = 该 sup 有效
-            origin_mask: (num_sup, K)    uint8     1 = 该 origin 有效
-
-        token 不存在时返回 None。
-        """
         idx = self.token_to_idx.get(token)
         if idx is None:
             return None
-        # mmap 切片 copy 成 writable
         dist = np.array(self.dist[idx], dtype=np.float32, copy=True)
         origin = np.array(self.origin[idx], dtype=np.float32, copy=True)
         sup_mask = np.array(self.sup_mask[idx], dtype=np.uint8, copy=True)

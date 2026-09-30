@@ -1,5 +1,3 @@
-"""Learned direct fusion 与 EvoOcc 的卷积 FLOPs 估算。"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,8 +5,6 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ComputeEstimate:
-    """统一记录 MACs；FLOPs 按一次乘加等于 2 FLOPs 计算。"""
-
     macs: int
 
     @property
@@ -49,10 +45,8 @@ def estimate_evoocc_stepwise(
     inner_dim: int = 24,
     num_body_blocks: int = 3,
 ) -> ComputeEstimate:
-    """估算 Euler EvoOcc 在四时刻 stepwise 输出下的 Conv3d MACs。"""
     voxels = int(grid_size[0] * grid_size[1] * grid_size[2])
 
-    # fast 序列编码一次，slow anchor 编码一次。
     encoder = (num_frames + 1) * _conv3d_macs(
         voxels,
         num_classes,
@@ -126,7 +120,6 @@ def estimate_learned_direct_fusion_stepwise(
     decoder_channels: int = 32,
     num_body_blocks: int = 3,
 ) -> ComputeEstimate:
-    """估算 direct fusion 四个独立目标输出的 Conv3d MACs。"""
     input_voxels = int(
         input_grid_size[0] * input_grid_size[1] * input_grid_size[2]
     )
@@ -134,7 +127,6 @@ def estimate_learned_direct_fusion_stepwise(
         latent_grid_size[0] * latent_grid_size[1] * latent_grid_size[2]
     )
 
-    # 一个 slow anchor，加 num_targets 个 current fast。
     encoders = (num_targets + 1) * _conv3d_macs(
         latent_voxels,
         num_classes,

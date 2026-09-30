@@ -1,5 +1,3 @@
-"""构造 evoocc Occ3D 数据集。"""
-
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -21,7 +19,6 @@ def build_evoocc_dataset(
     min_history_completeness: int | None = None,
     eval_only_mode: bool = False,
 ) -> Occ3DEvoOccDataset:
-    """根据 data_cfg 构造 evoocc 数据集。"""
     variant = str(data_cfg.get("dataset_variant", "occ3d")).strip().lower()
     if variant not in {"occ3d", "surroundocc"}:
         raise ValueError(

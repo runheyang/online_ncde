@@ -1,5 +1,3 @@
-"""evoocc 损失函数。"""
-
 from __future__ import annotations
 
 import torch
@@ -15,7 +13,6 @@ def resize_labels_and_mask_to_logits(
     labels: torch.Tensor,
     mask: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """当输出分辨率与 GT 不一致时，对标签和 mask 做最近邻对齐。"""
     target_shape = logits.shape[-3:]
     if tuple(labels.shape[-3:]) == tuple(target_shape):
         return labels, mask
@@ -36,8 +33,6 @@ def resize_labels_and_mask_to_logits(
 
 
 class FocalLoss(nn.Module):
-    """多类 Focal Loss（sigmoid BCE 形式）。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -78,11 +73,9 @@ class FocalLoss(nn.Module):
             loss = loss * weights
 
         if pixel_weights is not None:
-            # 全区域监督，按权重缩放
             loss = loss * pixel_weights.unsqueeze(1)
             denom = pixel_weights.sum().clamp_min(self.eps) * self.num_classes
         elif mask is not None:
-            # 二值 mask，mask 外忽略
             loss = loss * mask.unsqueeze(1)
             denom = mask.sum().clamp_min(self.eps) * self.num_classes
         else:
@@ -91,8 +84,6 @@ class FocalLoss(nn.Module):
 
 
 class EvoOccLoss(nn.Module):
-    """手动调权 Focal + Lovasz。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -112,8 +103,6 @@ class EvoOccLoss(nn.Module):
         self.lambda_focal = float(lambda_focal)
         self.lambda_lovasz = float(lambda_lovasz)
         self.ignore_index = ignore_index
-        # focal_mask_weight 不为 None 时，Focal 对全区域监督：
-        # mask 内 ×focal_mask_weight，mask 外 ×1.0；Lovász 仍只算 mask 内。
         self.focal_mask_weight = focal_mask_weight
 
     def forward(
@@ -125,7 +114,7 @@ class EvoOccLoss(nn.Module):
         targets, mask = resize_labels_and_mask_to_logits(logits, targets, mask)
 
         if self.focal_mask_weight is not None and mask is not None:
-            # Focal 全区域监督，mask 内高权重
+            # With focal_mask_weight, Focal covers all voxels (in-mask weighted up); Lovasz stays in-mask only.
             pixel_weights = torch.where(
                 mask > 0.5,
                 torch.tensor(self.focal_mask_weight, device=logits.device, dtype=logits.dtype),
@@ -133,7 +122,6 @@ class EvoOccLoss(nn.Module):
             )
             focal = self.focal(logits, targets, pixel_weights=pixel_weights)
         else:
-            # 原始行为：只算 mask 内
             focal = self.focal(logits, targets, mask)
         probs = F.softmax(logits, dim=1)
         if mask is not None:
@@ -165,18 +153,14 @@ class EvoOccLoss(nn.Module):
         total = focal_weighted + lovasz_weighted
         return {
             "total": total,
-            # 统计/显示口径与 total 保持一致，返回加权后的分项。
             "focal": focal_weighted,
             "aux": lovasz_weighted,
-            # 同时保留未加权值，便于需要时单独分析。
             "focal_raw": focal,
             "aux_raw": lovasz,
         }
 
 
 class OccupancyDiceSemCeLoss(nn.Module):
-    """SurroundOcc dense GT loss：占用 BCE/Dice + 非 free 语义 CE/Dice。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -244,7 +228,6 @@ class OccupancyDiceSemCeLoss(nn.Module):
         sem_logits: torch.Tensor,
         sem_targets: torch.Tensor,
     ) -> torch.Tensor:
-        """只对当前 batch 出现的 non-free 类计算 Dice。"""
         probs = F.softmax(sem_logits, dim=1)
         one_hot = F.one_hot(
             sem_targets,
@@ -283,7 +266,6 @@ class OccupancyDiceSemCeLoss(nn.Module):
         )
         occ_bce = (occ_bce_raw * valid_f).sum() / denom
 
-        # Dice 只刻画 occupied overlap，避免 dense free 直接主导语义类梯度。
         occ_prob = torch.sigmoid(occ_logits)
         occ_prob_valid = occ_prob * valid_f
         target_occ_valid = target_occ * valid_f
@@ -311,7 +293,6 @@ class OccupancyDiceSemCeLoss(nn.Module):
         total = occ_total + sem_total
         return {
             "total": total,
-            # 兼容 Trainer 现有日志：focal 表示 occupancy 部分，aux 表示语义部分。
             "focal": occ_total,
             "aux": sem_total,
             "occ_bce_raw": occ_bce,
@@ -324,15 +305,6 @@ class OccupancyDiceSemCeLoss(nn.Module):
 
 
 class SegAndRayLoss(nn.Module):
-    """seg loss + ray first-hit loss 的组合包装。
-
-    - seg loss 照旧接收 (logits, targets, mask)，返回 dict（必含 total/focal/aux）。
-    - ray loss 仅在 forward 的 kwargs 里同时给出 ray_origins / gt_dist 时才会计算；
-      eval 路径刻意不传这两个字段（避免白跑），此时只记录 seg loss。
-    - 返回 dict 保持 seg loss 的 key 兼容，额外带 ray_* 字段，便于日志。
-    """
-
-    # trainer 靠这个标志位判断能否把 ray_* kwargs 透传进来，避免和 isinstance 绑死。
     accepts_ray_kwargs: bool = True
 
     def __init__(
@@ -345,7 +317,6 @@ class SegAndRayLoss(nn.Module):
         self.seg = seg_loss
         self.ray = ray_loss
         self.lambda_ray = float(lambda_ray)
-        # 14040 条固定 ray 方向作为 buffer，自动跟 model 同 device/dtype。
         self.register_buffer("ray_dirs", generate_lidar_rays("cpu"), persistent=False)
 
     def forward(
@@ -357,8 +328,6 @@ class SegAndRayLoss(nn.Module):
         ray_origins: torch.Tensor | None = None,
         gt_dist: torch.Tensor | None = None,
         origin_mask: torch.Tensor | None = None,
-        # per-ray 过滤暂未接入；如需 FOV/方向屏蔽，直接在此处构造 valid_mask
-        # 透传给 self.ray(valid_mask=...)，不要再添加假参数。
     ) -> dict[str, torch.Tensor]:
         seg_out = self.seg(logits, targets, mask)
 
@@ -375,6 +344,7 @@ class SegAndRayLoss(nn.Module):
             ray_origins=ray_origins,
             ray_dirs=self.ray_dirs,
             gt_dist=gt_dist,
+            # Per-ray filtering is not wired; build valid_mask here if FOV masking is needed.
             valid_mask=None,
             origin_mask=origin_mask,
         )
@@ -388,7 +358,6 @@ class SegAndRayLoss(nn.Module):
 
 
 def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
-    """根据配置构建 loss 函数。"""
     loss_type = loss_cfg.get("type", "focal_lovasz")
     if loss_type == "focal_lovasz":
         seg = EvoOccLoss(
@@ -420,8 +389,6 @@ def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
     if not ray_cfg:
         return seg
 
-    # pc_range / free_index 由 train 脚本从 data 配置注入；其余参数 yaml 可覆盖，
-    # 未填字段 fallback 到 RayLoss 默认值。
     pc_range = ray_cfg.get("pc_range") or loss_cfg.get("pc_range")
     free_index = ray_cfg.get("free_index")
     if pc_range is None or free_index is None:
@@ -429,7 +396,6 @@ def build_loss(loss_cfg: dict, num_classes: int) -> nn.Module:
             "build_loss(ray): 需要 pc_range 与 free_index（由 train 脚本注入 loss_cfg）。"
         )
     ray_kwargs: dict = {}
-    # 显式列出所有可调参数，避免 yaml 里混入无关 key 被误传给 RayLoss
     for key in (
         "num_samples",
         "step_m",

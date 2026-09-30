@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""StreamingFlow-style BEV GRU-ODE baseline 评估脚本。"""
 
 from __future__ import annotations
 

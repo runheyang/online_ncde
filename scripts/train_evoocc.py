@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""训练 EvoOcc。"""
 
 from __future__ import annotations
 
@@ -21,11 +20,9 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
 
-# 输入形状固定，开启 benchmark 让 cuDNN 自动选 conv 算法
 torch.backends.cudnn.benchmark = True
 from torch.utils.data.distributed import DistributedSampler
 
-# 使用 file_system 共享策略，避免低 ulimit 下多 epoch 重建 DataLoader 导致 fd 耗尽
 try:
     mp.set_sharing_strategy("file_system")
 except RuntimeError:
@@ -68,7 +65,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-new-run", action="store_true", help="忽略 checkpoint 里的 wandb_run_id，强制新建 run")
     parser.add_argument("--cosine-annealing", action="store_true", help="启用余弦退火学习率调度")
     parser.add_argument("--min-lr", type=float, default=1.0e-5, help="余弦退火最低学习率")
-    # 调参工作流参数
     parser.add_argument("--epochs", type=int, default=0, help="覆盖 config 中的 epochs（0=不覆盖）")
     parser.add_argument("--ray-override", type=str, default="",
                         help="JSON 字符串覆盖 loss.ray 参数，如 '{\"lambda_ray\": 0.3}'")
@@ -94,7 +90,6 @@ def build_subset(dataset, limit: int):
 
 
 def build_scheduler(optimizer, train_cfg: dict, args):
-    """构建学习率调度器（线性 warmup + 可选余弦退火）。"""
     total_epochs = int(train_cfg["epochs"])
     warmup_epochs = int(train_cfg.get("warmup_epochs", 1))
     base_lr = float(train_cfg["lr"])
@@ -126,10 +121,6 @@ def build_dataset(
     ray_sidecar_split: str | None = None,
     min_history_completeness: int | None = None,
 ) -> Occ3DEvoOccDataset:
-    """根据 data_cfg 构造 Occ3DEvoOccDataset。
-
-    默认过滤短历史样本（history_completeness < 4），可通过参数显式覆盖。
-    """
     min_hc = (
         int(data_cfg.get("min_history_completeness", 4))
         if min_history_completeness is None
@@ -148,25 +139,18 @@ def build_dataset(
 
 
 def to_float(value):
-    """将标量安全转换为 Python float。"""
     if isinstance(value, numbers.Real):
         return float(value)
     return None
 
 
 def _cleanup_gpu_cache():
-    """强制回收 Python 垃圾并释放 CUDA 缓存。
-    调用前须确保 DataLoader 引用已被 del 掉。
-    """
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
 def setup_ddp_early() -> tuple[int, bool]:
-    """早期阶段：仅获取 local_rank 并设置 CUDA 设备，不初始化进程组。
-    返回 (local_rank, use_ddp)。
-    """
     if "LOCAL_RANK" not in os.environ:
         return 0, False
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -175,13 +159,6 @@ def setup_ddp_early() -> tuple[int, bool]:
 
 
 def setup_ddp_init(local_rank: int) -> tuple[int, int, int]:
-    """初始化 DDP 进程组。须在模型创建并 warmup 之后调用。
-
-    默认使用 gloo 后端：Blackwell GPU + NCCL 2.26 存在兼容性问题
-    （Conv3d 初始化产生的异步 CUDA error 被 NCCL watchdog 误判为致命错误），
-    gloo 通过共享内存同步梯度，同节点双卡性能损失很小。
-    如需切换后端可设置 DDP_BACKEND=nccl 环境变量。
-    """
     if "LOCAL_RANK" not in os.environ:
         return 0, local_rank, 1
     backend = os.environ.get("DDP_BACKEND", "gloo")
@@ -201,10 +178,8 @@ def main() -> None:
     local_rank, use_ddp = setup_ddp_early()
 
     cfg = load_config_with_base(args.config)
-    # --epochs 覆盖
     if args.epochs > 0:
         cfg["train"]["epochs"] = args.epochs
-    # --ray-override：JSON 覆盖 loss.ray 参数
     if args.ray_override:
         ray_overrides = json.loads(args.ray_override)
         if "loss" not in cfg:
@@ -214,28 +189,24 @@ def main() -> None:
         cfg["loss"]["ray"].update(ray_overrides)
         if local_rank == 0:
             print(f"[ray-override] {ray_overrides}")
-    # --lambda-fast-kl：覆盖 train.lambda_fast_kl
     if args.lambda_fast_kl is not None:
         if "train" not in cfg:
             cfg["train"] = {}
         cfg["train"]["lambda_fast_kl"] = float(args.lambda_fast_kl)
         if local_rank == 0:
             print(f"[lambda-fast-kl] override = {args.lambda_fast_kl}")
-    # --lambda-lovasz：覆盖 loss.lambda_lovasz
     if args.lambda_lovasz is not None:
         if "loss" not in cfg:
             cfg["loss"] = {}
         cfg["loss"]["lambda_lovasz"] = float(args.lambda_lovasz)
         if local_rank == 0:
             print(f"[lambda-lovasz] override = {args.lambda_lovasz}")
-    # --lambda-focal：覆盖 loss.lambda_focal
     if args.lambda_focal is not None:
         if "loss" not in cfg:
             cfg["loss"] = {}
         cfg["loss"]["lambda_focal"] = float(args.lambda_focal)
         if local_rank == 0:
             print(f"[lambda-focal] override = {args.lambda_focal}")
-    # --fast-logits-root：覆盖 data.fast_logits_root
     if args.fast_logits_root is not None:
         if "data" not in cfg:
             cfg["data"] = {}
@@ -270,7 +241,6 @@ def main() -> None:
 
     num_workers = int(train_cfg["num_workers"])
 
-    # --- 构建 val dataset 和 dataloader 参数 ---
     val_dataset = None
     val_loader_kwargs = None
     val_info_path = data_cfg.get("val_info_path", "")
@@ -282,7 +252,6 @@ def main() -> None:
             logits_loader=logits_loader,
             ray_sidecar_split="val",
         )
-        # val_scene_count=0 时走全量评估，不做 Subset
         if args.val_scene_count > 0:
             scene_names = [info.get("scene_name", "") for info in val_dataset.infos]
             unique_scenes = sorted({name for name in scene_names if name})
@@ -307,11 +276,8 @@ def main() -> None:
         )
         if val_workers > 0:
             val_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-            # val 强制关闭 persistent_workers：eval 频率低，worker 用完即释放，
-            # 避免与 train workers 同时常驻导致内存峰值过高
             val_loader_kwargs["persistent_workers"] = False
 
-    # DDP 模式下按 local_rank 分配 GPU，否则用配置值
     device = torch.device(f"cuda:{local_rank}" if use_ddp else (train_cfg["device"] if torch.cuda.is_available() else "cpu"))
     model_variant = str(model_cfg.get("variant", "dense")).lower()
     common_kwargs = dict(
@@ -337,14 +303,12 @@ def main() -> None:
             f"未知的 model.variant: {model_variant!r}，仅支持 'dense'"
         )
 
-    # 先加载权重
     start_epoch = 1
     resumed_payload = None
     if args.resume:
         resumed_payload = load_checkpoint(args.resume, model=model, optimizer=None, strict=False)
         start_epoch = resumed_payload.get("epoch", 0) + 1
 
-    # 初始化进程组（默认 gloo，同节点双卡性能损失小）
     rank, local_rank, world_size = setup_ddp_init(local_rank)
     is_main = rank == 0
     if is_main:
@@ -355,7 +319,6 @@ def main() -> None:
     if is_main and args.resume:
         print(f"[resume] 从 epoch={start_epoch} 继续训练")
 
-    # EMA：在 DDP 包装前基于原始权重构建，避免 deepcopy DDP 带来的复杂性
     ema = None
     ema_cfg = train_cfg.get("ema", {}) or {}
     if bool(ema_cfg.get("enabled", True)):
@@ -369,11 +332,9 @@ def main() -> None:
             if is_main:
                 print(f"[ema] resumed num_updates={ema.num_updates}")
 
-    # DDP 包装
     if use_ddp:
         model = DDP(model, device_ids=[local_rank])
 
-    # --- DistributedSampler 需要进程组已初始化，放在 init_ddp 之后 ---
     train_sampler = DistributedSampler(train_dataset, shuffle=True) if use_ddp else None
     train_loader_kwargs = dict(
         batch_size=int(train_cfg["batch_size"]),
@@ -385,8 +346,6 @@ def main() -> None:
     )
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = loader_cfg.get("prefetch_factor", 2)
-        # DDP 多进程时关闭 persistent_workers，避免 train/val 切换期间
-        # worker 同时常驻导致内存峰值过高（3 卡 × 16 workers × 2 loader = 96 进程）
         train_loader_kwargs["persistent_workers"] = False if use_ddp else loader_cfg.get("persistent_workers", False)
 
     optimizer = torch.optim.AdamW(
@@ -394,7 +353,6 @@ def main() -> None:
         lr=float(train_cfg["lr"]),
         weight_decay=float(train_cfg["weight_decay"]),
     )
-    # resume 时恢复 optimizer 状态
     if args.resume:
         opt_state = torch.load(args.resume, map_location="cpu").get("optimizer", None)
         if opt_state is not None:
@@ -402,14 +360,12 @@ def main() -> None:
 
     scheduler = build_scheduler(optimizer, train_cfg, args)
     if scheduler is not None and start_epoch > 1:
-        # resume 快进 scheduler 到当前 epoch，无需对应 optimizer.step()，suppress 警告
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*before.*optimizer.step.*")
             for _ in range(start_epoch - 1):
                 scheduler.step()
 
-    # 给 build_loss 注入 ray 需要的几何常量（yaml 里不重复填）。
     loss_cfg.setdefault("free_index", int(data_cfg["free_index"]))
     ray_cfg = loss_cfg.get("ray", None)
     if ray_cfg is not None:
@@ -439,12 +395,9 @@ def main() -> None:
         metric_variant=str(data_cfg.get("metric_variant", data_cfg.get("dataset_variant", "occ3d"))),
     )
 
-    # --- 推导 output_dir：resume 时复用原目录，否则新建时间戳目录 ---
     resumed_wandb_id = None
     if args.resume:
-        # checkpoint 路径形如 .../20260412_225327/epoch_4.pth，取父目录
         output_dir = os.path.dirname(os.path.abspath(args.resume))
-        # 从 checkpoint 中读取 wandb_run_id 用于续接
         _ckpt_payload = torch.load(args.resume, map_location="cpu")
         resumed_wandb_id = _ckpt_payload.get("wandb_run_id", None)
         if args.wandb_new_run:
@@ -473,7 +426,6 @@ def main() -> None:
         if not save_checkpoints:
             print("[ckpt] save_checkpoints=false，跳过 epoch 权重保存")
 
-    # --- wandb 初始化：resume 时续接同一个 run ---
     run = None
     if args.wandb and is_main:
         if wandb is None:
@@ -489,7 +441,6 @@ def main() -> None:
             },
         )
         if resumed_wandb_id:
-            # 续接之前的 run
             wandb_kwargs["id"] = resumed_wandb_id
             wandb_kwargs["resume"] = "allow"
         else:
@@ -499,13 +450,10 @@ def main() -> None:
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("val/*", step_metric="epoch")
 
-    # 循环外创建 train_loader（persistent_workers 常驻），避免每轮重建开销
     train_loader = DataLoader(train_dataset, **train_loader_kwargs)
-    # val_loader 在循环外创建一次，persistent_workers=False 故 worker 每次迭代结束自动回收
     val_loader = DataLoader(val_dataset, **val_loader_kwargs) if val_dataset is not None else None
 
     for epoch in range(start_epoch, int(train_cfg["epochs"]) + 1):
-        # DDP 模式下每 epoch 设置 sampler epoch，保证数据打乱不同
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -523,7 +471,6 @@ def main() -> None:
                 if key.startswith("loss_t"):
                     train_sup_parts.append(f"{key}={float(value):.4f}")
             train_sup_text = (" " + " ".join(train_sup_parts)) if train_sup_parts else ""
-            # 仅在本 epoch 有 ray 监督样本时打印 ray 分项。
             ray_total_text = ""
             if "ray" in train_metrics:
                 ray_total_text = (
@@ -552,7 +499,6 @@ def main() -> None:
                 )
                 run.log(train_payload, commit=not should_eval)
 
-        # eval / checkpoint 仅 rank 0 执行，其他 rank 在 barrier 处等待
         if is_main:
             if val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
                 val_metrics = trainer.evaluate(
@@ -645,7 +591,6 @@ def main() -> None:
                         f"RayIoU@4={rayiou_result['RayIoU@4']:.4f}"
                     )
 
-                # 分箱 ray 统计
                 if need_pcds and rayiou_result is not None:
                     from evoocc.ops.dvr.binned_ray_stats import compute_binned_ray_stats
                     binned_ray_result = compute_binned_ray_stats(raw_pcd_pred, raw_pcd_gt)
@@ -683,7 +628,6 @@ def main() -> None:
                             payload[f"val/{key}"] = float(rayiou_result[key])
                     run.log(payload, commit=True)
 
-            # 保存指标 JSON（每次 eval 覆盖，最终保留最后 epoch 结果）
             if args.save_metrics_json and val_loader is not None and args.eval_every > 0 and epoch % args.eval_every == 0:
                 metrics_json = {
                     "epoch": epoch,
@@ -693,12 +637,10 @@ def main() -> None:
                 }
                 if val_metrics.get("occupied_iou", None) is not None:
                     metrics_json["occupied_iou"] = float(val_metrics["occupied_iou"])
-                # Fast-KL 诊断
                 if "fast_kl" in train_metrics:
                     metrics_json["fast_kl"] = {
                         "train": float(train_metrics["fast_kl"]),
                     }
-                # ray loss 配置记录
                 if ray_cfg is not None:
                     metrics_json["ray_config"] = {
                         k: v for k, v in ray_cfg.items()
@@ -726,7 +668,6 @@ def main() -> None:
                 trainer.save_checkpoint(ckpt_path, epoch=epoch, extra=ckpt_extra or None)
                 print(f"[ckpt] saved -> {ckpt_path}")
 
-        # 同步所有 rank，等待 rank 0 完成 eval/checkpoint
         if use_ddp:
             dist.barrier()
 

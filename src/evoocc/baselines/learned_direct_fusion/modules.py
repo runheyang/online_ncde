@@ -1,5 +1,3 @@
-"""Learned direct fusion baseline 的网络模块。"""
-
 from __future__ import annotations
 
 from typing import Sequence
@@ -13,12 +11,6 @@ from evoocc.utils.nn import resolve_group_norm_groups
 
 
 class XYDownsampleEncoder(nn.Module):
-    """仅下采样 XY，并在低分辨率空间编码特征。
-
-    先对相邻 voxel 做平均，使低分辨率 voxel 中心与对应物理网格中心对齐；
-    随后的 3×3×3 卷积只负责特征编码，不再改变空间尺寸。
-    """
-
     def __init__(
         self,
         in_channels: int,
@@ -32,6 +24,7 @@ class XYDownsampleEncoder(nn.Module):
             raise ValueError(f"xy_downsample_factor 必须为正整数，当前 {factor}")
         self.xy_downsample_factor = factor
         groups = resolve_group_norm_groups(out_channels, gn_groups)
+        # Average pooling keeps low-res voxel centers aligned with the physical grid.
         self.pool = nn.AvgPool3d(
             kernel_size=(1, factor, factor),
             stride=(1, factor, factor),
@@ -48,7 +41,6 @@ class XYDownsampleEncoder(nn.Module):
         self.act = nn.SiLU(inplace=True)
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        """输入/输出均采用 `(B,C,X,Y,Z)`。"""
         if logits.dim() != 5:
             raise ValueError(
                 f"encoder 输入必须为 5D (B,C,X,Y,Z)，当前 {tuple(logits.shape)}"
@@ -68,8 +60,6 @@ class XYDownsampleEncoder(nn.Module):
 
 
 class _ResidualDilatedBlock(nn.Module):
-    """3×3×3 膨胀卷积残差块。"""
-
     def __init__(self, channels: int, dilation: int, gn_groups: int) -> None:
         super().__init__()
         groups = resolve_group_norm_groups(channels, gn_groups)
@@ -89,8 +79,6 @@ class _ResidualDilatedBlock(nn.Module):
 
 
 class DirectFusionNet(nn.Module):
-    """在低分辨率空间直接融合 warped slow 与 current fast 特征。"""
-
     def __init__(
         self,
         feature_dim: int = 288,
@@ -124,7 +112,6 @@ class DirectFusionNet(nn.Module):
         warped_slow: torch.Tensor,
         current_fast: torch.Tensor,
     ) -> torch.Tensor:
-        """输入/输出均为 `(B,C,X,Y,Z)`，各目标时刻互相独立。"""
         if warped_slow.shape != current_fast.shape:
             raise ValueError(
                 "slow/fast feature 形状必须一致，"
@@ -145,8 +132,6 @@ class DirectFusionNet(nn.Module):
 
 
 class XYUpsampleResidualDecoder(nn.Module):
-    """将低分辨率 latent 解码为目标尺寸的 logits residual。"""
-
     def __init__(
         self,
         in_channels: int = 288,
@@ -174,7 +159,6 @@ class XYUpsampleResidualDecoder(nn.Module):
         latent: torch.Tensor,
         output_shape_xyz: tuple[int, int, int],
     ) -> torch.Tensor:
-        """输入 `(B,C,X_l,Y_l,Z)`，输出 `(B,C_out,X,Y,Z)`。"""
         if latent.dim() != 5:
             raise ValueError(
                 f"decoder 输入必须为 5D (B,C,X,Y,Z)，当前 {tuple(latent.shape)}"

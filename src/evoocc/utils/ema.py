@@ -1,5 +1,3 @@
-"""模型 EMA（指数移动平均），用于抑制训练后期指标震荡。"""
-
 from __future__ import annotations
 
 import copy
@@ -9,13 +7,10 @@ import torch
 
 
 def _unwrap(model: torch.nn.Module) -> torch.nn.Module:
-    # DDP/Compiled 等包装一律剥到原始模块，保证 state_dict 对齐。
-    return getattr(model, "module", model)
+    return getattr(model, "module", model)  # strip DDP wrapper so state_dict keys align
 
 
 class ModelEMA:
-    """维护模型参数的指数移动平均，供 eval 时使用。"""
-
     def __init__(
         self,
         model: torch.nn.Module,
@@ -34,13 +29,9 @@ class ModelEMA:
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
-        """每个 optimizer.step() 后调用一次。
-
-        采用 `min(decay, (1+n)/(10+n))` 的 warmup，避免 EMA 在训练早期被初始
-        权重拖住。num_updates 较大时自然退化为固定 decay。
-        """
         self.num_updates += 1
         n = self.num_updates
+        # Warmup: min(decay, (1+n)/(10+n)) so early EMA is not anchored to init weights.
         effective_decay = min(self.decay, (1.0 + n) / (10.0 + n))
 
         src_sd = _unwrap(model).state_dict()
@@ -53,7 +44,7 @@ class ModelEMA:
                     alpha=1.0 - effective_decay,
                 )
             else:
-                # BN running stats 等整型/long 缓冲直接 copy，不做平均。
+                # Non-float buffers (e.g. BN counters) are copied, not averaged.
                 ema_v.copy_(src_v.to(ema_v.device))
 
     def state_dict(self) -> Dict[str, Any]:

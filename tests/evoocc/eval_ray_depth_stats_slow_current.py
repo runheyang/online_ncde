@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""按 ray 统计「慢系统当前帧 logits」与 fast baseline 的 first-hit 深度误差和 RayIoU。
-
-与 eval_ray_depth_stats.py 的差别：
-  - 不跑 EvoOcc 对齐器；不需要 checkpoint。
-  - slow_logit_path 重定向到 **当前 keyframe** token（即
-    `slow_logit_root/{scene}/{current_token}/logits.npz`），
-    而不是 canonical pkl 默认指向的 2s 前 keyframe（slow_sample_token）。
-  - 评估慢系统在当前帧时刻能输出什么——给 EvoOcc 演化的「上界」。
-
-用法示例：
-    python tests/evoocc/eval_ray_depth_stats_slow_current.py \
-        --config configs/evoocc/<配置名>.yaml --limit 50
-
-统计内容（与 eval_ray_depth_stats.py 一致，只是把 aligned 换成 slow_current）：
-  1. 每条 ray 的 GT/Pred first-hit depth、abs 深度误差
-  2. 预测比 GT 更近/更远的比例
-  3. 深度偏差超过阈值的比例
-  4. 分 mask 内/外、近距/远距 统计
-  5. 分区域 RayIoU 对比（fast(last) vs slow_current）
-"""
 
 from __future__ import annotations
 
@@ -50,7 +30,6 @@ from evoocc.metrics import (  # noqa: E402
     apply_free_threshold,
 )
 
-# --- DVR 相关常量（与 ray_metrics.py 保持一致）---
 _pc_range = [-40, -40, -1.0, 40, 40, 5.4]
 _voxel_size = 0.4
 
@@ -63,10 +42,6 @@ occ_class_names = [
 FREE_ID = len(occ_class_names) - 1
 DYNAMIC_IDS = set(OCC3D_DYNAMIC_OBJECT_IDX)
 
-
-# ---------------------------------------------------------------------------
-# DVR 加载（延迟编译）
-# ---------------------------------------------------------------------------
 
 _dvr = None
 
@@ -88,7 +63,6 @@ def get_dvr():
 
 
 def generate_lidar_rays() -> np.ndarray:
-    """生成 lidar 射线方向（与 ray_metrics.py 一致）。"""
     pitch_angles = []
     for k in range(10):
         angle = math.pi / 2 - math.atan(k + 1)
@@ -109,24 +83,19 @@ def generate_lidar_rays() -> np.ndarray:
     return np.array(lidar_rays, dtype=np.float32)
 
 
-# ---------------------------------------------------------------------------
-# 单样本 ray casting
-# ---------------------------------------------------------------------------
-
 def raycast_one_sample(
     sem_pred: np.ndarray,
     lidar_rays: torch.Tensor,
     output_origin: torch.Tensor,
 ) -> dict[str, np.ndarray]:
-    """对一个 volume 做 ray casting，返回每条 ray 的 first-hit 信息。"""
     dvr = get_dvr()
     T = output_origin.shape[1]
 
     occ = copy.deepcopy(sem_pred)
     occ[sem_pred < FREE_ID] = 1
     occ[sem_pred == FREE_ID] = 0
-    occ = torch.from_numpy(occ).permute(2, 1, 0)  # (Z, Y, X)
-    occ = occ[None, None, :].contiguous().float()   # (1, 1, Z, Y, X)
+    occ = torch.from_numpy(occ).permute(2, 1, 0)
+    occ = occ[None, None, :].contiguous().float()
 
     offset = torch.Tensor(_pc_range[:3])[None, None, :]
     scaler = torch.Tensor([_voxel_size] * 3)[None, None, :]
@@ -161,13 +130,7 @@ def raycast_one_sample(
     }
 
 
-# ---------------------------------------------------------------------------
-# 深度误差统计累加器
-# ---------------------------------------------------------------------------
-
 class HitNoHitCounter:
-    """GT hit/no-hit × Pred hit/no-hit 四格表统计。"""
-
     def __init__(self) -> None:
         self.gt_hit_pred_hit: int = 0
         self.gt_hit_pred_nohit: int = 0
@@ -207,8 +170,6 @@ class HitNoHitCounter:
 
 
 class RayDepthStats:
-    """累计 per-ray 深度误差统计（含 signed error）。"""
-
     def __init__(self, depth_thresholds: list[float] = [1.0, 2.0, 4.0]) -> None:
         self.depth_thresholds = depth_thresholds
         self.total_rays: int = 0
@@ -294,10 +255,6 @@ class RayDepthStats:
         return float(np.mean([self.rayiou_at(j) for j in range(len(self.depth_thresholds))]))
 
 
-# ---------------------------------------------------------------------------
-# 结果输出（列名：Fast Baseline vs Slow Current）
-# ---------------------------------------------------------------------------
-
 def print_hit_nohit_comparison(
     fast_c: HitNoHitCounter,
     slow_c: HitNoHitCounter,
@@ -356,10 +313,6 @@ def print_depth_comparison(
     _row("RayIoU (mean)", fast_stats.rayiou, slow_stats.rayiou)
 
 
-# ---------------------------------------------------------------------------
-# sweep pkl 解析（与 eval_ray_depth_stats.py 一致）
-# ---------------------------------------------------------------------------
-
 def resolve_sweep_pkl(sweep_pkl_arg: str, cfg: dict) -> str:
     if sweep_pkl_arg:
         p = Path(sweep_pkl_arg)
@@ -384,17 +337,11 @@ def resolve_sweep_pkl(sweep_pkl_arg: str, cfg: dict) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# 当前帧 slow logits 加载（覆盖 slow_logit_path）
-# ---------------------------------------------------------------------------
-
 def _make_logit_rel_path(scene_name: str, token: str) -> str:
-    """与 gen_evoocc_canonical_infos.make_logit_rel_path 一致。"""
     return str(Path(scene_name) / token / "logits.npz")
 
 
 def _load_fast_last_frame(logits_loader, info: dict) -> torch.Tensor:
-    """只解码 frame_rel_paths[-1] 一帧 fast logits（在 CPU 上）。"""
     info_one = dict(info)
     info_one["frame_rel_paths"] = [info["frame_rel_paths"][-1]]
     return logits_loader.load_fast_logits(info_one, torch.device("cpu"))[0]
@@ -403,22 +350,12 @@ def _load_fast_last_frame(logits_loader, info: dict) -> torch.Tensor:
 def _load_slow_at_current(
     logits_loader, info: dict, scene_name: str, current_token: str
 ) -> torch.Tensor:
-    """把 slow_logit_path 重定向到当前 keyframe 后解码（在 CPU 上）。"""
     info_override = dict(info)
     info_override["slow_logit_path"] = _make_logit_rel_path(scene_name, current_token)
     return logits_loader.load_slow_logits(info_override, torch.device("cpu"))
 
 
-# ---------------------------------------------------------------------------
-# 极简 Dataset：每个样本只加载 fast(last) + slow(current) + GT
-# ---------------------------------------------------------------------------
-
 class SlowCurrentEvalDataset(Dataset):
-    """绕开 Occ3DEvoOccDataset 的多帧/监督/sidecar 加载，只取所需 3 项。
-
-    比原 dataset 快约 17×（13 帧 fast + 4 帧 sup + ray sidecar → 1 帧 fast + 1 帧 slow + 1 帧 GT）。
-    """
-
     def __init__(
         self,
         infos: list[dict],
@@ -441,10 +378,8 @@ class SlowCurrentEvalDataset(Dataset):
         scene_name = str(info.get("scene_name", ""))
         token = str(info.get("token", ""))
 
-        # fast 最后一帧（=当前 keyframe）
         fast_last = _load_fast_last_frame(self.logits_loader, info)
 
-        # slow 当前 keyframe（覆盖 path）。文件不存在时返回 None 占位。
         slow_current = None
         try:
             slow_current = _load_slow_at_current(
@@ -453,7 +388,6 @@ class SlowCurrentEvalDataset(Dataset):
         except FileNotFoundError:
             pass
 
-        # GT
         gt_path = os.path.join(self.gt_root_abs, scene_name, token, "labels.npz")
         gt_npz = load_labels_npz(gt_path)
         gt_labels = torch.from_numpy(gt_npz["semantics"].astype("int64"))
@@ -473,11 +407,9 @@ class SlowCurrentEvalDataset(Dataset):
 
 
 def slow_current_collate(batch: list[dict]) -> dict:
-    """支持 slow_current=None 的 batch 拼接。"""
     fast = torch.stack([b["fast_last"] for b in batch], dim=0)
     gt = torch.stack([b["gt_labels"] for b in batch], dim=0)
     mask = torch.stack([b["gt_mask"] for b in batch], dim=0)
-    # slow 可能 None，保持 list；后面 GPU 端单独搬
     slow = [b["slow_current"] for b in batch]
     return {
         "fast_last": fast,
@@ -488,10 +420,6 @@ def slow_current_collate(batch: list[dict]) -> dict:
         "scene_names": [b["scene_name"] for b in batch],
     }
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -516,10 +444,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     args = parse_args()
     cfg = load_config_with_base(args.config)
@@ -531,7 +455,6 @@ def main() -> None:
     grid_size = tuple(data_cfg["grid_size"])
     gt_mask_key = data_cfg["gt_mask_key"]
 
-    # --- 加载 logits_loader 和 infos ---
     logits_loader = build_logits_loader(data_cfg, cfg["root_path"])
     info_path = data_cfg.get("val_info_path", data_cfg["info_path"])
     info_abs = resolve_path(cfg["root_path"], info_path)
@@ -593,7 +516,6 @@ def main() -> None:
     device = torch.device(eval_cfg["device"] if torch.cuda.is_available() else "cpu")
     free_conf_thresh = eval_cfg.get("free_conf_thresh", None)
 
-    # --- 阶段 1：推理收集 predictions + mIoU 统计 ---
     print(f"[phase1] 加载 slow_current logits + fast(last) + GT (num_workers={num_workers})...")
     predictions: list[dict] = []
     total_steps = len(loader)
@@ -613,7 +535,7 @@ def main() -> None:
     missing_slow_current = 0
     with torch.no_grad():
         for step, sample in enumerate(loader, start=1):
-            fast_last = sample["fast_last"].to(device, non_blocking=True)  # (B, C, X, Y, Z)
+            fast_last = sample["fast_last"].to(device, non_blocking=True)
             gt_labels = sample["gt_labels"].to(device, non_blocking=True)
             gt_mask = sample["gt_mask"].to(device, non_blocking=True)
             slow_list = sample["slow_current"]
@@ -673,7 +595,6 @@ def main() -> None:
           + (f"，跳过 {missing_slow_current} 个缺当前帧 slow logits 的样本"
              if missing_slow_current else ""))
 
-    # --- 阶段 1.5：mIoU 对比 ---
     print("\n" + "=" * 20 + " mIoU 对比 " + "=" * 20)
     miou_fast = metric_fast.count_miou(verbose=False)
     miou_d_fast = metric_fast.count_miou_d(verbose=False)
@@ -694,14 +615,12 @@ def main() -> None:
     for name, v_f, v_s in zip(metric_fast.class_names, per_class_fast, per_class_slow):
         print(f"{name:<28} {float(v_f):>14.4f} {float(v_s):>14.4f} {float(v_s) - float(v_f):>+14.4f}")
 
-    # --- 阶段 2：加载 lidar origins ---
     print("[phase2] 加载 lidar origins...")
     sweep_pkl = resolve_sweep_pkl(args.sweep_pkl, cfg)
     from evoocc.ops.dvr.ego_pose import load_origins_from_sweep_pkl
     origins_by_token = load_origins_from_sweep_pkl(sweep_pkl)
     print(f"  共 {len(origins_by_token)} 个 token 的 origin")
 
-    # --- 阶段 3：逐样本 ray casting + 统计 ---
     print("[phase3] Ray casting + 深度统计...")
     lidar_rays = torch.from_numpy(generate_lidar_rays())
 
@@ -743,7 +662,6 @@ def main() -> None:
         rc_fast = raycast_one_sample(fast_vol, lidar_rays, lidar_origins)
         rc_slow = raycast_one_sample(slow_vol, lidar_rays, lidar_origins)
 
-        # --- hit/no-hit 统计 ---
         all_gt_hit = rc_gt["class"] != FREE_ID
         all_gt_coord = rc_gt["coord"]
 
@@ -763,7 +681,6 @@ def main() -> None:
                 if bin_m.any():
                     hn_stats[(src_name, key)].update(all_gt_hit[bin_m], all_pred_hit[bin_m])
 
-        # --- 深度统计：只分析 GT 命中非 free 的 ray ---
         valid = rc_gt["class"] != FREE_ID
         gt_class = rc_gt["class"][valid]
         gt_dist = rc_gt["dist"][valid]
@@ -819,7 +736,6 @@ def main() -> None:
     if skipped:
         print(f"  跳过 {skipped} 个样本（无对应 lidar origin）")
 
-    # --- 阶段 4：输出对比表 ---
     region_display = {
         "all": "全部 ray",
         "mask_in": "mask 内 ray",
@@ -838,7 +754,6 @@ def main() -> None:
             continue
         print_depth_comparison(fast_s, slow_s, region_display[region])
 
-    # --- 各类别 RayIoU 对比 ---
     def _print_per_class_rayiou(stats_obj: RayDepthStats, label: str) -> None:
         table = PrettyTable(['Class Names', 'RayIoU@1', 'RayIoU@2', 'RayIoU@4'])
         table.float_format = '.3'
@@ -863,7 +778,6 @@ def main() -> None:
     if slow_all.total_rays > 0:
         _print_per_class_rayiou(slow_all, "Slow Current")
 
-    # --- hit/no-hit 四格表 ---
     hn_display = {
         "all": "全部 ray",
         "mask_in": "mask 内 ray",

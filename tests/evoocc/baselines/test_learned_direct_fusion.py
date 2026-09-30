@@ -1,5 +1,3 @@
-"""Learned direct fusion baseline 单元测试。"""
-
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""评估 EvoOcc 对 ego pose 高斯扰动的敏感度。
-
-评估逻辑与 ``scripts/eval_evoocc.py`` 保持一致，唯一差别是在 dataset 输出后，
-向每帧 ``frame_ego2global`` 的局部平移 (x, y) 和 yaw 加入独立高斯噪声：
-
-    P_noisy = P_clean @ E(dx, dy, dyaw)
-
-预设档位沿用常见的 0.1 m / 0.01 rad 参数化。噪声由 scene、帧 token 和 seed
-稳定生成，因此同一帧出现在不同重叠样本中时会得到相同扰动。
-
-示例：
-    conda run -n neural_ode python tests/evoocc/eval_evoocc_pose_noise.py \
-        --config configs/evoocc/fast_alocc2dmini__slow_alocc3d.yaml \
-        --checkpoint ckpts/xxx.pt \
-        --noise-seeds 0 1 2 \
-        --output-json outputs/pose_noise_eval.json
-"""
 
 from __future__ import annotations
 
@@ -35,7 +18,6 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 
-# 输入形状固定，开启 benchmark 让 cuDNN 自动选择卷积算法
 torch.backends.cudnn.benchmark = True
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,8 +35,6 @@ from evoocc.utils.checkpoints import load_checkpoint_for_eval  # noqa: E402
 
 @dataclass(frozen=True)
 class PoseNoiseLevel:
-    """单个 ego pose 扰动档位。"""
-
     name: str
     translation_std_m: float
     yaw_std_rad: float
@@ -87,7 +67,6 @@ def _stable_frame_seed(
     frame_index: int,
     pose: torch.Tensor,
 ) -> int:
-    """为物理帧构造稳定 seed，保证重叠样本中的扰动一致。"""
     meta = cast(dict[str, Any], sample.get("meta", {}))
     scene_name = str(meta.get("scene_name", ""))
 
@@ -111,7 +90,6 @@ def _stable_frame_seed(
     if frame_id:
         digest.update(frame_id.encode("utf-8"))
     else:
-        # 旧格式缺少 token/timestamp 时，以 clean pose 作为跨样本稳定标识。
         pose_bytes = pose.detach().cpu().contiguous().numpy().tobytes()
         digest.update(b"pose:")
         digest.update(pose_bytes)
@@ -123,7 +101,6 @@ def perturb_frame_ego2global(
     level: PoseNoiseLevel,
     seed: int,
 ) -> torch.Tensor:
-    """在 ego 局部坐标系对每帧 pose 施加 SE(2) 高斯扰动。"""
     poses = cast(torch.Tensor, sample["frame_ego2global"])
     if poses.ndim != 3 or tuple(poses.shape[-2:]) != (4, 4):
         raise ValueError(
@@ -163,14 +140,12 @@ def perturb_frame_ego2global(
     error_transform[:, 0, 3] = dx
     error_transform[:, 1, 3] = dy
 
-    # 右乘表示误差定义在每帧 ego 局部坐标系中。
+    # Right-multiplication: error is defined in each frame's local ego frame.
     noisy_poses = poses.detach().cpu().to(torch.float64) @ error_transform
     return noisy_poses.to(dtype=poses.dtype)
 
 
 class PoseNoiseEvalDataset(Dataset):
-    """只替换 frame_ego2global，其余字段原样复用 base dataset。"""
-
     def __init__(
         self,
         base_dataset: Dataset,
@@ -213,7 +188,6 @@ def _parse_level_names(spec: str) -> list[str]:
         raise ValueError(
             f"未知噪声档位 {unknown}；可选值={list(POSE_NOISE_LEVELS)}"
         )
-    # 去重但保持用户指定顺序。
     return list(dict.fromkeys(names))
 
 
@@ -276,7 +250,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_sweep_pkl(args: argparse.Namespace, cfg: dict[str, Any]) -> str:
-    """优先使用 CLI/config，最后从 canonical metadata 推断 sweep pkl。"""
     sweep_path = args.sweep_pkl or cfg.get("eval", {}).get("sweep_pkl", None)
     if sweep_path:
         path = Path(str(sweep_path))
@@ -546,7 +519,6 @@ def summarize_runs(
             ]
             if not values:
                 continue
-            # 底层 RayIoU 保持 0--1；仅汇总时转成百分数，与 mIoU/mIoU_D 对齐。
             if metric_name in rayiou_metric_names:
                 values = [value * 100.0 for value in values]
             level_summary["metrics"][metric_name] = {
@@ -650,7 +622,6 @@ def main() -> None:
     runs: list[dict[str, Any]] = []
     for level_name in level_names:
         level = POSE_NOISE_LEVELS[level_name]
-        # clean 与 seed 无关，只运行一次，避免无意义的重复评估。
         seeds_for_level = [noise_seeds[0]] if level_name == "clean" else noise_seeds
         for seed in seeds_for_level:
             print(
@@ -677,7 +648,6 @@ def main() -> None:
                     print_rayiou_table=args.print_rayiou_table,
                 )
             )
-            # persistent worker 在多档位循环中应随 DataLoader 及时释放。
             del loader
             del noisy_dataset
             gc.collect()

@@ -1,10 +1,3 @@
-"""No-warp motion-conditioned attention baseline.
-
-该 baseline 用于验证显式几何 warp / 两阶段演化是否必要：每步不对隐藏状态或
-fast 特征做 grid_sample，只把相邻帧 ego motion 转成 dense motion field 作为
-attention 条件，让窗口 cross-attention 隐式学习跨帧对应关系。
-"""
-
 from __future__ import annotations
 
 import time
@@ -24,8 +17,6 @@ from evoocc.utils.nn import resolve_group_norm_groups
 
 
 class _WindowCrossAttention3D(nn.Module):
-    """3D window cross-attention：query 来自当前 fast，key/value 来自上一帧 hidden。"""
-
     def __init__(
         self,
         dim: int,
@@ -58,6 +49,7 @@ class _WindowCrossAttention3D(nn.Module):
             x = torch.roll(x, shifts=(-Sx, -Sy, -Sz), dims=(2, 3, 4))
         nWx, nWy, nWz = X // Wx, Y // Wy, Z // Wz
         x = x.view(B, C, nWx, Wx, nWy, Wy, nWz, Wz)
+        # Window partition: (B,C,X,Y,Z) -> (B,nWx,nWy,nWz,Wx,Wy,Wz,C).
         x = x.permute(0, 2, 4, 6, 3, 5, 7, 1).contiguous()
         x = x.view(B * nWx * nWy * nWz, Wx * Wy * Wz, C)
         return x, (B, C, X, Y, Z, nWx * nWy * nWz)
@@ -75,7 +67,6 @@ class _WindowCrossAttention3D(nn.Module):
         return x
 
     def forward(self, query: torch.Tensor, key_value: torch.Tensor) -> torch.Tensor:
-        # 输入/输出: (B, C, X, Y, Z)
         q = self.q(query)
         k = self.k(key_value)
         v = self.v(key_value)
@@ -94,8 +85,6 @@ class _WindowCrossAttention3D(nn.Module):
 
 
 class _CrossAttentionBlock(nn.Module):
-    """Pre-GN cross-attention + 1x1 FFN。"""
-
     def __init__(
         self,
         dim: int,
@@ -130,12 +119,6 @@ class _CrossAttentionBlock(nn.Module):
 
 
 class NoWarpMotionBiasAttnFusion(nn.Module):
-    """无显式 warp 的 motion-conditioned cross-attention 主干。
-
-    主干计算维度默认 24，与当前 EvoOcc 的 func_g_inner_dim 对齐；hidden state 仍为 32。
-    motion_field=(dx,dy,dz,in_bounds) 只作为条件通道输入，不用于采样特征。
-    """
-
     def __init__(
         self,
         hidden_dim: int,
@@ -151,7 +134,7 @@ class NoWarpMotionBiasAttnFusion(nn.Module):
             raise ValueError(f"head_dilations 需恰好 2 个值，当前: {head_dilations}")
         self.window_size = tuple(int(v) for v in window_size)
         groups = resolve_group_norm_groups(num_channels=inner_dim, preferred_groups=gn_groups)
-        cond_channels = 1 + 4  # dt + motion(dx,dy,dz,in_bounds)
+        cond_channels = 1 + 4
         self.q_stem = nn.Sequential(
             nn.Conv3d(hidden_dim + cond_channels, inner_dim, kernel_size=1, bias=False),
             nn.GroupNorm(groups, inner_dim),
@@ -190,8 +173,8 @@ class NoWarpMotionBiasAttnFusion(nn.Module):
         dt_channel: torch.Tensor,
         motion_field: torch.Tensor,
     ) -> torch.Tensor:
+        # Conditioning channels: dt + motion (dx,dy,dz,in_bounds).
         cond = torch.cat([dt_channel, motion_field], dim=0)
-        # 与 RWFA/FusionAttnNet 对齐：Conv3d 直接吃 (B,C,X,Y,Z)，不做轴置换。
         q = torch.cat([fast_curr, cond], dim=0).unsqueeze(0).contiguous()
         kv = torch.cat([h_prev, cond], dim=0).unsqueeze(0).contiguous()
         q = self.q_stem(q)
@@ -204,8 +187,6 @@ class NoWarpMotionBiasAttnFusion(nn.Module):
 
 
 class NoWarpMotionBiasAttnAligner(RecurrentWarpFusionAligner):
-    """No-warp attention baseline，与 RWFA/EvoOcc 共用 forward 接口。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -260,7 +241,6 @@ class NoWarpMotionBiasAttnAligner(RecurrentWarpFusionAligner):
         spatial_shape_xyz: Tuple[int, int, int],
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """生成 motion 条件通道，不做任何特征采样。"""
         x_size, y_size, z_size = spatial_shape_xyz
         device = transform_prev_to_curr.device
         pc_min = transform_prev_to_curr.new_tensor(self.pc_range[:3])
@@ -495,7 +475,6 @@ class NoWarpMotionBiasAttnAligner(RecurrentWarpFusionAligner):
         return {
             "step_logits": step_logits,
             "step_time_ms": torch.tensor(step_time_values, device=fast_logits.device, dtype=torch.float32),
-            # 复用上游字段名；这里表示 motion-field 构造耗时，不包含显式 warp。
             "step_warp_ms": torch.tensor(motion_ms_values, device=fast_logits.device, dtype=torch.float32),
             "step_solver_ms": torch.tensor(attn_ms_values, device=fast_logits.device, dtype=torch.float32),
             "step_decode_ms": torch.tensor(decode_ms_values, device=fast_logits.device, dtype=torch.float32),

@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""50×50×16 learned direct fusion baseline 训练入口。
-
-复用 train_rwfa.py 的数据、DDP、EMA、loss、Trainer 和 checkpoint 流程，
-只替换模型构造并叠加 baseline 专属配置。
-"""
 
 from __future__ import annotations
 
@@ -87,7 +82,6 @@ def main() -> None:
     def parse_args_fixed():
         args = original_parse_args()
         args.model_kind = "learned-direct-fusion"
-        # Rebuttal 对照固定训练协议，不接受 CLI 改写。
         args.epochs = 10
         args.lambda_fast_kl = 0.0
         args.use_fast_residual = True

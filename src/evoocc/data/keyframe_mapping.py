@@ -1,5 +1,3 @@
-"""key_frame 解析工具。"""
-
 from __future__ import annotations
 
 import pickle
@@ -10,7 +8,6 @@ from nuscenes import NuScenes
 
 
 def load_sample_token_set_from_sweep(sweep_info_path: str) -> set[str]:
-    """从 sweep pkl 读取当前 split 的 keyframe sample token 集合。"""
     path = Path(sweep_info_path)
     if not path.exists():
         raise FileNotFoundError(f"sweep pkl 不存在: {path}")
@@ -23,8 +20,6 @@ def load_sample_token_set_from_sweep(sweep_info_path: str) -> set[str]:
 
 
 class NuScenesKeyFrameResolver:
-    """把帧级 sample_data token 映射为 key_frame 的 sample token。"""
-
     def __init__(
         self,
         dataroot: str,
@@ -38,7 +33,6 @@ class NuScenesKeyFrameResolver:
             self._valid_sample_tokens = load_sample_token_set_from_sweep(sweep_info_path)
 
     def resolve_keyframe_sample_token(self, frame_token: str) -> str | None:
-        """返回 frame_token 对应的 key_frame sample_token；若非 key_frame 则返回 None。"""
         if not frame_token:
             return None
         if frame_token not in self._cache:
@@ -59,7 +53,6 @@ class NuScenesKeyFrameResolver:
         return sample_token
 
     def resolve_keyframe_steps(self, frame_tokens: Iterable[str]) -> dict[int, str]:
-        """输入整段 frame_tokens，输出 step 索引到 GT sample_token 的映射。"""
         step_to_sample_token: dict[int, str] = {}
         for step_idx, frame_token in enumerate(frame_tokens):
             sample_token = self.resolve_keyframe_sample_token(str(frame_token))

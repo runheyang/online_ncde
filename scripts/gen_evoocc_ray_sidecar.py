@@ -1,33 +1,4 @@
 #!/usr/bin/env python3
-"""生成 EvoOcc ray-first-hit sidecar（供 RayLoss 训练使用）。
-
-对每个样本的 4 个监督时刻（t-1.5/t-1.0/t-0.5/t）用 DVR 对该时刻的 GT 体素做
-raycast。每个监督时刻以 `supervision_gt_tokens[sup_i]` 为参考帧，从 nuScenes
-sweep pkl 里用 `compute_lidar_origins` 计算最多 K 个 lidar origin（与 RayIoU
-评估完全对齐：取同 scene 下过去+未来的 ego 位置，范围过滤 + 线性下采样到 K），
-对每个 origin 独立发射 14040 条 lidar ray，记录 first-hit 距离。
-
-输出布局（一个目录，便于 mmap 加载）：
-    <out_dir>/
-      <split>_dist.npy        (N, 4, K, R)  float16
-                            finite = hit 距离（米）
-                            +inf   = 监督视野内 no-hit
-                            NaN    = ignore
-      <split>_origin.npy      (N, 4, K, 3)  float32   lidar origin（pad 填零）
-      <split>_origin_mask.npy (N, 4, K)     uint8     1 = 该 origin 有效
-      <split>_sup_mask.npy    (N, 4)        uint8     1 = 该 sup 有效
-      <split>_meta.pkl        {"token_to_idx", "supervision_labels",
-                               "num_origins", "schema_version": v3, ...}
-
-用法:
-    python scripts/gen_evoocc_ray_sidecar.py \
-        --info-path configs/evoocc/evoocc_align_infos_train.pkl \
-        --sup4-sidecar configs/evoocc/evoocc_align_infos_train_sup4_sidecar.pkl \
-        --sweep-pkl data/nuscenes/nuscenes_infos_train_sweep.pkl \
-        --split train \
-        --out-dir data/evoocc_ray_sidecar \
-        [--num-origins 8] [--limit 100]
-"""
 
 from __future__ import annotations
 
@@ -51,10 +22,6 @@ from evoocc.ops.dvr.ego_pose import load_origins_from_sweep_pkl  # noqa: E402
 from evoocc.ray_loss import generate_lidar_rays  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# DVR 延迟加载（与 eval 保持一致）
-# ---------------------------------------------------------------------------
-
 _dvr = None
 
 
@@ -73,26 +40,21 @@ def _get_dvr():
     return _dvr
 
 
-# ---------------------------------------------------------------------------
-# 单原点 raycast
-# ---------------------------------------------------------------------------
-
-
 def _raycast_gt(
-    occ_t: torch.Tensor,             # (1,1,Z,Y,X) float on device
-    sem_gt: np.ndarray,              # (X,Y,Z) int
-    origin_xyz: np.ndarray,          # (3,)
-    lidar_rays: torch.Tensor,        # (R,3) on device
-    offset: torch.Tensor,            # (1,1,3) on device
-    scaler: torch.Tensor,            # (1,1,3) on device
+    occ_t: torch.Tensor,
+    sem_gt: np.ndarray,
+    origin_xyz: np.ndarray,
+    lidar_rays: torch.Tensor,
+    offset: torch.Tensor,
+    scaler: torch.Tensor,
     grid_size: tuple[int, int, int],
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """对单份 GT 体素 raycast，返回 (per-ray dist m float32, per-ray class id int32)。"""
+    """Raycast one GT grid; occ_t is (1, 1, Z, Y, X); returns per-ray distance (m, float32) and class id (int32)."""
     dvr = _get_dvr()
 
     origin = torch.from_numpy(origin_xyz).to(device=device, dtype=torch.float32).view(1, 1, 3)
-    endpts = lidar_rays.unsqueeze(0) + origin                                   # (1,R,3)
+    endpts = lidar_rays.unsqueeze(0) + origin
     origin_render = ((origin - offset) / scaler).float()
     points_render = ((endpts - offset) / scaler).float()
     lidar_tindex = torch.zeros([1, lidar_rays.shape[0]], device=device)
@@ -108,15 +70,10 @@ def _raycast_gt(
         )
         pred_dist = pred_dist * float(scaler[0, 0, 0].item())
 
-    coord_index = coord_index[0].int().cpu().numpy()                             # (R,3)
-    dist = pred_dist[0].cpu().numpy().astype(np.float32)                         # (R,)
+    coord_index = coord_index[0].int().cpu().numpy()
+    dist = pred_dist[0].cpu().numpy().astype(np.float32)
     cls = sem_gt[coord_index[:, 0], coord_index[:, 1], coord_index[:, 2]].astype(np.int32)
     return dist, cls
-
-
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
 
 
 def parse_args() -> argparse.Namespace:
@@ -227,7 +184,7 @@ def main() -> None:
         print(f"[limit] 只处理前 {N} 个样本")
 
     num_sup = 4
-    lidar_rays_cpu = generate_lidar_rays("cpu")                                   # (R,3)
+    lidar_rays_cpu = generate_lidar_rays("cpu")
     R = int(lidar_rays_cpu.shape[0])
     print(f"[rays] R={R}")
 
@@ -237,9 +194,6 @@ def main() -> None:
     offset = torch.tensor(pc_range[:3], dtype=torch.float32, device=device).view(1, 1, 3)
     scaler = torch.tensor([voxel_size] * 3, dtype=torch.float32, device=device).view(1, 1, 3)
 
-    # ------------------------------------------------------------------
-    # 多原点：一次性从 sweep pkl 计算 origins_by_token
-    # ------------------------------------------------------------------
     print(f"[load] sweep_pkl={sweep_path}")
     origins_by_token = load_origins_from_sweep_pkl(
         sweep_path,
@@ -248,16 +202,13 @@ def main() -> None:
     )
     print(f"[origins] got origins for {len(origins_by_token)} tokens (K={K})")
 
-    # ------------------------------------------------------------------
-    # 预分配输出（新 schema v3，文件名带 split 前缀）
-    # ------------------------------------------------------------------
     dist_path = out_dir / f"{prefix}dist.npy"
     origin_path = out_dir / f"{prefix}origin.npy"
     origin_mask_path = out_dir / f"{prefix}origin_mask.npy"
     sup_mask_path = out_dir / f"{prefix}sup_mask.npy"
     meta_path = out_dir / f"{prefix}meta.pkl"
 
-    # dist memmap 到磁盘，避免 peak RAM 膨胀（(N,4,K,R)*2B 量级可达 10+ GB）
+    # dist (N, sup, K, R) fp16: finite=hit meters, +inf=no-hit in view, NaN=ignore; memmap keeps peak RAM low
     dist_arr = np.lib.format.open_memmap(
         dist_path, mode="w+", dtype=np.float16, shape=(N, num_sup, K, R)
     )
@@ -311,7 +262,6 @@ def main() -> None:
                     f"GT shape {sem_gt.shape} 与 grid_size {grid_size} 不一致: {rel}"
                 )
 
-            # origins 以 sup_gt_token 为参考帧查表，与 RayIoU 评估严格一致
             sup_token = str(sup_gt_tokens[sup_i]) if sup_gt_tokens and sup_gt_tokens[sup_i] else ""
             origins_ref = origins_by_token.get(sup_token) if sup_token else None
             if origins_ref is None:
@@ -333,7 +283,7 @@ def main() -> None:
 
             occ = np.zeros_like(sem_gt, dtype=np.uint8)
             occ[sem_gt != free_index] = 1
-            occ_t = torch.from_numpy(occ).permute(2, 1, 0)                          # (Z,Y,X)
+            occ_t = torch.from_numpy(occ).permute(2, 1, 0)
             occ_t = occ_t[None, None, :].contiguous().float().to(device)
 
             for k in range(T_ref):

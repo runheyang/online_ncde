@@ -1,11 +1,3 @@
-"""EvoOcc 200x200x16 全分辨率对齐模型。
-
-隐藏状态在 200x200x16 全分辨率空间演化：
-  - encoder 不做空间下采样（stride=1）
-  - decoder 不做上采样（无 interpolate），直接 3x3x3 + 1x1x1 输出
-  - warp 使用原始 voxel_size
-"""
-
 from __future__ import annotations
 
 import time
@@ -31,7 +23,6 @@ from evoocc.models.solver_heun import HeunSolver
 
 
 def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
-    """m_occ = max_{c != free}(logit[c]) - logit[free]，Fast-KL 的 conf 权重来源。"""
     masked = fast_logits.clone()
     masked.narrow(-4, free_index, 1).fill_(float("-inf"))
     max_non_free = masked.amax(dim=-4, keepdim=True)
@@ -40,8 +31,6 @@ def _compute_m_occ(fast_logits: torch.Tensor, free_index: int) -> torch.Tensor:
 
 
 class EvoOccAligner(nn.Module):
-    """全分辨率 200x200x16 编码 + Dense Warp + Dense Dynamics + 解码。"""
-
     def __init__(
         self,
         num_classes: int,
@@ -79,8 +68,6 @@ class EvoOccAligner(nn.Module):
         self.voxel_size = tuple(voxel_size)
         self.timestamp_scale = float(timestamp_scale)
 
-        # 全分辨率：直接使用原始 voxel_size
-
         self.fast_encoder = DenseEncoder(
             in_channels=self.encoder_in_channels,
             out_channels=feat_dim,
@@ -101,7 +88,6 @@ class EvoOccAligner(nn.Module):
         if solver_variant_lower == "heun":
             self.solver = HeunSolver(func_g=self.func_g, ctrl_proj=self.ctrl_proj)
         elif solver_variant_lower == "euler":
-            # Euler + next-fast：func_g 仅喂 f_t，单次求值
             self.solver = EulerNextFastSolver(func_g=self.func_g, ctrl_proj=self.ctrl_proj)
         else:
             raise ValueError(
@@ -114,42 +100,32 @@ class EvoOccAligner(nn.Module):
             init_scale=decoder_init_scale,
         )
 
-        # Trainer 根据 lambda_fast_kl 注入；False 时 forward 跳过 KL 计算。
         self._fast_kl_active: bool = False
 
     def _encode_fast(self, fast_logits: torch.Tensor) -> torch.Tensor:
-        """编码快系统序列，输出 dense (T, C_f, X, Y, Z)。"""
         return self.fast_encoder(fast_logits)
 
     def _encode_slow(self, slow_logits: torch.Tensor) -> torch.Tensor:
-        """编码慢系统输入，输出 dense (C_f, X, Y, Z)。"""
         return self.slow_encoder(slow_logits.unsqueeze(0))[0]
 
     def _decode_dense_state(self, z_dense: torch.Tensor) -> torch.Tensor:
-        """将稠密隐藏状态解码为残差 logits，输出 (C, X, Y, Z)。"""
-        z_tensor = z_dense.unsqueeze(0)  # (1, C, X, Y, Z)
-        z_tensor = z_tensor.permute(0, 1, 4, 3, 2).contiguous()  # (1, C, Z, Y, X)
+        z_tensor = z_dense.unsqueeze(0)
+        z_tensor = z_tensor.permute(0, 1, 4, 3, 2).contiguous()
         out_dense = self.decoder(z_tensor)
         return out_dense.permute(0, 1, 4, 3, 2).contiguous()[0]
 
     def _compute_fast_kl_step(
         self,
-        fast_logits_t: torch.Tensor,    # (C, X, Y, Z) raw fast logits at step t (detached by caller)
-        aligned_logits: torch.Tensor,   # (C, X, Y, Z)
+        fast_logits_t: torch.Tensor,
+        aligned_logits: torch.Tensor,
     ) -> torch.Tensor:
-        """Conf-weighted KL(aligned || fast)：fast 自信判占用处把 aligned 拉回 fast。
-
-        用 m_occ.clamp(min=0) 做权重 —— 只惩罚"fast 自信判占用"处偏离，保留
-        "fast 自信判空"处 aligner 自由填补（aligner 真推演的主要价值场景）。
-        """
-        # 显式 .float() 避免 AMP autocast 下 fp16 输入导致 kl_div 混算
+        # Cast to fp32 so kl_div is not computed in fp16 under autocast.
         aligned_f = aligned_logits.float()
         fast_f = fast_logits_t.float()
         w = _compute_m_occ(fast_f, self.free_index).clamp(min=0.0)
         log_p_fast = F.log_softmax(fast_f, dim=0)
         log_p_aligned = F.log_softmax(aligned_f, dim=0)
-        # F.kl_div(log_q, log_p, log_target=True) = Σ exp(log_p) (log_p - log_q) = KL(P || Q)
-        # P=aligned, Q=fast：input=log_p_fast, target=log_p_aligned
+        # KL(aligned || fast) via kl_div(log_q=fast, log_p=aligned, log_target=True).
         kl_per_voxel = F.kl_div(
             log_p_fast, log_p_aligned, log_target=True, reduction="none"
         ).sum(dim=0, keepdim=True)
@@ -164,14 +140,8 @@ class EvoOccAligner(nn.Module):
         frame_dt: torch.Tensor | None,
         rollout_start_step: int = 0,
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """处理单样本（不含 batch 维），全分辨率 Dense 流程。
-
-        rollout_start_step：短历史 pad 长度。rss == num_frames-1（scene 首帧）
-        时直接返回 slow_logits 作为 aligned，不过 encoder/decoder。
-        """
         num_frames = fast_logits.shape[0]
 
-        # h=0 退化：scene 第一帧 keyframe，直接输出慢系统 logits
         if rollout_start_step >= num_frames - 1:
             return {
                 "aligned": slow_logits.float(),
@@ -189,7 +159,6 @@ class EvoOccAligner(nn.Module):
             int(fast_feat.shape[4]),
         )
         pc_range_6 = cast(Tuple[float, float, float, float, float, float], self.pc_range)
-        # 全分辨率：直接使用原始 voxel_size
         voxel_size_3 = cast(Tuple[float, float, float], self.voxel_size)
 
         dt = compute_segment_dt(
@@ -200,7 +169,6 @@ class EvoOccAligner(nn.Module):
         ).to(device=fast_logits.device)
         tau = cumulative_tau(dt).to(device=fast_logits.device)
 
-        # 初始 Z 锚到最老真实 keyframe
         if self.use_fast_residual:
             Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
@@ -272,14 +240,8 @@ class EvoOccAligner(nn.Module):
         max_step_index: int | None = None,
         rollout_start_step: int = 0,
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """逐步训练/评估单样本：每步更新后解码并返回全时刻 logits。
-
-        rollout_start_step：短历史 pad 段长度，从该 step 开始推演；
-        达到 num_frames-1 时退化为直接输出 slow_logits（scene 首帧）。
-        """
         num_frames = fast_logits.shape[0]
 
-        # h=0 退化：只有一帧真实数据（即当前 keyframe），直接返回 slow_logits
         if rollout_start_step >= num_frames - 1:
             step_logits = slow_logits.unsqueeze(0).float()
             step_indices = torch.tensor(
@@ -316,7 +278,6 @@ class EvoOccAligner(nn.Module):
         ).to(device=fast_logits.device)
         tau = cumulative_tau(dt).to(device=fast_logits.device)
 
-        # 初始 Z 锚到最老真实 keyframe（pad 段被跳过）
         if self.use_fast_residual:
             Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
@@ -328,7 +289,6 @@ class EvoOccAligner(nn.Module):
         step_logits_list: list[torch.Tensor] = []
         compute_fast_kl = self._fast_kl_active and self.use_fast_residual
 
-        # 按绝对 step 遍历 [rollout_start_step, rollout_start_step + rollout_steps)
         for k_off in range(rollout_steps):
             k = rollout_start_step + k_off
             transform = compute_transform_prev_to_curr(
@@ -421,22 +381,13 @@ class EvoOccAligner(nn.Module):
         frame_dt: torch.Tensor | None,
         rollout_start_step: int = 0,
     ) -> Dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        """逐步评估单样本：每步更新后都做解码并和当前 fast logits 残差融合。
-
-        rollout_start_step：短历史 pad 段的长度。前 pad 帧不参与 rollout，
-        从 step `rollout_start_step` 开始以 `slow_logits`（已锚到最老真实 keyframe）
-        作为初始状态推演。当 rollout_start_step == num_frames - 1（scene 第一帧）时，
-        直接返回 slow_logits 作为当前时刻的对齐输出。
-        """
         num_frames = fast_logits.shape[0]
 
-        # h=0 退化：没有 rollout step，直接把 slow_logits 作为当前 keyframe 的对齐输出
         if rollout_start_step >= num_frames - 1:
-            step_logits = slow_logits.unsqueeze(0).float()  # (1, C, X, Y, Z)
+            step_logits = slow_logits.unsqueeze(0).float()
             step_indices = torch.tensor(
                 [num_frames - 1], device=fast_logits.device, dtype=torch.long
             )
-            # 直出 slow，无 solver/warp/decode 开销；占位 0 ms 以对齐 step 维度
             zero_step = torch.zeros((1,), device=fast_logits.device, dtype=torch.float32)
             return {
                 "step_logits": step_logits,
@@ -468,7 +419,6 @@ class EvoOccAligner(nn.Module):
         ).to(device=fast_logits.device)
         tau = cumulative_tau(dt).to(device=fast_logits.device)
 
-        # 初始 Z 锚到最老的真实 keyframe（pad 段被跳过）
         if self.use_fast_residual:
             Z_dense = slow_feat - fast_feat[rollout_start_step]
         else:
@@ -477,7 +427,6 @@ class EvoOccAligner(nn.Module):
         delta_mag_values: list[float] = []
 
         step_logits_list: list[torch.Tensor] = []
-        # 分三段统计：warp(ego-warp/grid_sample) / solver(build_delta + self.solver.step) / decode(解码+残差)
         step_warp_ms_values: list[float] = []
         step_solver_ms_values: list[float] = []
         step_decode_ms_values: list[float] = []
@@ -494,7 +443,6 @@ class EvoOccAligner(nn.Module):
             else:
                 tp0 = time.perf_counter()
 
-            # ---- warp 段 ----
             transform = compute_transform_prev_to_curr(
                 pose_prev_ego2global=frame_ego2global[k],
                 pose_curr_ego2global=frame_ego2global[k + 1],
@@ -525,7 +473,6 @@ class EvoOccAligner(nn.Module):
             else:
                 tp1 = time.perf_counter()
 
-            # ---- solver 段 ----
             f_t = fast_feat[k + 1]
             delta_info = build_scene_delta_ctrl(
                 fast_curr=f_t,
@@ -545,7 +492,6 @@ class EvoOccAligner(nn.Module):
             else:
                 tp2 = time.perf_counter()
 
-            # ---- decode 段 ----
             logits_delta = self._decode_dense_state(Z_dense)
             if self.use_fast_residual:
                 logits_now = logits_delta + fast_logits[k + 1]
@@ -611,10 +557,6 @@ class EvoOccAligner(nn.Module):
         frame_dt: torch.Tensor | None,
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        """评估接口：返回每个循环步的 logits 与耗时（批处理包装）。
-
-        rollout_start_step：(B,) long tensor，短历史样本的 pad 长度；默认全 0。
-        """
         fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt = (
             self._unsqueeze_inputs(fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt)
         )
@@ -631,7 +573,6 @@ class EvoOccAligner(nn.Module):
         frame_timestamps: torch.Tensor | None,
         frame_dt: torch.Tensor | None,
     ):
-        """若输入无 batch 维则自动补齐。"""
         if fast_logits.dim() == 5:
             fast_logits = fast_logits.unsqueeze(0)
             slow_logits = slow_logits.unsqueeze(0)
@@ -653,15 +594,6 @@ class EvoOccAligner(nn.Module):
         max_step_index: int | None = None,
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        """统一前向入口，通过 mode 分发到不同路径（兼容 DDP）。
-
-        mode:
-          - "default": 仅返回最终 aligned logits
-          - "stepwise_train": 逐步训练，返回每步 logits（完整 BPTT）
-          - "stepwise_eval": 逐步评估，返回每步 logits 与耗时
-
-        rollout_start_step：(B,) long tensor，短历史样本的 pad 长度；默认全 0。
-        """
         fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt = (
             self._unsqueeze_inputs(fast_logits, slow_logits, frame_ego2global, frame_timestamps, frame_dt)
         )
@@ -720,7 +652,6 @@ class EvoOccAligner(nn.Module):
         frame_dt: torch.Tensor | None,
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        """评估：返回每个循环步的 logits 与耗时。"""
         step_logits_list: list[torch.Tensor] = []
         step_time_list: list[torch.Tensor] = []
         step_warp_list: list[torch.Tensor] = []
@@ -785,7 +716,6 @@ class EvoOccAligner(nn.Module):
         max_step_index: int | None = None,
         rollout_start_step: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor | list[dict[str, torch.Tensor]]]:
-        """训练：返回逐步 logits（完整 BPTT），不做计时。"""
         step_logits_list: list[torch.Tensor] = []
         diag_list: list[dict[str, torch.Tensor]] = []
         fast_kl_list: list[torch.Tensor] = []

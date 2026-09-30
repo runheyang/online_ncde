@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""实时 benchmark 里 EvoOcc 的状态化推理包装。"""
 
 from __future__ import annotations
 
@@ -35,8 +34,6 @@ from evoocc.utils.checkpoints import load_checkpoint  # noqa: E402
 
 @dataclass
 class RuntimeState:
-    """缓存单个样本的在线状态。"""
-
     slow_logits_dense: torch.Tensor | None = None
     z_dense: torch.Tensor | None = None
     prev_fast_logits_dense: torch.Tensor | None = None
@@ -49,8 +46,6 @@ class RuntimeState:
 
 
 class RealtimeNcdeRuntime:
-    """把离线 stepwise 逻辑拆成 step0 初始化 + step>=1 单步演化。"""
-
     def __init__(
         self,
         config_path: str,
@@ -150,7 +145,6 @@ class RealtimeNcdeRuntime:
         return dense.float()
 
     def begin_sample(self, info: dict[str, Any]) -> int:
-        """在样本开始时只重置状态和时间轴，不提前做 slow decode。"""
         frame_ego2global = torch.as_tensor(info["frame_ego2global"], dtype=torch.float32, device=self.device)
         num_frames = int(frame_ego2global.shape[0])
 
@@ -180,7 +174,6 @@ class RealtimeNcdeRuntime:
         return num_frames
 
     def step(self, step_idx: int, fast_logits_dense: torch.Tensor, info: dict[str, Any]) -> torch.Tensor:
-        """执行一步在线推理，并返回当前时刻的 dense logits。"""
         fast_logits_dense = fast_logits_dense.to(device=self.device, dtype=torch.float32)
         curr_pose = cast(torch.Tensor, self.state.frame_ego2global)[step_idx]
         curr_tau = cast(torch.Tensor, self.state.tau_values)[step_idx]
@@ -190,7 +183,6 @@ class RealtimeNcdeRuntime:
                 raise RuntimeError("step0 只能在样本初始化状态下调用一次。")
 
             if self.state.slow_logits_dense is None:
-                # 设计要求 slow decode 计入 step0，而不是样本级别的预处理时间。
                 self.state.slow_logits_dense = self._load_slow_logits_dense(info)
 
             fast_feat0 = self._encode_single_fast(fast_logits_dense)

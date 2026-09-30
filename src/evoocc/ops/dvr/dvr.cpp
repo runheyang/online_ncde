@@ -5,10 +5,6 @@
 #include <torch/extension.h>
 #include <vector>
 
-/*
- * CUDA forward declarations
- */
-
 std::vector<torch::Tensor> render_forward_cuda(torch::Tensor sigma,
                                                torch::Tensor origin,
                                                torch::Tensor points,
@@ -23,10 +19,6 @@ render_cuda(torch::Tensor sigma, torch::Tensor origin, torch::Tensor points,
 torch::Tensor init_cuda(torch::Tensor points, torch::Tensor tindex,
                         const std::vector<int> grid);
 
-
-/*
- * C++ interface
- */
 
 #define CHECK_CUDA(x)                                                          \
   TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")

@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""No-warp motion-conditioned attention baseline 训练入口。
-
-复用 train_rwfa.py 的 dataset / loss / Trainer / DDP / EMA / wandb / checkpoint
-全套 wiring，只替换模型构造。模型不做显式 ego-warp；ego motion 以 dense
-motion field 形式作为 attention 条件输入。
-
-双卡 DDP 启动：
-    torchrun --nproc_per_node=2 scripts/baselines/train_no_warp_attn.py --config <yaml>
-"""
 
 from __future__ import annotations
 
@@ -31,11 +22,6 @@ def _build_model(
     device: torch.device,
     use_fast_residual: bool,
 ) -> NoWarpMotionBiasAttnAligner:
-    """构造 no-warp attention baseline。
-
-    默认主干维度走 model.func_g_inner_dim（当前配置为 24），与 EvoOcc 主干计算维度
-    对齐；hidden/state 维度仍使用 model.hidden_dim（当前为 32）。
-    """
     inner_dim = int(model_cfg.get("no_warp_inner_dim", model_cfg.get("func_g_inner_dim", 24)))
     num_heads = int(model_cfg.get("no_warp_attn_num_heads", 3))
     if inner_dim % num_heads != 0:
@@ -72,12 +58,10 @@ def main() -> None:
 
     def parse_args_with_kind():
         args = original_parse_args()
-        # 让输出目录 / wandb 标记成为独立 baseline，而不是 rwfa-attn。
         args.model_kind = "no-warp-attn"
-        # no-warp 分支默认训练 10 epoch（用户显式指定 --epochs 时以指定值为准）
         if args.epochs == 0:
             args.epochs = 10
-        # no-warp 分支不使用 fast KL；在入口处覆盖，避免改共享 config。
+        # No fast KL here; override locally instead of editing the shared config.
         args.lambda_fast_kl = 0.0
         return args
 

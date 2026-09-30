@@ -1,5 +1,3 @@
-"""Euler + next-fast 更新器（对齐 legacy/train_evoocc_euler_next_fast.py）。"""
-
 from __future__ import annotations
 
 import torch
@@ -10,11 +8,6 @@ from evoocc.models.heads import CtrlProjector
 
 
 class EulerNextFastSolver(nn.Module):
-    """Euler 单步更新：func_g 仅喂 next-fast 特征 f_t，忽略 f_prev_adv。
-
-    step 签名与 HeunSolver 对齐以便在 aligner 中直接替换，但 f_prev_adv 不进入 func_g。
-    """
-
     def __init__(self, func_g: FuncG, ctrl_proj: CtrlProjector) -> None:
         super().__init__()
         self.func_g = func_g
@@ -23,7 +16,7 @@ class EulerNextFastSolver(nn.Module):
     def step(
         self,
         h_adv: torch.Tensor,
-        f_prev_adv: torch.Tensor,  # noqa: ARG002  # 保留签名一致，不使用
+        f_prev_adv: torch.Tensor,  # noqa: ARG002
         f_t: torch.Tensor,
         delta_ctrl: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:

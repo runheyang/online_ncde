@@ -1,5 +1,3 @@
-"""progressbar2 辅助：提供 it/s 速度显示的 widget 和快捷构造函数。"""
-
 from __future__ import annotations
 
 import sys
@@ -8,8 +6,6 @@ import progressbar
 
 
 class IterSpeed(progressbar.widgets.WidgetBase):
-    """显示迭代速度的 widget，类似 tqdm 的 it/s。"""
-
     def __init__(self, fmt: str = "{:.2f} it/s"):
         super().__init__()
         self.fmt = fmt
@@ -27,11 +23,7 @@ class IterSpeed(progressbar.widgets.WidgetBase):
 
 
 def make_pbar(max_value: int, prefix: str = "") -> progressbar.ProgressBar | None:
-    """创建带 it/s 显示的 ProgressBar。
-
-    非终端（重定向到文件）时返回 None，让调用者走 fallback 的间隔打印，
-    避免每步一行的垃圾日志。
-    """
+    """Returns None when stderr is not a TTY so callers fall back to interval prints."""
     if not sys.stderr.isatty():
         return None
     widgets = [

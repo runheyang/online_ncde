@@ -1,5 +1,3 @@
-"""50×50×16 learned direct window-attention aligner。"""
-
 from __future__ import annotations
 
 from typing import Optional, Tuple
@@ -13,8 +11,6 @@ from evoocc.baselines.learned_direct_fusion.aligner import (
 
 
 class LearnedDirectAttentionAligner(LearnedDirectFusionAligner):
-    """复用direct fusion数据流，仅将卷积融合替换为窗口交叉注意力。"""
-
     def __init__(
         self,
         num_classes: int,

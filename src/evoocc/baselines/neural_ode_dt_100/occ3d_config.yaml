@@ -1,5 +1,3 @@
-# 50×50×16 Neural ODE Δt baseline 专属覆盖配置。
-
 model:
   neural_ode_dt_100:
     input_grid_size: [200, 200, 16]
@@ -14,6 +12,5 @@ model:
     solver_variant: euler
 
 train:
-  # Rebuttal baseline 固定训练协议。
   epochs: 10
   gradient_accumulation_steps: 4

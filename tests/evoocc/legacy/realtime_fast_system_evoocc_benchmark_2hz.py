@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""2Hz realtime benchmark: align OPUS step gap with online-cache history interval."""
 
 from __future__ import annotations
 
@@ -347,7 +346,7 @@ def _run_single_mode_2hz(
     current_token = ""
     current_sample_failed = False
     final_dense_logits: torch.Tensor | None = None
-    _progress_count = 0  # 已完成样本数（progressbar2 需要绝对值）
+    _progress_count = 0
 
     def finalize_current_sample() -> None:
         nonlocal current_sample_idx, current_info, current_token, current_sample_failed, final_dense_logits, _progress_count
@@ -435,7 +434,6 @@ def _run_single_mode_2hz(
                 continue
 
             if step_idx == 0:
-                # step0 已经通过 offline bootstrap 执行过，这里跳过 online 版本且不计时。
                 continue
 
             if str(step_batch.get("status", "")) != "ok":
